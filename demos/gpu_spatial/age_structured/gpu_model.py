@@ -9,8 +9,8 @@ same deterministic lifecycle order as natal-core:
     → aging
     → migration
 
-Only deterministic mode is implemented here. The stochastic path is left for a
-later extension; ``stochastic=True`` is rejected for now.
+Both deterministic and stochastic paths are implemented; ``stochastic=True``
+selects the stochastic lifecycle.
 """
 
 from __future__ import annotations
@@ -18,6 +18,8 @@ from __future__ import annotations
 import numpy as np
 import torch
 import torch.nn.functional as F
+
+from natal.frontend.model.ecology import derive_equilibrium_metrics_from_draft
 
 # natal growth mode constants.
 NO_COMPETITION = 0
@@ -91,9 +93,9 @@ class SpatialAgeStructuredXPU:
         self.has_sex_chromosomes = bool(config.has_sex_chromosomes)
 
         # Reproduction / mating tensors.
-        self.eggs_per_female = float(config.eggs_per_female[()])
-        self.sex_ratio = float(config.sex_ratio[()])
-        self.sperm_displacement_rate = float(config.sperm_displacement_rate[()])
+        self.eggs_per_female = float(config.eggs_per_female)
+        self.sex_ratio = float(config.sex_ratio)
+        self.sperm_displacement_rate = float(config.sperm_displacement_rate)
         self.fixed_egg_count = bool(config.fixed_egg_count)
         self.offspring_tensor = _as_tensor(
             np.asarray(config.offspring_tensor, dtype=np.float32), device=device
@@ -116,8 +118,13 @@ class SpatialAgeStructuredXPU:
             np.asarray(config.age_based_mating_rates[1], dtype=np.float32),
             device=device,
         )
+        reproduction_rates = config.age_based_reproduction_rates
+        if reproduction_rates is None:
+            # Upstream treats an undeclared reproduction schedule as "use the
+            # female mating-rate row", matching derive_equilibrium_metrics.
+            reproduction_rates = config.age_based_mating_rates[0]
         self.reproduction_rate = _as_tensor(
-            np.asarray(config.age_based_reproduction_rates, dtype=np.float32),
+            np.asarray(reproduction_rates, dtype=np.float32),
             device=device,
         )
         self.female_fertility = _as_tensor(
@@ -176,14 +183,15 @@ class SpatialAgeStructuredXPU:
             device=device,
         )
 
-        # Competition tensors.
-        self.juvenile_growth_mode = int(config.juvenile_growth_mode[()])
-        self.expected_competition_strength = float(
-            config.expected_competition_strength[()]
-        )
-        self.expected_survival_rate = float(config.expected_survival_rate[()])
-        self.low_density_growth_rate = float(config.low_density_growth_rate[()])
-        self.carrying_capacity = float(config.carrying_capacity[()])
+        # Competition tensors.  Upstream no longer stores the equilibrium
+        # metrics on the draft; derive them from the draft's current values.
+        self.juvenile_growth_mode = int(config.juvenile_growth_mode)
+        (
+            self.expected_competition_strength,
+            self.expected_survival_rate,
+        ) = derive_equilibrium_metrics_from_draft(config)
+        self.low_density_growth_rate = float(config.low_density_growth_rate)
+        self.carrying_capacity = float(config.carrying_capacity)
         self.relative_competition_strength = _as_tensor(
             np.asarray(
                 config.age_based_relative_competition_strength, dtype=np.float32

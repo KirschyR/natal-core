@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 import natal as nt
-from natal.spatial import SquareGrid, batch_setting
+from natal.frontend.spatial import SquareGrid, batch_setting
 
 HERE = Path(__file__).resolve().parent
 OUTPUT_DIR = HERE / "outputs"

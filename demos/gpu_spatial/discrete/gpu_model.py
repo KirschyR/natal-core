@@ -88,16 +88,20 @@ class SpatialDiscreteXPU:
             device=device,
         )
         self.fecundity_f = _torch_tensor_from_numpy(
-            np.asarray(config.fecundity_f, dtype=np.float32), device=device
+            np.asarray(config.fecundity_fitness[0], dtype=np.float32),
+            device=device,
         )
         self.fecundity_m = _torch_tensor_from_numpy(
-            np.asarray(config.fecundity_m, dtype=np.float32), device=device
+            np.asarray(config.fecundity_fitness[1], dtype=np.float32),
+            device=device,
         )
         self.viability_f = _torch_tensor_from_numpy(
-            np.asarray(config.viability_f, dtype=np.float32), device=device
+            np.asarray(config.viability_fitness[0, 0, :], dtype=np.float32),
+            device=device,
         )
         self.viability_m = _torch_tensor_from_numpy(
-            np.asarray(config.viability_m, dtype=np.float32), device=device
+            np.asarray(config.viability_fitness[1, 0, :], dtype=np.float32),
+            device=device,
         )
         self.sexual_selection = _torch_tensor_from_numpy(
             np.asarray(config.sexual_selection_fitness, dtype=np.float32),
@@ -121,15 +125,24 @@ class SpatialDiscreteXPU:
         )
 
         # --- scalar demography ----------------------------------------------
-        self.eggs_per_female = float(config.eggs_per_female[()])
-        self.sex_ratio = float(config.sex_ratio[()])
-        self.female_adult_mating_rate = float(config.female_adult_mating_rate)
-        self.male_adult_mating_rate = float(config.male_adult_mating_rate)
-        self.reproduction_rate = float(config.reproduction_rate)
-        self.female_age0_survival = float(config.female_age0_survival)
-        self.male_age0_survival = float(config.male_age0_survival)
-        self.carrying_capacity = float(config.carrying_capacity[()])
-        self.juvenile_growth_mode = int(config.juvenile_growth_mode[()])
+        # Upstream replaced the flat discrete scalars with age-indexed
+        # ModelDraft arrays; discrete adults live at ``adult_ages[0]``.
+        adult_age = int(config.adult_ages[0])
+        self.eggs_per_female = float(config.eggs_per_female)
+        self.sex_ratio = float(config.sex_ratio)
+        self.female_adult_mating_rate = float(
+            config.age_based_mating_rates[0, adult_age]
+        )
+        self.male_adult_mating_rate = float(
+            config.age_based_mating_rates[1, adult_age]
+        )
+        self.reproduction_rate = float(
+            config.age_based_reproduction_rates[adult_age]
+        )
+        self.female_age0_survival = float(config.age_based_survival_rates[0, 0])
+        self.male_age0_survival = float(config.age_based_survival_rates[1, 0])
+        self.carrying_capacity = float(config.carrying_capacity)
+        self.juvenile_growth_mode = int(config.juvenile_growth_mode)
         self.has_sex_chromosomes = bool(config.has_sex_chromosomes)
 
         self.migration_rate = float(migration_rate)

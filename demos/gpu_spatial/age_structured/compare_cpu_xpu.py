@@ -21,9 +21,8 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
-
 import reference_cpu
+import torch
 from gpu_model import SpatialAgeStructuredXPU
 
 HERE = Path(__file__).resolve().parent

@@ -135,8 +135,8 @@ def main() -> None:
     print("Building CPU reference spatial model ...")
     population = build_spatial_population()
     print(
-        "  demes=%d, tick=0, total_pop=%.0f"
-        % (population.n_demes, population.aggregate_individual_count().sum())
+        f"  demes={population.n_demes}, tick=0, "
+        f"total_pop={population.aggregate_individual_count().sum():.0f}"
     )
 
     start = time.perf_counter()

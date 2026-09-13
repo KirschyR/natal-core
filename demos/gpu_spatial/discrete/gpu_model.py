@@ -25,10 +25,9 @@ dynamically reads natal config objects that Pylance cannot fully infer.
 from __future__ import annotations
 
 import numpy as np
+import reference_cpu
 import torch
 import torch.nn.functional as F
-
-import reference_cpu
 
 # natal constants used by the engine.
 FIXED_MODE = 1

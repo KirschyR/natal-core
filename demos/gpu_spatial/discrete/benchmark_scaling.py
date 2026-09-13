@@ -15,11 +15,11 @@ import argparse
 import time
 
 import numpy as np
+import reference_cpu
 import torch
+from gpu_model import SpatialDiscreteXPU
 
 import natal as nt
-import reference_cpu
-from gpu_model import SpatialDiscreteXPU
 
 GRID_SIZES: list[tuple[int, int]] = [
     (5, 5),
@@ -123,19 +123,19 @@ def time_xpu_warm(
     seed: int = 42,
 ) -> float:
     """Run once to warm XPU kernels, then time a fresh model."""
-    common = dict(
-        state=state,
-        config=cfg,
-        migration_rate=reference_cpu.MIGRATION_RATE,
-        n_ticks=n_ticks,
-        device=device,
-        stochastic=stochastic,
-        seed=seed,
-        grid_shape=(rows, cols),
-        wrap=False,
-        migration_kernel=reference_cpu.MIGRATION_KERNEL,
-        adjust_migration_on_edge=reference_cpu.MIGRATION_ADJUST_ON_EDGE,
-    )
+    common = {
+        "state": state,
+        "config": cfg,
+        "migration_rate": reference_cpu.MIGRATION_RATE,
+        "n_ticks": n_ticks,
+        "device": device,
+        "stochastic": stochastic,
+        "seed": seed,
+        "grid_shape": (rows, cols),
+        "wrap": False,
+        "migration_kernel": reference_cpu.MIGRATION_KERNEL,
+        "adjust_migration_on_edge": reference_cpu.MIGRATION_ADJUST_ON_EDGE,
+    }
     _warm = SpatialDiscreteXPU(**common)
     _warm.run_no_history()
 

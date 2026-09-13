@@ -12,11 +12,11 @@ import time
 
 import numba
 import numpy as np
+import reference_cpu
 import torch
+from gpu_model import SpatialAgeStructuredXPU
 
 import natal as nt
-import reference_cpu
-from gpu_model import SpatialAgeStructuredXPU
 
 GRID_SIZES: list[tuple[int, int]] = [
     (5, 5),
@@ -215,20 +215,20 @@ def time_xpu_warm(
     seed: int = 42,
 ) -> float:
     """Warm XPU kernels, then time a fresh model."""
-    common = dict(
-        individual_count=ind,
-        sperm_storage=sperm,
-        config=cfg,
-        migration_rate=reference_cpu.MIGRATION_RATE,
-        n_ticks=n_ticks,
-        device=device,
-        stochastic=stochastic,
-        seed=seed,
-        grid_shape=(rows, cols),
-        wrap=False,
-        migration_kernel=reference_cpu.MIGRATION_KERNEL,
-        adjust_migration_on_edge=reference_cpu.MIGRATION_ADJUST_ON_EDGE,
-    )
+    common = {
+        "individual_count": ind,
+        "sperm_storage": sperm,
+        "config": cfg,
+        "migration_rate": reference_cpu.MIGRATION_RATE,
+        "n_ticks": n_ticks,
+        "device": device,
+        "stochastic": stochastic,
+        "seed": seed,
+        "grid_shape": (rows, cols),
+        "wrap": False,
+        "migration_kernel": reference_cpu.MIGRATION_KERNEL,
+        "adjust_migration_on_edge": reference_cpu.MIGRATION_ADJUST_ON_EDGE,
+    }
     _warm = SpatialAgeStructuredXPU(**common)
     _warm.run_no_history()
 

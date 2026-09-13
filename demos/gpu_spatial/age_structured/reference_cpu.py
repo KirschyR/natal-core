@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 import natal as nt
-from natal.spatial import SquareGrid, batch_setting, build_adjacency_matrix
+from natal.spatial import SquareGrid, batch_setting
 
 HERE = Path(__file__).resolve().parent
 OUTPUT_DIR = HERE / "outputs"
@@ -293,10 +293,7 @@ def main() -> None:
     initial = np.stack(
         [deme.state.individual_count for deme in population.demes], axis=0
     )
-    print(
-        "  demes=%d, tick=0, total_pop=%.0f"
-        % (population.n_demes, initial.sum())
-    )
+    print(f"  demes={population.n_demes}, tick=0, total_pop={initial.sum():.0f}")
 
     start = time.perf_counter()
     population.run(n_steps=N_TICKS, record_every=1)

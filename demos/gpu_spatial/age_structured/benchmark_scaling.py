@@ -8,9 +8,9 @@ run times.
 from __future__ import annotations
 
 import argparse
+import os
 import time
 
-import numba
 import numpy as np
 import reference_cpu
 import torch
@@ -260,8 +260,7 @@ def main() -> None:
 
     print(f"Device: {device}, xpu_available={torch.xpu.is_available()}")
     print(
-        f"CPU threads: numba={numba.get_num_threads()}, "
-        f"torch={torch.get_num_threads()}"
+        f"CPU threads: os={os.cpu_count()}, torch={torch.get_num_threads()}"
     )
     print(f"Mode: {mode}, seed={args.seed}")
     print(f"Ticks per run: {ticks}")

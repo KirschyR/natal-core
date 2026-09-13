@@ -2,23 +2,64 @@
 
 from __future__ import annotations
 
-from typing import Any
 from collections.abc import Sequence
+from typing import Any
 
 import numpy as np
 
-from natal.population.base import BasePopulation
-from natal.genetics import Species
-from natal.spatial.population import SpatialPopulation
+from natal.contracts.materialize import SpatialMigration  # noqa: F401  # construction contract exercises materialize through the container
+from natal.frontend.model import ModelDraft
+from natal.frontend.data import DiscretePopulationState
+from natal.frontend.genetics import Species
+from natal.frontend.population.base import BasePopulation
+from natal.frontend.population.discrete_generation import (
+    DiscreteGenerationPopulation,
+)
+from natal.frontend.spatial.population import DemeSlice, SpatialPopulation
+
+
+def _reference_draft(species: Species) -> ModelDraft:
+    """Return a real built draft as the doubles' declaration surface.
+
+    The double satisfies the explicit population contract, so its
+    ``export_config`` must hand out a genuine ``ModelDraft`` (the spatial
+    contract pair materializes from it); building one real population
+    keeps the draft consistent with the species without the test
+    hand-rolling tensor shapes.
+    """
+    population = (
+        DiscreteGenerationPopulation.setup(species=species, stochastic=False)
+        .initial_state(
+            individual_count={"female": {"WT|WT": 10}, "male": {"WT|WT": 10}}
+        )
+        .survival(female_age0_survival=1.0, male_age0_survival=1.0)
+        .reproduction(eggs_per_female=2, sex_ratio=0.5)
+        .competition(carrying_capacity=100000.0, low_density_growth_rate=2.0)
+        .build()
+    )
+    return population.export_config()
 
 
 class _DummyDemePopulation(BasePopulation):
+    """Contract-satisfying lightweight deme double.
+
+    Implements the aligned population surface pieces the container and
+    the slice read at construction and in these tests; everything else
+    stays a read-only stub.
+    """
+
     def __init__(self, species: Species, name: str):
         self._species = species
         self._name = name
         self._tick = 0
         self._history = []
-        self._state = type("S", (), {"individual_count": np.zeros((2, 1, 1), dtype=np.float64)})()
+        self._config = _reference_draft(species)
+        self._state = DiscretePopulationState.create(
+            n_sexes=int(self._config.n_sexes),
+            n_ages=int(self._config.n_ages),
+            n_ztypes=int(self._config.n_ztypes),
+            n_tick=0,
+        )
 
     def clear_history(self) -> None:
         self._history.clear()
@@ -43,8 +84,20 @@ class _DummyDemePopulation(BasePopulation):
     def reset(self) -> None:
         self._tick = 0
 
-    def update(self) -> Any:  # type: ignore[no-untyped-def]
+    def update(self) -> Any:  # type: ignore[no-untyped-def,any-return]  # duck-typed double: mirrors the untyped base-class hook; never called on this stub
         raise NotImplementedError
+
+    def export_config(self) -> ModelDraft:
+        """Aligned surface: hand out the double's declaration draft."""
+        return self._config
+
+    def export_state(self) -> np.ndarray:
+        """Aligned surface: flatten the stub state (tick + counts)."""
+        return self._state.flatten_all()
+
+    def _snapshot_state(self):
+        """Snapshot hook: return the stub container itself (read-only stub)."""
+        return self._state
 
     @property
     def species(self) -> Species:
@@ -74,10 +127,16 @@ def test_spatial_population_demes_must_be_base_population_instances():
     sp = SpatialPopulation([deme0, deme1], migration_rate=0.25)
 
     assert sp.n_demes == 2
-    assert isinstance(sp.deme(0), BasePopulation)
-    assert isinstance(sp.deme(1), BasePopulation)
+    # Stage 3: deme() hands out compat slices delegating to the demes.
+    assert isinstance(sp.deme(0), DemeSlice)
+    assert isinstance(sp.deme(1), DemeSlice)
+    # Slices delegate reads to the wrapped demes.
+    assert sp.deme(0).name == deme0.name
+    assert sp.deme(1).name == deme1.name
     assert sp.species is species
-    assert sp.adjacency.shape == (2, 2)
+    # The default identity adjacency folds into a CSR row per deme.
+    assert sp.blueprint.n_demes == 2
+    assert sp.migration_csr.indptr.shape == (3,)
 
 
 def test_spatial_population_rejects_non_base_population_deme():
@@ -109,7 +168,10 @@ def test_spatial_population_accepts_csr_tuple_adjacency():
     )
 
     expected = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.float64)
-    assert np.allclose(sp.adjacency, expected)
+    # The CSR tuple folds into the migration CSR: row 0 -> deme 1, row 1 -> deme 0.
+    assert np.array_equal(sp.migration_csr.indptr, np.array([0, 1, 2]))
+    assert np.array_equal(sp.migration_csr.dest_idx, np.array([1, 0]))
+    assert np.allclose(sp.migration_csr.weights, [1.0, 1.0])
 
 
 def test_spatial_population_hybrid_strategy_interface_and_kernel_bank():
@@ -135,8 +197,11 @@ def test_spatial_population_hybrid_strategy_interface_and_kernel_bank():
         migration_rate=0.1,
     )
 
-    assert sp.migration_strategy == "hybrid"
-    assert sp.kernel_bank is not None
-    assert len(sp.kernel_bank) == 1
-    assert sp.deme_kernel_ids is not None
-    assert np.array_equal(sp.deme_kernel_ids, np.array([0, 0], dtype=np.int64))
+    # The hybrid strategy is a build-time materialization choice only: it
+    # resolves to kernel mode.  Without a topology the kernel-bank routing
+    # has no coordinate space, so the fold emits no outbound entries —
+    # the historical runtime behavior of bank routing with zero topology
+    # rows.
+    assert sp.blueprint.n_demes == 2
+    assert int(sp.migration_csr.indptr[-1]) == 0
+    assert sp.migration_csr.dest_idx.size == 0

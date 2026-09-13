@@ -41,7 +41,7 @@ def _minimal_pop(sp, *, pop_name: str = "AgePop"):
             male_age_based_survival=[1.0, 0.9, 0.8],
         )
         .competition(
-            juvenile_growth_mode="concave",
+            juvenile_growth_mode="beverton_holt",
             old_juvenile_carrying_capacity=500,
             expected_num_new_adult_females=450,
         )
@@ -60,7 +60,7 @@ class TestBuildAndSetup:
     def test_initial_tick_is_zero(self):
         sp = _make_species("Age_tick0")
         pop = _minimal_pop(sp, pop_name="Age_tick0_pop")
-        assert pop._tick == 0
+        assert pop.tick == 0
         # individual_count shape: (n_sexes, n_ages, n_genotypes) = (2, 4, 3)
         assert pop.state.individual_count.shape == (2, 4, 3)
 
@@ -74,9 +74,9 @@ class TestBuildAndSetup:
     def test_registry_has_wt_wt(self):
         sp = _make_species("Age_reg")
         pop = _minimal_pop(sp, pop_name="Age_reg_pop")
-        genotype_strs = [str(g) for g in pop._registry.index_to_genotype]
+        genotype_strs = [str(g) for g in pop.registry.index_to_genotype]
         assert "WT|WT" in genotype_strs
-        assert len(pop._registry.index_to_genotype) == 3
+        assert len(pop.registry.index_to_genotype) == 3
 
 
 class TestRunTicks:
@@ -84,7 +84,7 @@ class TestRunTicks:
         sp = _make_species("Age_run")
         pop = _minimal_pop(sp, pop_name="Age_run_pop")
         pop.run(5)
-        assert pop._tick == 5
+        assert pop.tick == 5
         assert pop.state.individual_count.sum() > 0
 
     def test_run_zero_ticks(self):
@@ -92,7 +92,7 @@ class TestRunTicks:
         pop = _minimal_pop(sp, pop_name="Age_run0_pop")
         initial = pop.state.individual_count.copy()
         pop.run(0)
-        assert pop._tick == 0
+        assert pop.tick == 0
         np.testing.assert_array_equal(pop.state.individual_count, initial)
 
     def test_run_single_tick(self):
@@ -100,7 +100,7 @@ class TestRunTicks:
         pop = _minimal_pop(sp, pop_name="Age_run1_pop")
         initial_total = pop.state.individual_count.sum()
         pop.run(1)
-        assert pop._tick == 1
+        assert pop.tick == 1
         # Total count changes after one tick (reproduction + survival + aging)
         assert pop.state.individual_count.sum() != initial_total
 

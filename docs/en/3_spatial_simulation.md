@@ -1,6 +1,6 @@
 # Spatial Simulation Guide
 
-This chapter introduces the practical usage of `SpatialPopulation`: using the `SpatialConfigurator` to quickly build multi-deme populations, configure topology and migration kernels, and control inter-deme flow.
+This chapter introduces the practical usage of `SpatialPopulation`: using the `SpatialPopulationBuilder` to quickly build multi-deme populations, configure topology and migration kernels, and control inter-deme flow.
 
 After reading this, you will be able to write code like this:
 
@@ -16,15 +16,15 @@ spatial = (
 )
 ```
 
-> **Tip**: `SpatialConfigurator` is the preferred construction method for homogeneous/heterogeneous spatial populations. The construction time for 2601 homogeneous demes has been reduced from ~2.6s to ~16ms. See [SpatialConfigurator Documentation](spatial_builder.md).
+> **Tip**: `SpatialPopulationBuilder` is the preferred construction method for homogeneous/heterogeneous spatial populations (build one template, clone the rest). See [SpatialPopulationBuilder Documentation](spatial_population_builder.md).
 
 ## Two Construction Paths
 
-### Recommended: SpatialConfigurator (Chainable API)
+### Recommended: SpatialPopulationBuilder (Chainable API)
 
 ```python
 from natal import Species, HexGrid, SpatialPopulation
-from natal.spatial import batch_setting
+from natal.frontend.spatial import batch_setting
 
 species = Species.from_dict(name="demo", structure={"chr1": {"loc": ["A", "B"]}})
 
@@ -56,8 +56,8 @@ pop_het = (
 If you already have an independently constructed list of demes, you can pass them directly to the `SpatialPopulation` constructor. All demes must share the same Species object:
 
 ```python
-from natal.spatial import SpatialPopulation
-from natal.spatial import SquareGrid
+from natal.frontend.spatial import SpatialPopulation
+from natal.frontend.spatial import SquareGrid
 
 shared_config = demes[0].export_config()
 for deme in demes[1:]:
@@ -94,7 +94,7 @@ The most important rules:
 
 ## Chainable API
 
-The `SpatialConfigurator` chainable call flow is consistent with the panmictic builder. Below are the methods listed in recommended order. Methods marked with `->` are spatial-specific, and parameters marked with `[B]` accept `batch_setting` (cross-deme heterogeneous configuration).
+The `SpatialPopulationBuilder` chainable call flow is consistent with the panmictic builder. Below are the methods listed in recommended order. Methods marked with `->` are spatial-specific, and parameters marked with `[B]` accept `batch_setting` (cross-deme heterogeneous configuration).
 
 ```python
 pop = (
@@ -168,12 +168,12 @@ The following parameters do **not** accept `batch_setting`:
 
 ## batch_setting Heterogeneous Configuration
 
-`batch_setting` is the core mechanism of `SpatialConfigurator`, allowing different demes to specify different parameter values within the same chainable call. Internally, it automatically optimizes through config equivalence grouping -- demes with the same parameters share compiled artifacts, only the state arrays are independent.
+`batch_setting` is the core mechanism of `SpatialPopulationBuilder`, allowing different demes to specify different parameter values within the same chainable call. Internally, it automatically optimizes through config equivalence grouping -- demes with the same parameters share compiled artifacts, only the state arrays are independent.
 
 ### Four Input Forms
 
 ```python
-from natal.spatial import batch_setting
+from natal.frontend.spatial import batch_setting
 import numpy as np
 
 # 1. Scalar list (one-to-one correspondence with n_demes demes)
@@ -214,7 +214,7 @@ pop = (
 Specify different initial genotype distributions for each deme, commonly used in spatial drive release scenarios:
 
 ```python
-from natal.spatial import batch_setting
+from natal.frontend.spatial import batch_setting
 
 # Default: all demes have only WT
 n_demes = 100
@@ -233,7 +233,7 @@ pop = (
     .initial_state(individual_count=batch_setting(states))
     .reproduction(eggs_per_female=50)
     .competition(carrying_capacity=1000, low_density_growth_rate=6,
-                 juvenile_growth_mode="concave")
+                 juvenile_growth_mode="beverton_holt")
     .presets(HomingDrive(name="Drive", drive_allele="Dr", target_allele="WT",
                          resistance_allele="R2", functional_resistance_allele="R1",
                          drive_conversion_rate=0.95))
@@ -409,16 +409,16 @@ pop.run(100)
 pop.run(500, record_every=5)
 ```
 
-`SpatialPopulation.run()`'s `record_every` parameter controls the history sampling interval within the Numba-compiled kernel. Setting it to 0 disables history recording.
+`SpatialPopulation.run()`'s `record_every` parameter controls the history sampling interval within the execution kernel. Setting it to 0 disables history recording.
 
 ### Accessing Aggregate State
 
 ```python
 # Cross-deme aggregation
-pop.total_population_size   # Total individual count
-pop.total_females           # Total female count
-pop.total_males             # Total male count
-pop.sex_ratio               # Sex ratio (female/male)
+pop.get_total_count()       # Total individual count
+pop.get_female_count()      # Total female count
+pop.get_male_count()        # Total male count
+pop.get_female_count() / pop.get_male_count()   # Sex ratio (female/male)
 pop.tick                    # Current time step
 
 # Allele frequencies (full spatial aggregation)
@@ -433,32 +433,47 @@ aggregate = pop.aggregate_individual_count()
 ```python
 # Get deme by index
 deme_0 = pop.deme(0)
-print(deme_0.total_population_size)
-print(deme_0.compute_allele_frequencies())
+print(deme_0.get_total_count())
+print(pop.compute_allele_frequencies())   # allele frequencies are a container query
 
 # Iterate over all demes
 for i in range(pop.n_demes):
     d = pop.deme(i)
-    print(f"deme {i}: {d.total_population_size}")
+    print(f"deme {i}: {d.get_total_count()}")
 ```
 
-Each deme is an `AgeStructuredPopulation` or
-`DiscreteGenerationPopulation`. The spatial container itself provides the
-canonical `observation`, `observe()`, and typed `history` interfaces.
+Each deme is accessed through a `DemeSlice` view whose surface is aligned
+with `Population`: reads (`name`, `species`, `config`, `state`, `params`,
+`params_log`, `index_registry`, `presets`, `definition`), queries
+(`get_total_count`, `get_female_count`, `get_male_count`, `export_config`,
+`export_state`), `update()` (committing through the parent spatial
+session), plus the deme-specific `index`, `write_ecology`, and
+`write_genetics`. Unlisted attributes raise `AttributeError`. The spatial
+container itself provides the canonical `observation`, `observe()`, and
+typed `history` interfaces.
 
 ### Reset and Control
 
 ```python
-# Reset all demes to initial state
+# Reset all demes to their initial state (clears finished marks)
 pop.reset()
 
-# Check if simulation is finished
-if pop.is_finished:
-    print("Simulation has terminated")
-
-# Manually terminate
-pop.finish_simulation()
+# Finish the shared run without advancing its clock
+pop.run(0, finish=True)
 ```
+
+Neither the container nor the aligned deme surface exposes
+`is_finished` / `finish_simulation()`: finished state is owned by the
+shared native session, and once any deme has finished, `run()` /
+`run_tick()` raise `RuntimeError`; when a hook requests a stop, the
+session as a whole enters the Stopped state.
+
+Managed deme handles expose only the aligned surface above: lifecycle and
+container controls such as ``run``, ``reset``, ``restore_checkpoint``,
+``finish``, ``clone``, ``trigger_event``, ``history``, and ``observe`` do
+not exist on them (access raises ``AttributeError``). These operations must
+use the spatial container; initial states belong to builder declarations,
+and a mid-run state change uses the selected deme's ``TickContext.state``.
 
 ### Data Output
 
@@ -492,10 +507,10 @@ For detailed usage, see [Extracting Population Simulation Data](2_data_output.md
 
 The internal execution order of each `run_tick()`:
 
-1. Check whether each deme has `is_finished`.
-2. Concatenate all demes' state into a unified array, build a config bank.
-3. Run the Numba-compiled spatial lifecycle wrapper: `prange` parallel execution of each deme's lifecycle -> unified migration.
-4. Write the updated state back to each deme.
+1. Check the shared session's execution state (a finished run is rejected).
+2. The session owns the stacked state and the config bank; the run stays inside one engine session.
+3. Spatial lifecycle: each deme's lifecycle executes at the deme granularity -> unified migration.
+4. The updated state remains session-owned; Python reads derive it on demand.
 
 If a deme triggers a termination condition first (e.g., population extinction), the entire `SpatialPopulation` stops advancing. For detailed execution flow, see [Spatial Lifecycle Wrapper](spatial_lifecycle_wrapper.md).
 
@@ -593,7 +608,7 @@ where $\sum_{i,j} K_{i,j}$ is the sum of all kernel weights (denoted `kernel_tot
 NATAL provides the `build_gaussian_kernel()` factory function, automatically using the correct distance metric based on topology type:
 
 ```python
-from natal.spatial import build_gaussian_kernel, HexGrid, SquareGrid
+from natal.frontend.spatial import build_gaussian_kernel, HexGrid, SquareGrid
 
 # Hexagonal grid Gaussian kernel -- automatically uses cosine law distance formula
 hex_kernel = build_gaussian_kernel(HexGrid, size=11, sigma=1.5)
@@ -724,7 +739,7 @@ pop.run(10)
 
 ```python
 from natal import Species, SpatialPopulation, HexGrid
-from natal.spatial import build_gaussian_kernel
+from natal.frontend.spatial import build_gaussian_kernel
 
 species = Species.from_dict(name="hex", structure={"chr1": {"loc": ["WT", "Dr"]}})
 
@@ -736,7 +751,7 @@ pop = (
     .setup(name="hex_demo", stochastic=True, continuous_sampling=True)
     .initial_state(individual_count={"female": {"WT|WT": 500}, "male": {"WT|WT": 500}})
     .reproduction(eggs_per_female=50)
-    .competition(carrying_capacity=1000, low_density_growth_rate=6, juvenile_growth_mode="concave")
+    .competition(carrying_capacity=1000, low_density_growth_rate=6, juvenile_growth_mode="beverton_holt")
     .migration(kernel=kernel, migration_rate=0.5)
     .build()
 )
@@ -746,12 +761,20 @@ pop.run(10)
 
 ## WebUI Debugging
 
-Spatial models can be directly connected to `natal.ui.launch(...)`.
+Spatial models can be directly connected to `natal.frontend.ui.launch(...)`.
 
 ```python
-from natal.ui import launch
+from natal.frontend.ui import launch
 
 launch(spatial, port=8080, title="Spatial Debug Dashboard")
+```
+
+The Vue dashboard is also available (hexagonal landscape map, click-to-inspect demes, migration panel, Debug tab):
+
+```python
+from natal import launch_vue
+
+launch_vue(spatial, port=8000, title="Spatial Debug Dashboard")
 ```
 
 ## Common Errors and Troubleshooting
@@ -791,7 +814,7 @@ The practical usage order of SpatialPopulation can be remembered in four steps:
 
 ## Related Chapters
 
-- [SpatialConfigurator: Batch Construction](spatial_builder.md)
+- [SpatialPopulationBuilder: Batch Construction of Spatial Populations](spatial_population_builder.md)
 - [Spatial Lifecycle Wrapper](spatial_lifecycle_wrapper.md)
 - [Migration Kernel Implementation](migration_kernel_impl.md)
 - [the Simulation Engine Deep Dive](4_simulation_engine.md)

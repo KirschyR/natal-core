@@ -1,5 +1,5 @@
 import natal as nt
-from natal.ui import launch
+from natal.frontend.ui import launch
 
 # 1. Define the genetics architecture of a species
 sp = nt.Species.from_dict(
@@ -53,8 +53,11 @@ pop = (nt.DiscreteGenerationPopulation
     .competition(
         low_density_growth_rate=6.0,
         carrying_capacity=100000,
-        juvenile_growth_mode="concave"
+        juvenile_growth_mode="beverton_holt"
     )
+    # The decorated function must be passed explicitly: @nt.hook only tags
+    # the callable, it does not register it with any population.
+    .hooks(release_drive_carriers)
     .presets(drive).fitness(fecundity={"R2::!Dr": 1.0, "R2|R2": {"female": 0.0}}).build())
 
 # 5. Launch interactive WebUI and run simulation

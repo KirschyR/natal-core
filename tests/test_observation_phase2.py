@@ -12,12 +12,16 @@ mathematical invariant.  Covers:
   - Observation.apply() lazy rebuild (mask=None → auto-rebuild)
   - Observation.project(): correct axes, tick preservation
   - Backward compatibility: build_filter, specs, legacy mask
+  - Negative contract: the removed panmictic row-encoder module stays gone
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib
+import sys
 from dataclasses import FrozenInstanceError
+from pathlib import Path
 from types import MappingProxyType
 from typing import Dict
 
@@ -26,15 +30,15 @@ import pytest
 from numpy.typing import NDArray
 
 import natal as nt
-from natal.output.observation import (
+from natal.frontend.output.observation import (
     Observation,
     ObservationFilter,
     ObservationResult,
     apply_rule,
     build_identity_observation,
 )
-from natal.patterns import IndividualSelector
-from natal.registry.index import IndexRegistry
+from natal.frontend.patterns import IndividualSelector
+from natal.frontend.registry.index import IndexRegistry
 
 # ── Shared fixtures ──────────────────────────────────────────────────────────
 
@@ -441,7 +445,7 @@ class TestBuildFromSelectors:
     def test_selector_mask_equals_dict_mask_wt(
         self, phase2_registry: IndexRegistry
     ) -> None:
-        """Selector-based mask ≡ equivalent dict-based mask for 'WT|WT'."""
+        """Selector-based mask ≡ dict spelling routed through the boundary."""
         compiler = ObservationFilter(phase2_registry)
         n_sexes, n_ages, n_ztypes = 2, 2, 3
 
@@ -454,14 +458,16 @@ class TestBuildFromSelectors:
             collapse_age=False,
         )
 
-        # Via legacy specs
-        mask_legacy = compiler.build_mask_from_specs(
+        # Via the legacy dict spelling (normalized to selectors at the
+        # build_filter boundary, mask rebuilt for the same dimensions)
+        obs_legacy = compiler.build_filter(
+            groups={"g0": {"genotype": ["WT|WT"]}},
             n_sexes=n_sexes,
             n_ages=n_ages,
             n_ztypes=n_ztypes,
-            specs=(("g0", {"genotype": ["WT|WT"]}),),
             collapse_age=False,
         )
+        mask_legacy = obs_legacy.build_mask(n_sexes, n_ages, n_ztypes)
 
         # Invariant: masks are element-for-element identical
         np.testing.assert_array_equal(mask_sel, mask_legacy)
@@ -472,7 +478,7 @@ class TestBuildFromSelectors:
     def test_selector_mask_equals_dict_mask_star_drive(
         self, phase2_registry: IndexRegistry
     ) -> None:
-        """Selector '*|Dr' ≡ dict {'genotype': ['*|Dr']}."""
+        """Selector '*|Dr' ≡ dict {'genotype': ['*|Dr']} via the boundary."""
         compiler = ObservationFilter(phase2_registry)
         n_sexes, n_ages, n_ztypes = 2, 2, 3
 
@@ -484,13 +490,14 @@ class TestBuildFromSelectors:
             collapse_age=False,
         )
 
-        mask_legacy = compiler.build_mask_from_specs(
+        obs_legacy = compiler.build_filter(
+            groups={"dr": {"genotype": ["*|Dr"]}},
             n_sexes=n_sexes,
             n_ages=n_ages,
             n_ztypes=n_ztypes,
-            specs=(("dr", {"genotype": ["*|Dr"]}),),
             collapse_age=False,
         )
+        mask_legacy = obs_legacy.build_mask(n_sexes, n_ages, n_ztypes)
 
         np.testing.assert_array_equal(mask_sel, mask_legacy)
 
@@ -825,6 +832,43 @@ class TestApplyLegacy:
         # Invariant: total sum preserved
         assert result.sum() == ind_count_2d.sum()
 
+    def test_2d_input_dense_mask_exact_values(
+        self, phase2_registry: IndexRegistry
+    ) -> None:
+        """2-D input through a genotype-selecting lazy mask gives exact per-sex sums.
+
+        This is the formal-path contract for non-age-structured counts
+        (discrete-generation populations): each group's value is the sum of
+        the selected ZType columns, per sex, with no age axis involved.
+        """
+        labels = _p2_spec_labels(phase2_registry)
+        name_to_idx = {name: i for i, name in labels.items()}
+        compiler = ObservationFilter(phase2_registry)
+        obs = compiler.build_filter(
+            groups={
+                "has_dr": {"genotype": ["Dr|Dr", "WT|Dr"]},
+                "wt_only": {"genotype": ["WT|WT"]},
+            },
+            collapse_age=False,
+        )
+        assert obs.mask is None  # lazy rebuild on first apply
+
+        ind_count = _make_ind_count_2d()
+        result = obs.apply(ind_count)
+
+        assert result.shape == (2, 2)
+        dr_cols = [name_to_idx["Dr|Dr"], name_to_idx["WT|Dr"]]
+        wt_col = name_to_idx["WT|WT"]
+        expected = np.stack(
+            [
+                ind_count[:, dr_cols].sum(axis=1),
+                ind_count[:, wt_col],
+            ]
+        )
+        np.testing.assert_allclose(result, expected)
+        # Conservation: disjoint groups jointly cover every individual.
+        np.testing.assert_allclose(result.sum(axis=0), ind_count.sum(axis=1))
+
     def test_non_identity_without_registry_raises_on_lazy(
         self, phase2_registry: IndexRegistry
     ) -> None:
@@ -1004,10 +1048,10 @@ class TestBackwardCompatibility:
         assert obs.mask is not None
         assert obs.mask.shape == (1, 2, 2, 3)
 
-    def test_specs_field_accessible(
+    def test_build_filter_stores_unified_selectors(
         self, phase2_registry: IndexRegistry
     ) -> None:
-        """Observation.specs is accessible for backward compat."""
+        """build_filter stores the unified IndividualSelector representation."""
         compiler = ObservationFilter(phase2_registry)
         obs = compiler.build_filter(
             groups={"g0": {"genotype": ["WT|WT"]}},
@@ -1016,8 +1060,10 @@ class TestBackwardCompatibility:
             n_ztypes=3,
             collapse_age=False,
         )
-        # specs should be populated by build_filter (legacy path)
-        assert obs.specs is not None
+        # The legacy dict spelling is normalized to selectors at the boundary.
+        assert obs._selectors is not None  # pyright: ignore[reportPrivateUsage]  # unified representation pinned against regression
+        assert len(obs._selectors) == 1  # pyright: ignore[reportPrivateUsage]
+        assert obs._selectors[0].n_atoms == 1  # pyright: ignore[reportPrivateUsage]
 
     def test_legacy_mask_applied_correctly(
         self, phase2_registry: IndexRegistry
@@ -1197,10 +1243,15 @@ class TestBackwardCompatibility:
         assert obs.n_groups == 2
         assert obs.mask.shape == (2, 2, 2, 3)
 
-    def test_selectors_stored_in_backward_compat(
+    def test_legacy_specs_storage_stays_removed(
         self, phase2_registry: IndexRegistry
     ) -> None:
-        """_selectors field is None for legacy (build_filter) observations."""
+        """The duplicated legacy ``specs`` storage is gone after unification.
+
+        Legacy dict spellings normalize to ``IndividualSelector`` values at
+        the ``build_filter`` boundary; the parallel spec storage that the
+        pre-unification compiler required no longer exists.
+        """
         compiler = ObservationFilter(phase2_registry)
         obs = compiler.build_filter(
             groups={"g0": {"genotype": ["WT|WT"]}},
@@ -1208,8 +1259,8 @@ class TestBackwardCompatibility:
             n_ages=2,
             n_ztypes=3,
         )
-        # Legacy path does not populate _selectors
-        assert obs._selectors is None
+        assert not hasattr(obs, "specs")
+        assert obs._selectors is not None  # pyright: ignore[reportPrivateUsage]  # unified representation storage
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1431,7 +1482,7 @@ def phase2_registry_multi_slab() -> IndexRegistry:
     """Registry with both 'default' and 'infected' slab labels."""
     reg = IndexRegistry()
     # Register with default slab
-    from natal.genetics import Species as _Species
+    from natal.frontend.genetics import Species as _Species
     sp = _Species.from_dict(
         name="MultiSlabSpecies",
         structure={"chr1": {"loc1": ["WT", "Dr"]}},
@@ -1648,3 +1699,43 @@ class TestBuildMaskIdentity:
         # Identity: one ztype per group → each group has exactly 1 ztype col
         for g in range(3):
             assert mask[g].sum() == pytest.approx(float(2 * 2 * 1))
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# 11. Negative contract: removed panmictic row encoder
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRemovedRowEncoder:
+    """Must-not-exist contract for the deleted ``output/record.py`` module.
+
+    ``build_observation_row_panmictic`` had no production callers, so the
+    module and its sole function were removed.  These tests pin that the
+    deletion is complete: no import path, no namespace re-export, and no
+    stale source file can resurrect it.
+    """
+
+    def test_removed_module_not_importable(self) -> None:
+        """importlib cannot import the deleted module."""
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module("natal.frontend.output.record")
+
+    def test_removed_function_import_raises(self) -> None:
+        """The syntax-form import of the deleted function fails."""
+        with pytest.raises(ModuleNotFoundError):
+            from natal.frontend.output.record import build_observation_row_panmictic
+
+    def test_removed_module_not_in_output_namespace(self) -> None:
+        """The output package neither re-exports the name nor the module."""
+        output_module = importlib.import_module("natal.frontend.output")
+        assert not hasattr(output_module, "build_observation_row_panmictic")
+        assert "build_observation_row_panmictic" not in output_module.__all__
+        assert "record" not in dir(output_module)
+        assert "natal.frontend.output.record" not in sys.modules
+
+    def test_removed_module_not_on_disk(self) -> None:
+        """No ``record.py`` source file remains in the output package."""
+        pkg_dir = Path(
+            importlib.import_module("natal.frontend.output").__file__ or "."
+        ).resolve().parent
+        assert not (pkg_dir / "record.py").exists()

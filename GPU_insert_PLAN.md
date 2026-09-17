@@ -856,7 +856,7 @@ python scripts/phase0_baseline.py --check
 | 步骤 | 内容 | 状态 |
 |---|---|---|
 | **P0-a** | **零依赖**环境探针：`nvidia-smi` + toolkit 目录扫描 | ✅ **已完成**（分支 `feat/gpu-merge-test`） |
-| **P0-b** | 接入 `cudarc`，跑绑定级断言（动态加载 + NVRTC 实编译） | ⬜ 待做（需联网或直接在服务器上） |
+| **P0-b** | 接入 `cudarc`，跑绑定级断言（动态加载 + NVRTC 实编译） | ✅ **已完成** |
 
 **P0-a 交付物**：
 
@@ -864,7 +864,7 @@ python scripts/phase0_baseline.py --check
 |---|---|---|
 | `rust/src/gpu/mod.rs` | 17 | feature-gated 模块声明 + 分阶段说明 |
 | `rust/src/gpu/probe.rs` | 375 | `CudaProbe::scan()` / `is_usable()` / `report()`，`GpuDevice::memory_free_mib()` |
-| `rust/tests/unit/gpu/probe.rs` | 104 | 7 个测试，无 GPU 时优雅跳过 |
+| `rust/tests/unit/gpu/probe.rs` | 104 | 7 个测试，硬件门禁默认开启，`NATAL_GPU_REQUIRE=0` 可关闭 |
 | `rust/Cargo.toml` | +6 | `gpu = []` feature（**暂无依赖**） |
 | `rust/src/lib.rs` | +2 | `#[cfg(feature = "gpu")] pub mod gpu;` |
 
@@ -888,12 +888,16 @@ python scripts/phase0_baseline.py --check
 **运行方式**：
 
 ```bash
-# 本机（无 GPU）：报告环境缺失，不失败
-cargo test --features gpu scan_reports_without_panicking -- --nocapture
+# 默认行为（本项目主要运行在 GPU 服务器上）：硬件断言全部执行，
+# 缺卡 / compute capability 不符 / NVRTC 不可用 都是硬失败。
+cargo test --features gpu
 
-# GPU 服务器：把缺失/错误硬件升级为硬失败
-NATAL_GPU_REQUIRE=1 cargo test --features gpu
+# 无 GPU 的主机：显式关闭硬件门禁，否则 GPU 测试会失败。
+NATAL_GPU_REQUIRE=0 cargo test --features gpu
 ```
+
+> `NATAL_GPU_REQUIRE` 未设置时**等同 `1`**：默认要求硬件，只有显式写 `0` 才跳过。
+> 这样服务器上不会因为忘记 export 而出现“静默跳过”的假绿。
 
 **⚠️ 若 NVRTC 不可用**（容器内无 `libnvrtc.so`）：改用 AOT 路线（构建期 `nvcc` 生成 cubin 嵌入），需重新评估 `maturin` 打包流程 —— 这是唯一可能推翻 D1 的情形。
 

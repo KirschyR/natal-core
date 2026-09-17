@@ -13,7 +13,9 @@
 //! compile-and-run). P1 adds the device skeleton: [`context`] owns the
 //! context and stream, [`buffers`] owns device allocations, and [`layout`]
 //! performs the `(B, d0, …, dk) ↔ (d0, …, dk, B)` transpose the kernels need.
-//! The tick kernels and the executor arrive in P2+.
+//! P2 adds [`kernels`] (NVRTC sources + launchers) and [`executor`], which
+//! owns the uploaded state, enforces the §D5 memory budget, and runs the aging
+//! stage; the remaining deterministic and sampling kernels follow in P3/P4.
 
 /// RAII device allocations.
 pub mod buffers;
@@ -24,6 +26,12 @@ pub mod context;
 /// `cudarc`-backed binding probe: dynamic driver loading, device queries, and
 /// an NVRTC-compiled kernel that actually runs (P0-b).
 pub mod cuda;
+
+/// Device executor: uploaded state, kernel launches, and downloads.
+pub mod executor;
+
+/// NVRTC-compiled kernel sources and typed launchers.
+pub mod kernels;
 
 /// Batch-axis layout transpose between CPU and device conventions.
 pub mod layout;

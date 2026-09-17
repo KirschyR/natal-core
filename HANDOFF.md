@@ -126,7 +126,7 @@ rust/                        ← ④ 原生引擎，单一 crate → 扩展模�
 | `rust/src/lib.rs` | `#[cfg(feature = "gpu")] pub mod gpu;` |
 | `rust/src/gpu/mod.rs` | feature-gated 模块声明 |
 | `rust/src/gpu/probe.rs` | `CudaProbe::scan()` / `is_usable()` / `report()`；`GpuDevice::memory_free_mib()` |
-| `rust/tests/unit/gpu/probe.rs` | 7 个测试，无 GPU 时优雅跳过 |
+| `rust/tests/unit/gpu/probe.rs` | 7 个测试，硬件门禁默认开启 |
 
 ---
 
@@ -214,11 +214,10 @@ fn cuda_context_is_send() {
 #### 步骤 3：在服务器上跑
 
 ```bash
-export NATAL_GPU_REQUIRE=1
 cargo test --features gpu -- --nocapture
 ```
 
-`NATAL_GPU_REQUIRE=1` 是 P0-a 留下的开关：它把"硬件缺失/不符"从**跳过**升级为**硬失败**。本机（无 GPU）不设它时会优雅跳过。
+硬件断言现在**默认开启**：服务器上不需要任何环境变量，硬件缺失 / compute capability 不符 / NVRTC 不可用都会硬失败。无 GPU 的主机用 `NATAL_GPU_REQUIRE=0` 显式跳过（**默认等同 `1`**）。
 
 ### 3.3 验收
 
@@ -464,7 +463,7 @@ demos/gpu_spatial/*/compare_cpu_xpu.py              对照实验框架
 | 症状 | 先查 |
 |---|---|
 | `cargo build` 失败，说找不到 cudarc | 网络 / crates.io 索引；§3.2 步骤 1 的警告 |
-| `cargo test --features gpu` 里 GPU 测试被跳过 | 忘了 `export NATAL_GPU_REQUIRE=1` |
+| `cargo test --features gpu` 里 GPU 测试被跳过 | 是否设了 `NATAL_GPU_REQUIRE=0`（默认为强制） |
 | NVRTC 相关失败 | 容器内是否有 `libnvrtc.so`；**这是唯一可能推翻 D1 的情形**，若确认不可用要立刻上报 |
 | `allow_threads` 编译不过 | 闭包捕获了 `Py<...>` 或非 `Send` 类型；见 §5.3 |
 | 测试数量不对 | 默认 feature 下应始终是 **67** 个 |

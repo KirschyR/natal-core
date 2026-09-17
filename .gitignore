@@ -6,6 +6,14 @@ dist/
 wheels/
 *.egg-info
 
+# Native extension produced by maturin (`maturin develop` / editable install)
+src/natal/_engine_rs*.so
+src/natal/_engine_rs*.pyd
+src/natal/_engine_rs*.dylib
+
+# Cargo build directory
+rust/target/
+
 # Virtual environments
 .venv
 

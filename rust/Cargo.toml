@@ -24,6 +24,12 @@ rayon = "1.10"
 # The extension-module feature links against the Python interpreter, which
 # breaks plain `cargo test` linking; maturin builds enable it (pyproject).
 extension-module = ["pyo3/extension-module"]
+# GPU bypass (see GPU_insert_PLAN.md). Off by default and, at P0, carrying no
+# dependency at all: the probe discovers the CUDA environment by shelling out
+# to `nvidia-smi` and scanning the toolkit directories, so a default build and
+# the offline dev loop stay unaffected. The `cudarc` dependency arrives in
+# P0-b alongside the actual device backend.
+gpu = []
 
 [profile.release]
 codegen-units = 1

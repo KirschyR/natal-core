@@ -6,6 +6,8 @@
 //! interpreted directly in the kernels.
 
 mod generated;
+#[cfg(feature = "gpu")]
+pub mod gpu;
 mod hooks;
 pub mod kernels;
 mod model;

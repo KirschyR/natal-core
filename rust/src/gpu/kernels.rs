@@ -46,6 +46,9 @@ extern "C" __global__ void age_shift(
 /// Largest `n_ages` the density kernel supports (fixed local arrays).
 const MAX_AGES: usize = 64;
 
+/// Largest `n_ztypes` the reproduction kernel supports (fixed local arrays).
+const MAX_Z: usize = 32;
+
 /// CUDA C for the density-regulation scaling kernel.
 ///
 /// One thread per batch element evaluates the equilibrium metrics and the
@@ -277,6 +280,201 @@ extern "C" __global__ void survival_scale_sperm(
 }
 "#;
 
+/// CUDA C for the deterministic reproduction stage.
+///
+/// One thread per batch element reproduces `kernels::age_structured::reproduction`
+/// statement by statement for `stochastic == false`: effective adult males,
+/// the female × male mating matrix, sperm displacement, deterministic
+/// fertilization from the offspring tensor, and zygote-viability scaling of
+/// the newborn age class. The batch element owns its own sperm slice, so the
+/// one-thread-per-batch decomposition has no cross-element races.
+const REPRODUCTION_SOURCE: &str = r#"
+#define MAX_Z 32
+
+extern "C" __global__ void reproduction(
+    float* ind,
+    float* sperm,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    int new_adult_age,
+    int has_sex_chromosomes,
+    const float* mating_rates,
+    const float* sperm_displacement_rate,
+    const float* reproduction_rates,
+    const float* fertility,
+    const float* eggs_per_female,
+    const float* sex_ratio,
+    const int* female_only,
+    const int* male_only,
+    const float* fecundity,
+    const float* sexual_selection,
+    const float* offspring,
+    const float* zygote_viability,
+    const float* female_compat,
+    const float* male_compat)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+
+    float effective[MAX_Z];
+    for (int z = 0; z < Z; ++z) {
+        effective[z] = 0.0f;
+    }
+    for (int age = new_adult_age; age < A; ++age) {
+        float mr = mating_rates[b * 2 * A + A + age];
+        for (int z = 0; z < Z; ++z) {
+            effective[z] += ind[((1 * A + age) * Z + z) * n_batch + b] * mr;
+        }
+    }
+    float eff_sum = 0.0f;
+    for (int z = 0; z < Z; ++z) {
+        eff_sum += effective[z];
+    }
+    if (eff_sum == 0.0f) {
+        return;
+    }
+
+    float mating_prob[MAX_Z * MAX_Z];
+    const float* sel = sexual_selection + b * Z * Z;
+    for (int gf = 0; gf < Z; ++gf) {
+        float row_sum = 0.0f;
+        for (int gm = 0; gm < Z; ++gm) {
+            float v = sel[gf * Z + gm] * effective[gm];
+            mating_prob[gf * Z + gm] = v;
+            row_sum += v;
+        }
+        if (isfinite(row_sum) && row_sum > 1e-12f) {
+            for (int gm = 0; gm < Z; ++gm) {
+                mating_prob[gf * Z + gm] /= row_sum;
+            }
+        } else {
+            for (int gm = 0; gm < Z; ++gm) {
+                mating_prob[gf * Z + gm] = 0.0f;
+            }
+        }
+    }
+
+    float p_displace = sperm_displacement_rate[b];
+    p_displace = (p_displace <= 0.0f) ? 0.0f : ((p_displace >= 1.0f) ? 1.0f : p_displace);
+    for (int age = new_adult_age; age < A; ++age) {
+        float pm = mating_rates[b * 2 * A + age];
+        pm = (pm <= 0.0f) ? 0.0f : ((pm >= 1.0f) ? 1.0f : pm);
+        for (int gf = 0; gf < Z; ++gf) {
+            float n_female = ind[((0 * A + age) * Z + gf) * n_batch + b];
+            float mated = 0.0f;
+            for (int gm = 0; gm < Z; ++gm) {
+                mated += sperm[((age * Z + gf) * Z + gm) * n_batch + b];
+            }
+            float virgins = n_female - mated;
+            if (virgins < 0.0f) {
+                virgins = 0.0f;
+            }
+            float n_mating_virgins = virgins * pm;
+            float p_remating = p_displace * pm;
+            float removed = mated * p_remating;
+            if (removed > 1e-12f && mated > 1e-12f) {
+                float frac = removed / mated;
+                if (frac > 1.0f) {
+                    frac = 1.0f;
+                }
+                for (int gm = 0; gm < Z; ++gm) {
+                    int idx = ((age * Z + gf) * Z + gm) * n_batch + b;
+                    sperm[idx] -= sperm[idx] * frac;
+                }
+            }
+            float n_new = n_mating_virgins + removed;
+            if (n_new > 1e-12f) {
+                for (int gm = 0; gm < Z; ++gm) {
+                    int idx = ((age * Z + gf) * Z + gm) * n_batch + b;
+                    sperm[idx] += n_new * mating_prob[gf * Z + gm];
+                }
+            }
+        }
+    }
+
+    float offspring_acc[MAX_Z];
+    for (int z = 0; z < Z; ++z) {
+        offspring_acc[z] = 0.0f;
+    }
+    bool has_any = false;
+    float epf = eggs_per_female[b];
+    if (epf < 0.0f) {
+        epf = 0.0f;
+    }
+    const float* ff = fecundity + b * 2 * Z;
+    for (int age = new_adult_age; age < A; ++age) {
+        float pr = reproduction_rates[b * A + age];
+        pr = (pr <= 0.0f) ? 0.0f : ((pr >= 1.0f) ? 1.0f : pr);
+        float ft = fertility[b * A + age];
+        ft = (ft <= 0.0f) ? 0.0f : ((ft >= 1.0f) ? 1.0f : ft);
+        for (int gf = 0; gf < Z; ++gf) {
+            for (int gm = 0; gm < Z; ++gm) {
+                float n_pairs = sperm[((age * Z + gf) * Z + gm) * n_batch + b];
+                if (n_pairs <= 0.0f) {
+                    continue;
+                }
+                has_any = true;
+                float eggs_per_pair = epf * ff[gf] * ff[Z + gm] * ft;
+                float n_total = n_pairs * pr * eggs_per_pair;
+                if (n_total <= 1e-12f) {
+                    continue;
+                }
+                const float* off = offspring + b * Z * Z * Z + (gf * Z + gm) * Z;
+                for (int go = 0; go < Z; ++go) {
+                    offspring_acc[go] += n_total * off[go];
+                }
+            }
+        }
+    }
+    if (!has_any) {
+        return;
+    }
+    float total = 0.0f;
+    for (int go = 0; go < Z; ++go) {
+        total += offspring_acc[go];
+    }
+    if (total <= 1e-12f) {
+        return;
+    }
+
+    float sr = sex_ratio[b];
+    sr = (sr <= 0.0f) ? 0.0f : ((sr >= 1.0f) ? 1.0f : sr);
+    const float* fcompat = female_compat + b * Z;
+    const float* mcompat = male_compat + b * Z;
+    const float* zyg = zygote_viability + b * 2 * Z;
+    for (int go = 0; go < Z; ++go) {
+        float n_g = offspring_acc[go];
+        float n_f = 0.0f;
+        float n_m = 0.0f;
+        if (n_g > 1e-12f) {
+            if (has_sex_chromosomes && female_only[go]) {
+                n_f = n_g;
+            } else if (has_sex_chromosomes && male_only[go]) {
+                n_m = n_g;
+            } else {
+                float p_f;
+                if (has_sex_chromosomes) {
+                    float denom = fcompat[go] + mcompat[go];
+                    p_f = (denom > 1e-12f) ? (fcompat[go] / denom) : 0.5f;
+                    p_f = (p_f <= 0.0f) ? 0.0f : ((p_f >= 1.0f) ? 1.0f : p_f);
+                } else {
+                    p_f = sr;
+                }
+                n_f = n_g * p_f;
+                n_m = n_g - n_f;
+            }
+        }
+        ind[((0 * A + 0) * Z + go) * n_batch + b] = n_f * zyg[go];
+        ind[((1 * A + 0) * Z + go) * n_batch + b] = n_m * zyg[Z + go];
+    }
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -312,6 +510,42 @@ pub struct DensityBuffers<'a> {
     pub scaling_out: &'a mut CudaSlice<f32>,
 }
 
+/// Device arguments for [`Kernels::reproduction`].
+///
+/// Genetics tables are uploaded per batch element (the executor expands the
+/// variant bank and `deme_variants` on the host), so the kernel never indexes
+/// a variant id.
+pub struct ReproductionBuffers<'a> {
+    /// `(B, 2, A)` mating rates.
+    pub mating_rates: &'a CudaSlice<f32>,
+    /// `(B,)` sperm displacement rates.
+    pub sperm_displacement_rate: &'a CudaSlice<f32>,
+    /// `(B, A)` reproduction participation.
+    pub reproduction_rates: &'a CudaSlice<f32>,
+    /// `(B, A)` relative fertility.
+    pub fertility: &'a CudaSlice<f32>,
+    /// `(B,)` eggs per female.
+    pub eggs_per_female: &'a CudaSlice<f32>,
+    /// `(B,)` sex ratios.
+    pub sex_ratio: &'a CudaSlice<f32>,
+    /// `(Z,)` female-only-by-sex-chromosome flags, shared across demes.
+    pub female_only: &'a CudaSlice<i32>,
+    /// `(Z,)` male-only-by-sex-chromosome flags, shared across demes.
+    pub male_only: &'a CudaSlice<i32>,
+    /// `(B, 2, Z)` fecundity fitness.
+    pub fecundity: &'a CudaSlice<f32>,
+    /// `(B, Z, Z)` sexual selection fitness.
+    pub sexual_selection: &'a CudaSlice<f32>,
+    /// `(B, Z, Z, Z)` offspring tensor.
+    pub offspring: &'a CudaSlice<f32>,
+    /// `(B, 2, Z)` zygote viability.
+    pub zygote_viability: &'a CudaSlice<f32>,
+    /// `(B, Z)` female sex-chromosome compatibility.
+    pub female_compat: &'a CudaSlice<f32>,
+    /// `(B, Z)` male sex-chromosome compatibility.
+    pub male_compat: &'a CudaSlice<f32>,
+}
+
 /// The compiled kernel set, loaded once per executor.
 pub struct Kernels {
     /// `age_shift(const float*, float*, u64, int, u64)`.
@@ -324,6 +558,8 @@ pub struct Kernels {
     survival_scale_ind: CudaFunction,
     /// `survival_scale_sperm(...)`.
     survival_scale_sperm: CudaFunction,
+    /// `reproduction(...)`.
+    reproduction: CudaFunction,
 }
 
 impl Kernels {
@@ -346,7 +582,8 @@ impl Kernels {
             options: vec![format!("--gpu-architecture=compute_{major}{minor}")],
             ..Default::default()
         };
-        let source = format!("{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}");
+        let source =
+            format!("{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}");
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
         let module = context
@@ -367,12 +604,16 @@ impl Kernels {
         let survival_scale_sperm = module
             .load_function("survival_scale_sperm")
             .map_err(|err| format!("loading kernel `survival_scale_sperm` failed: {err}"))?;
+        let reproduction = module
+            .load_function("reproduction")
+            .map_err(|err| format!("loading kernel `reproduction` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
             recruit_factor,
             survival_scale_ind,
             survival_scale_sperm,
+            reproduction,
         })
     }
 
@@ -648,6 +889,76 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("survival_scale_sperm launch failed: {err}"))
+    }
+
+    /// Run the deterministic reproduction stage in place.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `ind`, `sperm`: Batch-minor state, mutated in place.
+    /// - `buffers`: Per-batch ecology and genetics tables.
+    /// - `n_batch`, `n_ages`, `n_ztypes`, `new_adult_age`: Model dimensions.
+    /// - `has_sex_chromosomes`: Whether sex is assigned by chromosome masks.
+    ///
+    /// ## Errors
+    /// Returns a description when dimensions are out of range (including
+    /// `n_ztypes > 32`) or the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn reproduction(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        sperm: &mut CudaSlice<f32>,
+        buffers: &ReproductionBuffers<'_>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        new_adult_age: usize,
+        has_sex_chromosomes: bool,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        if n_ztypes > MAX_Z {
+            return Err(format!(
+                "reproduction supports at most {MAX_Z} zygote types, got {n_ztypes}"
+            ));
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let new_adult_i = new_adult_age as i32;
+        let sex_chrom_i = i32::from(has_sex_chromosomes);
+        let config = LaunchConfig {
+            grid_dim: ((n_batch as u32).div_ceil(64), 1, 1),
+            block_dim: (64, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut launch = stream.launch_builder(&self.reproduction);
+        launch.arg(&mut *ind);
+        launch.arg(&mut *sperm);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&new_adult_i);
+        launch.arg(&sex_chrom_i);
+        launch.arg(buffers.mating_rates);
+        launch.arg(buffers.sperm_displacement_rate);
+        launch.arg(buffers.reproduction_rates);
+        launch.arg(buffers.fertility);
+        launch.arg(buffers.eggs_per_female);
+        launch.arg(buffers.sex_ratio);
+        launch.arg(buffers.female_only);
+        launch.arg(buffers.male_only);
+        launch.arg(buffers.fecundity);
+        launch.arg(buffers.sexual_selection);
+        launch.arg(buffers.offspring);
+        launch.arg(buffers.zygote_viability);
+        launch.arg(buffers.female_compat);
+        launch.arg(buffers.male_compat);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("reproduction launch failed: {err}"))
     }
 }
 

@@ -5,7 +5,7 @@
 
 use crate::gpu::context::GpuContext;
 use crate::gpu::hardware_required;
-use crate::kernels::age_structured::{aging, survival};
+use crate::kernels::age_structured::{aging, reproduction, survival};
 use crate::kernels::density_regulation::regulation_scaling;
 use crate::kernels::equilibrium::equilibrium_metrics;
 use crate::kernels::rng::new_rng;
@@ -337,5 +337,111 @@ fn device_survival_matches_the_host_reference() {
             (got - want).abs() <= tolerance,
             "sperm[{index}]: device {got} vs host {want}"
         );
+    }
+}
+
+/// Non-trivial genetics for the reproduction cross-check: identity sexual
+/// selection and a Mendelian-like offspring tensor `go = (gf + gm) mod Z`.
+///
+/// ## Parameters
+/// - `n_ages`, `n_ztypes`: Model dimensions.
+///
+/// ## Returns
+/// Genetics with unit fecundity/zygote viability and a real offspring table.
+fn reproduction_genetics(n_ages: usize, n_ztypes: usize) -> GeneticsTensors {
+    let z = n_ztypes;
+    let mut sexual_selection = vec![0.0; z * z];
+    for g in 0..z {
+        sexual_selection[g * z + g] = 1.0;
+    }
+    let mut offspring = vec![0.0; z * z * z];
+    for gf in 0..z {
+        for gm in 0..z {
+            offspring[(gf * z + gm) * z + (gf + gm) % z] = 1.0;
+        }
+    }
+    GeneticsTensors {
+        viability_fitness: vec![1.0; 2 * n_ages * z],
+        fecundity_fitness: vec![1.0; 2 * z],
+        sexual_selection_fitness: sexual_selection,
+        zygote_viability_fitness: vec![1.0; 2 * z],
+        offspring_tensor: offspring,
+        meiosis_map: vec![0.0; 2 * z * z],
+        female_ztype_compatibility: vec![0.5; z],
+        male_ztype_compatibility: vec![0.5; z],
+    }
+}
+
+#[test]
+fn device_reproduction_matches_the_host_reference() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let ind_stride = 2 * n_ages * n_ztypes;
+    let sperm_stride = n_ages * n_ztypes * n_ztypes;
+    let mut ind = vec![0.0f32; n_batch * ind_stride];
+    let mut sperm = vec![0.0f32; n_batch * sperm_stride];
+    for batch in 0..n_batch {
+        for age in 0..n_ages {
+            for z in 0..n_ztypes {
+                ind[batch * ind_stride + (0 * n_ages + age) * n_ztypes + z] =
+                    ((batch + age + z + 1) * 3) as f32;
+                ind[batch * ind_stride + (1 * n_ages + age) * n_ztypes + z] =
+                    ((batch + age + z + 2) * 2) as f32;
+            }
+        }
+        for age in 0..n_ages {
+            for gf in 0..n_ztypes {
+                for gm in 0..n_ztypes {
+                    sperm[batch * sperm_stride + (age * n_ztypes + gf) * n_ztypes + gm] =
+                        (age + gf + gm + batch + 1) as f32;
+                }
+            }
+        }
+    }
+    let genetics = reproduction_genetics(n_ages, n_ztypes);
+    let variants = vec![genetics.clone()];
+
+    let mut ind_ref: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let mut sperm_ref: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    for deme in 0..n_batch {
+        let mut rng = new_rng(42);
+        reproduction(
+            &mut rng,
+            &blueprint,
+            &ecology,
+            &genetics,
+            deme,
+            &mut ind_ref[deme * ind_stride..(deme + 1) * ind_stride],
+            &mut sperm_ref[deme * sperm_stride..(deme + 1) * sperm_stride],
+        )
+        .expect("host reproduction");
+    }
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    executor
+        .reproduction_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect("reproduction launch");
+    let ind_out = executor.download_ind().expect("download individuals");
+    let sperm_out = executor.download_sperm().expect("download sperm");
+    for (label, got, want) in [
+        ("ind", &ind_out, &ind_ref),
+        ("sperm", &sperm_out, &sperm_ref),
+    ] {
+        for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+            let want = *want as f32;
+            let tolerance = 1e-5f32 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "{label}[{index}]: device {got} vs host {want}"
+            );
+        }
     }
 }

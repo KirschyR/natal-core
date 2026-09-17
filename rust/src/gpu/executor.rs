@@ -26,7 +26,7 @@ use cudarc::driver::CudaStream;
 
 use crate::gpu::buffers::DeviceBuffer;
 use crate::gpu::context::GpuContext;
-use crate::gpu::kernels::{DensityBuffers, Kernels};
+use crate::gpu::kernels::{DensityBuffers, Kernels, ReproductionBuffers};
 use crate::gpu::layout::{batch_to_inner, batch_to_outer};
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
@@ -403,6 +403,173 @@ impl GpuExecutor {
         Ok(())
     }
 
+    /// Run one deterministic reproduction stage on the device.
+    ///
+    /// Mirrors the host `reproduction` pipeline for `stochastic == false`:
+    /// effective adult males, the mating matrix, sperm displacement, and
+    /// fertilization from the offspring tensor, with zygote viability applied
+    /// to the newborn age class.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Dimensions, `new_adult_age`, and sex-chromosome flags.
+    /// - `ecology`: Per-deme ecology columns (`n_demes == n_batch`).
+    /// - `variants`: Shared genetics variant bank.
+    /// - `deme_variants`: Per-batch index into `variants`.
+    ///
+    /// ## Returns
+    /// `Ok(())` after the state is updated in place on the device.
+    ///
+    /// ## Errors
+    /// Returns a description when dimensions disagree, a variant is missing or
+    /// malformed, or a launch fails.
+    pub fn reproduction_tick(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        if blueprint.n_ages != n_ages || blueprint.n_ztypes != n_ztypes {
+            return Err(format!(
+                "executor dimensions (A={n_ages}, Z={n_ztypes}) disagree with the blueprint \
+                 (A={}, Z={})",
+                blueprint.n_ages, blueprint.n_ztypes
+            ));
+        }
+        if deme_variants.len() != n_batch {
+            return Err(format!(
+                "reproduction_tick needs {n_batch} deme-variant ids, got {}",
+                deme_variants.len()
+            ));
+        }
+        expect_len(
+            "mating_rates",
+            ecology.mating_rates.len(),
+            n_batch * 2 * n_ages,
+        )?;
+        expect_len(
+            "sperm_displacement_rate",
+            ecology.sperm_displacement_rate.len(),
+            n_batch,
+        )?;
+        expect_len(
+            "reproduction_rates",
+            ecology.reproduction_rates.len(),
+            n_batch * n_ages,
+        )?;
+        expect_len("fertility", ecology.fertility.len(), n_batch * n_ages)?;
+        expect_len("eggs_per_female", ecology.eggs_per_female.len(), n_batch)?;
+        expect_len("sex_ratio", ecology.sex_ratio.len(), n_batch)?;
+        let z2 = n_ztypes * n_ztypes;
+        let z3 = z2 * n_ztypes;
+        let mut fecundity = vec![0.0f32; n_batch * 2 * n_ztypes];
+        let mut sexual_selection = vec![0.0f32; n_batch * z2];
+        let mut offspring = vec![0.0f32; n_batch * z3];
+        let mut zygote = vec![0.0f32; n_batch * 2 * n_ztypes];
+        let mut female_compat = vec![0.0f32; n_batch * n_ztypes];
+        let mut male_compat = vec![0.0f32; n_batch * n_ztypes];
+        for (batch, &variant_id) in deme_variants.iter().enumerate() {
+            let genetics = variants.get(variant_id).ok_or_else(|| {
+                format!("deme {batch} references missing genetics variant {variant_id}")
+            })?;
+            let base2 = batch * 2 * n_ztypes;
+            copy_narrow(
+                &mut fecundity[base2..base2 + 2 * n_ztypes],
+                &genetics.fecundity_fitness,
+                "fecundity_fitness",
+                variant_id,
+            )?;
+            copy_narrow(
+                &mut zygote[base2..base2 + 2 * n_ztypes],
+                &genetics.zygote_viability_fitness,
+                "zygote_viability_fitness",
+                variant_id,
+            )?;
+            let basez = batch * n_ztypes;
+            copy_narrow(
+                &mut female_compat[basez..basez + n_ztypes],
+                &genetics.female_ztype_compatibility,
+                "female_ztype_compatibility",
+                variant_id,
+            )?;
+            copy_narrow(
+                &mut male_compat[basez..basez + n_ztypes],
+                &genetics.male_ztype_compatibility,
+                "male_ztype_compatibility",
+                variant_id,
+            )?;
+            let basezz = batch * z2;
+            copy_narrow(
+                &mut sexual_selection[basezz..basezz + z2],
+                &genetics.sexual_selection_fitness,
+                "sexual_selection_fitness",
+                variant_id,
+            )?;
+            let basezzz = batch * z3;
+            copy_narrow(
+                &mut offspring[basezzz..basezzz + z3],
+                &genetics.offspring_tensor,
+                "offspring_tensor",
+                variant_id,
+            )?;
+        }
+        let female_only: Vec<i32> = blueprint
+            .female_only_by_sex_chrom
+            .iter()
+            .map(|&flag| i32::from(flag))
+            .collect();
+        let male_only: Vec<i32> = blueprint
+            .male_only_by_sex_chrom
+            .iter()
+            .map(|&flag| i32::from(flag))
+            .collect();
+        let stream = self.context.stream();
+        let mating_rates = upload_f64(&stream, &ecology.mating_rates)?;
+        let displacement = upload_f64(&stream, &ecology.sperm_displacement_rate)?;
+        let reproduction_rates = upload_f64(&stream, &ecology.reproduction_rates)?;
+        let fertility = upload_f64(&stream, &ecology.fertility)?;
+        let eggs = upload_f64(&stream, &ecology.eggs_per_female)?;
+        let sex_ratio = upload_f64(&stream, &ecology.sex_ratio)?;
+        let female_only_buf = DeviceBuffer::from_host(&stream, &female_only)?;
+        let male_only_buf = DeviceBuffer::from_host(&stream, &male_only)?;
+        let fecundity_buf = DeviceBuffer::from_host(&stream, &fecundity)?;
+        let sexual_selection_buf = DeviceBuffer::from_host(&stream, &sexual_selection)?;
+        let offspring_buf = DeviceBuffer::from_host(&stream, &offspring)?;
+        let zygote_buf = DeviceBuffer::from_host(&stream, &zygote)?;
+        let female_compat_buf = DeviceBuffer::from_host(&stream, &female_compat)?;
+        let male_compat_buf = DeviceBuffer::from_host(&stream, &male_compat)?;
+        self.kernels.reproduction(
+            &stream,
+            self.ind.slice_mut(),
+            self.sperm.slice_mut(),
+            &ReproductionBuffers {
+                mating_rates: mating_rates.slice(),
+                sperm_displacement_rate: displacement.slice(),
+                reproduction_rates: reproduction_rates.slice(),
+                fertility: fertility.slice(),
+                eggs_per_female: eggs.slice(),
+                sex_ratio: sex_ratio.slice(),
+                female_only: female_only_buf.slice(),
+                male_only: male_only_buf.slice(),
+                fecundity: fecundity_buf.slice(),
+                sexual_selection: sexual_selection_buf.slice(),
+                offspring: offspring_buf.slice(),
+                zygote_viability: zygote_buf.slice(),
+                female_compat: female_compat_buf.slice(),
+                male_compat: male_compat_buf.slice(),
+            },
+            n_batch,
+            n_ages,
+            n_ztypes,
+            blueprint.new_adult_age,
+            blueprint.has_sex_chromosomes,
+        )?;
+        Ok(())
+    }
+
     /// Copy the individual state back in the batch-major CPU layout.
     ///
     /// ## Returns
@@ -455,6 +622,30 @@ impl GpuExecutor {
 fn upload_f64(stream: &Arc<CudaStream>, values: &[f64]) -> Result<DeviceBuffer<f32>, String> {
     let host: Vec<f32> = values.iter().map(|value| *value as f32).collect();
     DeviceBuffer::from_host(stream, &host)
+}
+
+/// Copy a host `f64` genetics table into a preallocated `f32` slot.
+///
+/// ## Parameters
+/// - `dst`: Destination slot, already sliced to the table's extent.
+/// - `src`: Source table.
+/// - `name`: Table name for the error message.
+/// - `variant_id`: Variant index for the error message.
+///
+/// ## Errors
+/// Returns a readable description when the lengths differ.
+fn copy_narrow(dst: &mut [f32], src: &[f64], name: &str, variant_id: usize) -> Result<(), String> {
+    if dst.len() != src.len() {
+        return Err(format!(
+            "variant {variant_id} {name}: expected {} elements, got {}",
+            dst.len(),
+            src.len()
+        ));
+    }
+    for (slot, value) in dst.iter_mut().zip(src) {
+        *slot = *value as f32;
+    }
+    Ok(())
 }
 
 /// Validate an ecology column length.

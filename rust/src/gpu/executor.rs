@@ -570,6 +570,35 @@ impl GpuExecutor {
         Ok(())
     }
 
+    /// Run one full deterministic age-structured tick on the device.
+    ///
+    /// The stage order mirrors `kernels::age_structured::run_tick` for a
+    /// hook-free, deterministic model: reproduction → survival → aging. No
+    /// data crosses the host boundary between stages.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Dimensions, `new_adult_age`, and sex-chromosome flags.
+    /// - `ecology`: Per-deme ecology columns (`n_demes == n_batch`).
+    /// - `variants`: Shared genetics variant bank.
+    /// - `deme_variants`: Per-batch index into `variants`.
+    ///
+    /// ## Returns
+    /// `Ok(())` after the whole tick is enqueued on the stream.
+    ///
+    /// ## Errors
+    /// Returns a description from the first failing stage.
+    pub fn tick(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
+        self.reproduction_tick(blueprint, ecology, variants, deme_variants)?;
+        self.survival_tick(blueprint, ecology, variants, deme_variants)?;
+        self.age_tick()
+    }
+
     /// Copy the individual state back in the batch-major CPU layout.
     ///
     /// ## Returns

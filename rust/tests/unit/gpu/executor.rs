@@ -445,3 +445,107 @@ fn device_reproduction_matches_the_host_reference() {
         }
     }
 }
+
+/// Build a non-trivial deterministic state for the lifecycle tests.
+///
+/// ## Parameters
+/// - `n_batch`, `n_ages`, `n_ztypes`: Model dimensions.
+///
+/// ## Returns
+/// `(individual_counts, sperm_storage)` in batch-major layout.
+fn populated_state(n_batch: usize, n_ages: usize, n_ztypes: usize) -> (Vec<f32>, Vec<f32>) {
+    let ind_stride = 2 * n_ages * n_ztypes;
+    let sperm_stride = n_ages * n_ztypes * n_ztypes;
+    let mut ind = vec![0.0f32; n_batch * ind_stride];
+    let mut sperm = vec![0.0f32; n_batch * sperm_stride];
+    for batch in 0..n_batch {
+        for age in 0..n_ages {
+            for z in 0..n_ztypes {
+                ind[batch * ind_stride + (0 * n_ages + age) * n_ztypes + z] =
+                    ((batch + age + z + 1) * 3) as f32;
+                ind[batch * ind_stride + (1 * n_ages + age) * n_ztypes + z] =
+                    ((batch + age + z + 2) * 2) as f32;
+            }
+        }
+        for age in 0..n_ages {
+            for gf in 0..n_ztypes {
+                for gm in 0..n_ztypes {
+                    sperm[batch * sperm_stride + (age * n_ztypes + gf) * n_ztypes + gm] =
+                        (age + gf + gm + batch + 1) as f32;
+                }
+            }
+        }
+    }
+    (ind, sperm)
+}
+
+#[test]
+fn device_full_tick_matches_the_host_reference() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let ind_stride = 2 * n_ages * n_ztypes;
+    let sperm_stride = n_ages * n_ztypes * n_ztypes;
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let genetics = reproduction_genetics(n_ages, n_ztypes);
+    let variants = vec![genetics.clone()];
+
+    // Host reference tick: reproduction → survival → aging, per deme.
+    let mut ind_ref: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let mut sperm_ref: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    for deme in 0..n_batch {
+        let mut rng = new_rng(7);
+        let ind_slice = &mut ind_ref[deme * ind_stride..(deme + 1) * ind_stride];
+        let sperm_slice = &mut sperm_ref[deme * sperm_stride..(deme + 1) * sperm_stride];
+        reproduction(
+            &mut rng,
+            &blueprint,
+            &ecology,
+            &genetics,
+            deme,
+            ind_slice,
+            sperm_slice,
+        )
+        .expect("host reproduction");
+        survival(
+            &mut rng,
+            &blueprint,
+            &ecology,
+            &genetics,
+            deme,
+            ind_slice,
+            sperm_slice,
+        )
+        .expect("host survival");
+        aging(&blueprint, ind_slice, sperm_slice);
+    }
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    executor
+        .tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect("device tick");
+    let ind_out = executor.download_ind().expect("download individuals");
+    let sperm_out = executor.download_sperm().expect("download sperm");
+    // A whole tick compounds several f32 stages, so the tolerance is looser
+    // than a single kernel's (still far below any biological effect).
+    for (label, got, want) in [
+        ("ind", &ind_out, &ind_ref),
+        ("sperm", &sperm_out, &sperm_ref),
+    ] {
+        for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+            let want = *want as f32;
+            let tolerance = 1e-4f32 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "{label}[{index}]: device {got} vs host {want}"
+            );
+        }
+    }
+}

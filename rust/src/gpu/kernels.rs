@@ -184,6 +184,99 @@ extern "C" __global__ void density_scaling(
 }
 "#;
 
+/// CUDA C for the deterministic survival application.
+///
+/// Mirrors `kernels::age_structured::recruit_juveniles` (deterministic branch)
+/// followed by `apply_survival_deterministic`: age-0 counts are rescaled by
+/// `desired/total`, then every individual and sperm category is multiplied by
+/// the combined age × viability rate. All kernels are element-wise in place.
+const SURVIVAL_SOURCE: &str = r#"
+extern "C" __global__ void recruit_factor(
+    const float* ind,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    const float* scaling,
+    float* factor)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    float female_sum = 0.0f;
+    float male_sum = 0.0f;
+    for (int z = 0; z < Z; ++z) {
+        female_sum += ind[((0 * A + 0) * Z + z) * n_batch + b];
+        male_sum += ind[((1 * A + 0) * Z + z) * n_batch + b];
+    }
+    float total = female_sum + male_sum;
+    float desired = total * scaling[b];
+    factor[b] = (total <= 0.0f || desired <= 0.0f) ? 0.0f : (desired / total);
+}
+
+extern "C" __global__ void survival_scale_ind(
+    float* ind,
+    unsigned long long total,
+    const float* factor,
+    const float* survival_rates,
+    const float* viability,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    int new_adult_age)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) {
+        return;
+    }
+    int b = (int)(i % (unsigned long long)n_batch);
+    unsigned long long t = i / (unsigned long long)n_batch;
+    int z = (int)(t % (unsigned long long)n_ztypes);
+    t /= (unsigned long long)n_ztypes;
+    int age = (int)(t % (unsigned long long)n_ages);
+    int sex = (int)(t / (unsigned long long)n_ages);
+    float age_surv = survival_rates[b * 2 * n_ages + sex * n_ages + age];
+    float viab = (age == new_adult_age - 1)
+        ? viability[(b * 2 * n_ages + sex * n_ages + age) * n_ztypes + z]
+        : 1.0f;
+    float value = ind[i];
+    if (age == 0) {
+        value *= factor[b];
+    }
+    value *= age_surv * viab;
+    ind[i] = value;
+}
+
+extern "C" __global__ void survival_scale_sperm(
+    float* sperm,
+    unsigned long long total,
+    const float* survival_rates,
+    const float* viability,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    int new_adult_age)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) {
+        return;
+    }
+    int b = (int)(i % (unsigned long long)n_batch);
+    unsigned long long t = i / (unsigned long long)n_batch;
+    int zm = (int)(t % (unsigned long long)n_ztypes);
+    t /= (unsigned long long)n_ztypes;
+    int zf = (int)(t % (unsigned long long)n_ztypes);
+    int age = (int)(t / (unsigned long long)n_ztypes);
+    float age_surv = survival_rates[b * 2 * n_ages + age];
+    float viab = (age == new_adult_age - 1)
+        ? viability[(b * 2 * n_ages + age) * n_ztypes + zf]
+        : 1.0f;
+    sperm[i] = sperm[i] * age_surv * viab;
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -225,6 +318,12 @@ pub struct Kernels {
     age_shift: CudaFunction,
     /// `density_scaling(...)`.
     density_scaling: CudaFunction,
+    /// `recruit_factor(...)`.
+    recruit_factor: CudaFunction,
+    /// `survival_scale_ind(...)`.
+    survival_scale_ind: CudaFunction,
+    /// `survival_scale_sperm(...)`.
+    survival_scale_sperm: CudaFunction,
 }
 
 impl Kernels {
@@ -247,7 +346,7 @@ impl Kernels {
             options: vec![format!("--gpu-architecture=compute_{major}{minor}")],
             ..Default::default()
         };
-        let source = format!("{AGING_SOURCE}\n{DENSITY_SOURCE}");
+        let source = format!("{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}");
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
         let module = context
@@ -259,9 +358,21 @@ impl Kernels {
         let density_scaling = module
             .load_function("density_scaling")
             .map_err(|err| format!("loading kernel `density_scaling` failed: {err}"))?;
+        let recruit_factor = module
+            .load_function("recruit_factor")
+            .map_err(|err| format!("loading kernel `recruit_factor` failed: {err}"))?;
+        let survival_scale_ind = module
+            .load_function("survival_scale_ind")
+            .map_err(|err| format!("loading kernel `survival_scale_ind` failed: {err}"))?;
+        let survival_scale_sperm = module
+            .load_function("survival_scale_sperm")
+            .map_err(|err| format!("loading kernel `survival_scale_sperm` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
+            recruit_factor,
+            survival_scale_ind,
+            survival_scale_sperm,
         })
     }
 
@@ -391,6 +502,152 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("density_scaling launch failed: {err}"))
+    }
+
+    /// Compute the deterministic age-0 recruitment factor for every batch
+    /// element.
+    ///
+    /// `factor = desired / total` with `desired = total · scaling` and `total`
+    /// the grouped age-0 count; `0` when either is non-positive. This is the
+    /// deterministic branch of `recruit_juveniles`.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `ind`: Batch-minor individual counts.
+    /// - `scaling`: Per-batch density scaling factors from
+    ///   [`Kernels::density_scaling`].
+    /// - `factor`: Per-batch output.
+    /// - `n_batch`, `n_ages`, `n_ztypes`: Model dimensions.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn recruit_factor(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &CudaSlice<f32>,
+        scaling: &CudaSlice<f32>,
+        factor: &mut CudaSlice<f32>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let config = LaunchConfig {
+            grid_dim: ((n_batch as u32).div_ceil(128), 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut launch = stream.launch_builder(&self.recruit_factor);
+        launch.arg(ind);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(scaling);
+        launch.arg(&mut *factor);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("recruit_factor launch failed: {err}"))
+    }
+
+    /// Apply deterministic survival to the individual plane in place.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `ind`: Batch-minor individual counts, mutated in place.
+    /// - `factor`: Per-batch age-0 recruitment factors.
+    /// - `survival_rates`: `(B, 2, A)` age survival rates.
+    /// - `viability`: `(B, 2, A, Z)` viability fitness per batch.
+    /// - `n_batch`, `n_ages`, `n_ztypes`, `new_adult_age`: Model dimensions.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn survival_scale_ind(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        factor: &CudaSlice<f32>,
+        survival_rates: &CudaSlice<f32>,
+        viability: &CudaSlice<f32>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        new_adult_age: usize,
+    ) -> Result<(), String> {
+        let total = ind.len() as u64;
+        if total == 0 {
+            return Ok(());
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let new_adult_i = new_adult_age as i32;
+        let config = LaunchConfig::for_num_elems(total as u32);
+        let mut launch = stream.launch_builder(&self.survival_scale_ind);
+        launch.arg(&mut *ind);
+        launch.arg(&total);
+        launch.arg(factor);
+        launch.arg(survival_rates);
+        launch.arg(viability);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&new_adult_i);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("survival_scale_ind launch failed: {err}"))
+    }
+
+    /// Apply deterministic survival to the sperm plane in place.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `sperm`: Batch-minor stored sperm, mutated in place.
+    /// - `survival_rates`: `(B, 2, A)` age survival rates (female row used).
+    /// - `viability`: `(B, 2, A, Z)` viability fitness per batch.
+    /// - `n_batch`, `n_ages`, `n_ztypes`, `new_adult_age`: Model dimensions.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn survival_scale_sperm(
+        &self,
+        stream: &Arc<CudaStream>,
+        sperm: &mut CudaSlice<f32>,
+        survival_rates: &CudaSlice<f32>,
+        viability: &CudaSlice<f32>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        new_adult_age: usize,
+    ) -> Result<(), String> {
+        let total = sperm.len() as u64;
+        if total == 0 {
+            return Ok(());
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let new_adult_i = new_adult_age as i32;
+        let config = LaunchConfig::for_num_elems(total as u32);
+        let mut launch = stream.launch_builder(&self.survival_scale_sperm);
+        launch.arg(&mut *sperm);
+        launch.arg(&total);
+        launch.arg(survival_rates);
+        launch.arg(viability);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&new_adult_i);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("survival_scale_sperm launch failed: {err}"))
     }
 }
 

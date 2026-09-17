@@ -30,6 +30,7 @@ use crate::gpu::kernels::{DensityBuffers, Kernels};
 use crate::gpu::layout::{batch_to_inner, batch_to_outer};
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
+use crate::model::genetics::GeneticsTensors;
 
 /// Owns the device state for one batched model instance.
 pub struct GpuExecutor {
@@ -308,6 +309,98 @@ impl GpuExecutor {
             blueprint.new_adult_age,
         )?;
         scaling.to_host(&stream)
+    }
+
+    /// Run one deterministic survival stage (density regulation + recruitment
+    /// + combined-rate scaling) on the device.
+    ///
+    /// Mirrors the host `survival` pipeline for `stochastic == false`:
+    /// [`GpuExecutor::density_scaling`] produces the factor, age-0 counts are
+    /// rescaled, and every individual and sperm category is multiplied by
+    /// `age_survival × viability`.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Dimensions and `new_adult_age`.
+    /// - `ecology`: Per-deme ecology columns (`n_demes == n_batch`).
+    /// - `variants`: Shared genetics variant bank.
+    /// - `deme_variants`: Per-batch index into `variants`.
+    ///
+    /// ## Returns
+    /// `Ok(())` after the state is rescaled in place on the device.
+    ///
+    /// ## Errors
+    /// Returns a description when dimensions disagree, a variant is missing,
+    /// or a launch fails.
+    pub fn survival_tick(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        if deme_variants.len() != n_batch {
+            return Err(format!(
+                "survival_tick needs {n_batch} deme-variant ids, got {}",
+                deme_variants.len()
+            ));
+        }
+        let scaling_host = self.density_scaling(blueprint, ecology)?;
+        let variant_stride = 2 * n_ages * n_ztypes;
+        let mut viability = vec![0.0f32; n_batch * variant_stride];
+        for (batch, &variant_id) in deme_variants.iter().enumerate() {
+            let genetics = variants.get(variant_id).ok_or_else(|| {
+                format!("deme {batch} references missing genetics variant {variant_id}")
+            })?;
+            if genetics.viability_fitness.len() != variant_stride {
+                return Err(format!(
+                    "variant {variant_id} viability_fitness has {} elements, expected {variant_stride}",
+                    genetics.viability_fitness.len()
+                ));
+            }
+            let dst = &mut viability[batch * variant_stride..(batch + 1) * variant_stride];
+            for (slot, value) in dst.iter_mut().zip(&genetics.viability_fitness) {
+                *slot = *value as f32;
+            }
+        }
+        let stream = self.context.stream();
+        let scaling = DeviceBuffer::from_host(&stream, &scaling_host)?;
+        let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
+        let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
+        let mut factor = DeviceBuffer::from_host(&stream, &vec![0.0f32; n_batch])?;
+        self.kernels.recruit_factor(
+            &stream,
+            self.ind.slice(),
+            scaling.slice(),
+            factor.slice_mut(),
+            n_batch,
+            n_ages,
+            n_ztypes,
+        )?;
+        self.kernels.survival_scale_ind(
+            &stream,
+            self.ind.slice_mut(),
+            factor.slice(),
+            survival_rates.slice(),
+            viability_buf.slice(),
+            n_batch,
+            n_ages,
+            n_ztypes,
+            blueprint.new_adult_age,
+        )?;
+        self.kernels.survival_scale_sperm(
+            &stream,
+            self.sperm.slice_mut(),
+            survival_rates.slice(),
+            viability_buf.slice(),
+            n_batch,
+            n_ages,
+            n_ztypes,
+            blueprint.new_adult_age,
+        )?;
+        Ok(())
     }
 
     /// Copy the individual state back in the batch-major CPU layout.

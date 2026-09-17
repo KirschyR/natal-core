@@ -5,11 +5,13 @@
 
 use crate::gpu::context::GpuContext;
 use crate::gpu::hardware_required;
-use crate::kernels::age_structured::aging;
+use crate::kernels::age_structured::{aging, survival};
 use crate::kernels::density_regulation::regulation_scaling;
 use crate::kernels::equilibrium::equilibrium_metrics;
+use crate::kernels::rng::new_rng;
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
+use crate::model::genetics::GeneticsTensors;
 
 use super::GpuExecutor;
 use std::collections::HashMap;
@@ -250,6 +252,90 @@ fn device_density_scaling_matches_the_host_reference() {
         assert!(
             (got - expected).abs() <= tolerance,
             "deme {deme}: device {got} vs host {expected}"
+        );
+    }
+}
+
+/// All-ones genetics, so viability is neutral and the survival cross-check
+/// isolates the density / recruitment / rate logic.
+///
+/// ## Parameters
+/// - `n_ages`, `n_ztypes`: Model dimensions.
+///
+/// ## Returns
+/// A neutral [`GeneticsTensors`].
+fn identity_genetics(n_ages: usize, n_ztypes: usize) -> GeneticsTensors {
+    GeneticsTensors {
+        viability_fitness: vec![1.0; 2 * n_ages * n_ztypes],
+        fecundity_fitness: vec![1.0; 2 * n_ztypes],
+        sexual_selection_fitness: vec![1.0; n_ztypes * n_ztypes],
+        zygote_viability_fitness: vec![1.0; 2 * n_ztypes],
+        offspring_tensor: vec![0.0; n_ztypes * n_ztypes * n_ztypes],
+        meiosis_map: vec![0.0; 2 * n_ztypes * n_ztypes],
+        female_ztype_compatibility: vec![0.5; n_ztypes],
+        male_ztype_compatibility: vec![0.5; n_ztypes],
+    }
+}
+
+#[test]
+fn device_survival_matches_the_host_reference() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let ind_stride = 2 * n_ages * n_ztypes;
+    let sperm_stride = n_ages * n_ztypes * n_ztypes;
+    let ind: Vec<f32> = (0..n_batch * ind_stride)
+        .map(|i| ((i * 7) % 61) as f32)
+        .collect();
+    let sperm: Vec<f32> = (0..n_batch * sperm_stride)
+        .map(|i| ((i * 5) % 37) as f32)
+        .collect();
+    let genetics = identity_genetics(n_ages, n_ztypes);
+    let variants = vec![genetics.clone()];
+
+    let mut ind_ref: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let mut sperm_ref: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    for deme in 0..n_batch {
+        let mut rng = new_rng(1234);
+        survival(
+            &mut rng,
+            &blueprint,
+            &ecology,
+            &genetics,
+            deme,
+            &mut ind_ref[deme * ind_stride..(deme + 1) * ind_stride],
+            &mut sperm_ref[deme * sperm_stride..(deme + 1) * sperm_stride],
+        )
+        .expect("host survival");
+    }
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    executor
+        .survival_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect("survival launch");
+    let ind_out = executor.download_ind().expect("download individuals");
+    let sperm_out = executor.download_sperm().expect("download sperm");
+    for (index, (got, want)) in ind_out.iter().zip(ind_ref.iter()).enumerate() {
+        let want = *want as f32;
+        let tolerance = 1e-5f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "ind[{index}]: device {got} vs host {want}"
+        );
+    }
+    for (index, (got, want)) in sperm_out.iter().zip(sperm_ref.iter()).enumerate() {
+        let want = *want as f32;
+        let tolerance = 1e-5f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "sperm[{index}]: device {got} vs host {want}"
         );
     }
 }

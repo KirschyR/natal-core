@@ -1,26 +1,16 @@
 //! P0-b `cudarc` binding-level tests.
 //!
-//! The hardware tests execute only when `NATAL_GPU_REQUIRE=1` asks for them,
-//! matching the shell-based probe's gate: `cudarc` panics when no driver is
-//! present, so a CPU-only development machine must skip rather than fail. On
-//! the GPU server the gate turns "cannot drive the device" into a hard error.
+//! The hardware tests assert by default: the GPU server is the primary runtime,
+//! so "cannot drive the device" is a hard error. `cudarc` panics when no driver
+//! is present, so a CPU-only host must skip explicitly with
+//! `NATAL_GPU_REQUIRE=0`.
 //!
 //! `cuda_context_is_send` is a compile-time assertion and therefore runs on
-//! every host, including the ones that skip the hardware tests.
+//! every host, including the ones that disable the hardware gate.
 
 use super::{CudaBindingProbe, ADD_ONE_EXPECTED, ADD_ONE_INPUT};
+use crate::gpu::hardware_required;
 use crate::gpu::probe::CudaProbe;
-
-/// Environment variable that promotes the probe into a hard hardware gate.
-const REQUIRE_ENV: &str = "NATAL_GPU_REQUIRE";
-
-/// Whether the caller asked for hardware assertions.
-///
-/// ## Returns
-/// `true` when `NATAL_GPU_REQUIRE` is exactly `1`.
-fn hardware_required() -> bool {
-    std::env::var(REQUIRE_ENV).as_deref() == Ok("1")
-}
 
 #[test]
 fn binding_probe_runs_without_panicking() {
@@ -29,7 +19,8 @@ fn binding_probe_runs_without_panicking() {
     if hardware_required() {
         assert!(
             probe.is_usable(),
-            "{REQUIRE_ENV}=1 but the cudarc bindings are not usable: {:?}",
+            "hardware assertions are enabled by default but the cudarc bindings are not usable \
+             (error: {:?}); set NATAL_GPU_REQUIRE=0 to skip",
             probe.error
         );
     }
@@ -38,7 +29,7 @@ fn binding_probe_runs_without_panicking() {
 #[test]
 fn driver_exposes_the_sm120_device() {
     if !hardware_required() {
-        eprintln!("SKIP: set {REQUIRE_ENV}=1 on a CUDA host to run this gate");
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
         return;
     }
     let probe = CudaBindingProbe::run();
@@ -59,7 +50,7 @@ fn driver_exposes_the_sm120_device() {
 #[test]
 fn mem_get_info_cross_checks_nvidia_smi() {
     if !hardware_required() {
-        eprintln!("SKIP: set {REQUIRE_ENV}=1 on a CUDA host to run this gate");
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
         return;
     }
     let binding = CudaBindingProbe::run();
@@ -103,7 +94,7 @@ fn mem_get_info_cross_checks_nvidia_smi() {
 #[test]
 fn nvrtc_compiles_and_runs_add_one() {
     if !hardware_required() {
-        eprintln!("SKIP: set {REQUIRE_ENV}=1 on a CUDA host to run this gate");
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
         return;
     }
     let probe = CudaBindingProbe::run();

@@ -8,10 +8,10 @@
 //! `cudarc` loading the driver, and NVRTC actually compiling a kernel — land
 //! in P0-b.
 //!
-//! The probe deliberately never panics and never errors. A host without CUDA
-//! is the expected outcome on the project's Windows development machines, so
-//! "no GPU" is reported as data rather than raised as a failure; the test
-//! harness decides whether that is acceptable via `NATAL_GPU_REQUIRE`.
+//! The probe deliberately never panics and never errors: "no GPU" is reported
+//! as data rather than raised as a failure. The test harness turns that data
+//! into a pass or a failure via [`super::hardware_required`], which defaults to
+//! requiring the hardware and is disabled with `NATAL_GPU_REQUIRE=0`.
 //!
 //! ## Why the free-memory number matters
 //!

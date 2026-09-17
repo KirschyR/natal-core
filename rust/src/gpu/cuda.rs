@@ -36,8 +36,9 @@
 //! this probe wraps the whole binding interaction in
 //! [`std::panic::catch_unwind`]. On a machine without CUDA the probe reports
 //! `error: Some(...)` and `is_usable() == false` instead of unwinding. The
-//! test harness decides whether that is acceptable, exactly like the
-//! shell-based probe does with `NATAL_GPU_REQUIRE`.
+//! test harness turns that into a failure via
+//! [`super::hardware_required`], exactly like the shell-based probe; a
+//! CPU-only host opts out with `NATAL_GPU_REQUIRE=0`.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::Arc;

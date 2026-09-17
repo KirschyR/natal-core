@@ -1,26 +1,15 @@
 //! P0 CUDA-environment probe tests.
 //!
-//! The scan tests run on every host: a machine without CUDA is a normal,
-//! expected outcome rather than a failure, so they only assert when
-//! `NATAL_GPU_REQUIRE=1` asks for hardware checks — which is how the GPU
-//! server runs them.
+//! The scan tests assert by default: the GPU server is the primary runtime, so
+//! a missing or mismatched device is a hard failure. A CPU-only host disables
+//! the hardware gate with `NATAL_GPU_REQUIRE=0`.
 //!
 //! The parsing and arithmetic tests are host-independent. They cover the
-//! logic the scan delegates to, so the probe keeps real coverage on the
-//! project's CPU-only development machines.
+//! logic the scan delegates to, so the probe keeps real coverage on machines
+//! that skip the hardware gate.
 
 use super::{parse_device_line, CudaProbe};
-
-/// Environment variable that promotes the probe into a hard hardware gate.
-const REQUIRE_ENV: &str = "NATAL_GPU_REQUIRE";
-
-/// Whether the caller asked for hardware assertions.
-///
-/// ## Returns
-/// `true` when `NATAL_GPU_REQUIRE` is exactly `1`.
-fn hardware_required() -> bool {
-    std::env::var(REQUIRE_ENV).as_deref() == Ok("1")
-}
+use crate::gpu::hardware_required;
 
 #[test]
 fn scan_reports_without_panicking() {
@@ -29,7 +18,8 @@ fn scan_reports_without_panicking() {
     if hardware_required() {
         assert!(
             probe.is_usable(),
-            "{REQUIRE_ENV}=1 but the CUDA environment is not usable"
+            "hardware assertions are enabled by default but the CUDA environment is not usable; \
+             set NATAL_GPU_REQUIRE=0 to skip"
         );
     }
 }
@@ -37,10 +27,15 @@ fn scan_reports_without_panicking() {
 #[test]
 fn gpu_host_exposes_sm120_and_free_memory() {
     let probe = CudaProbe::scan();
-    if !hardware_required() || !probe.is_usable() {
-        eprintln!("SKIP: set {REQUIRE_ENV}=1 on a CUDA host to run this gate");
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
         return;
     }
+    assert!(
+        probe.is_usable(),
+        "hardware assertions are enabled by default but the CUDA environment is not usable; \
+         set NATAL_GPU_REQUIRE=0 to skip"
+    );
     let device = probe
         .devices
         .first()

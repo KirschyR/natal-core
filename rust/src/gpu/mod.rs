@@ -7,11 +7,16 @@
 //!
 //! ## Phasing
 //!
-//! See `GPU_insert_PLAN.md` §5 for the full plan. The feature currently
-//! carries no dependency at all, because P0 only has to answer "can this host
-//! run the bypass?" — a question the [`probe`] module settles with
-//! `nvidia-smi` and a directory scan. The `cudarc` dependency and the actual
-//! device backends arrive in P0-b/P1, at which point this module gains the
-//! context, buffer, and layout submodules.
+//! See `GPU_insert_PLAN.md` §5 for the full plan. [`probe`] is dependency-free
+//! and settles "does this host look like it has CUDA?" from the outside; with
+//! P0-b, [`cuda`] adds `cudarc` and drives the real bindings (driver load,
+//! device query, NVRTC compile-and-run). The actual device backends — context,
+//! buffers, and layout transpose — arrive in P1, at which point this module
+//! gains those submodules.
 
+/// Dependency-free host discovery (`nvidia-smi`, toolkit directories).
 pub mod probe;
+
+/// `cudarc`-backed binding probe: dynamic driver loading, device queries, and
+/// an NVRTC-compiled kernel that actually runs (P0-b).
+pub mod cuda;

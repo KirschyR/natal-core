@@ -321,12 +321,34 @@ fn nvrtc_search_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
             dirs.push(root.join("lib"));
         }
     }
+    // NVRTC is loaded by name at run time, so the directories the dynamic
+    // loader searches are as authoritative as the toolkit layout. On this
+    // project's server the library ships inside the Python `nvidia` packages
+    // (e.g. `.../site-packages/nvidia/cu13/lib`), which the operator exposes
+    // through `LD_LIBRARY_PATH`; `cudarc` needs the same variable, so the
+    // probe must not report "NOT FOUND" in a configuration that works.
+    if let Some(path) = std::env::var_os(loader_path_var()) {
+        dirs.extend(std::env::split_paths(&path));
+    }
     if !cfg!(windows) {
         dirs.push(PathBuf::from("/usr/lib/x86_64-linux-gnu"));
         dirs.push(PathBuf::from("/usr/lib64"));
         dirs.push(PathBuf::from("/usr/lib"));
     }
     dirs
+}
+
+/// Name of the environment variable the dynamic loader searches on this
+/// platform.
+///
+/// ## Returns
+/// `LD_LIBRARY_PATH` on Linux (and other ELF targets), `PATH` on Windows.
+fn loader_path_var() -> &'static str {
+    if cfg!(windows) {
+        "PATH"
+    } else {
+        "LD_LIBRARY_PATH"
+    }
 }
 
 /// Test whether a file name is an NVRTC shared library.

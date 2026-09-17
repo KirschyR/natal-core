@@ -13,6 +13,7 @@ name = "_engine_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
+cudarc = { version = "0.19.9", features = ["cuda-13020"], optional = true }
 numpy = "0.23.0"
 pyo3 = { version = "0.23.5", features = [] }
 
@@ -24,12 +25,11 @@ rayon = "1.10"
 # The extension-module feature links against the Python interpreter, which
 # breaks plain `cargo test` linking; maturin builds enable it (pyproject).
 extension-module = ["pyo3/extension-module"]
-# GPU bypass (see GPU_insert_PLAN.md). Off by default and, at P0, carrying no
-# dependency at all: the probe discovers the CUDA environment by shelling out
-# to `nvidia-smi` and scanning the toolkit directories, so a default build and
-# the offline dev loop stay unaffected. The `cudarc` dependency arrives in
-# P0-b alongside the actual device backend.
-gpu = []
+# GPU bypass (see GPU_insert_PLAN.md). Off by default so a stock build never
+# links CUDA and the offline development loop stays unaffected. `probe` is
+# dependency-free (shells out to `nvidia-smi`); `cuda` is the P0-b binding-level
+# backend and pulls in `cudarc` (dynamic driver loading + NVRTC).
+gpu = ["dep:cudarc"]
 
 [profile.release]
 codegen-units = 1

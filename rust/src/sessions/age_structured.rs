@@ -266,7 +266,12 @@ impl AgeStructuredSession {
         {
             return Err(PyValueError::new_err("GPU path requires a hook-free model"));
         }
-        if self.params.growth_mode.iter().any(|mode| *mode >= 5) {
+        if self
+            .params
+            .growth_mode
+            .iter()
+            .any(|mode| !(0..=4).contains(mode))
+        {
             return Err(PyValueError::new_err(
                 "GPU path does not support custom growth curves",
             ));

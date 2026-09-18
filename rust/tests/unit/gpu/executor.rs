@@ -549,3 +549,499 @@ fn device_full_tick_matches_the_host_reference() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Evaluator adversarial additions (independent of the author's fixtures).
+//
+// The author's tests only exercise: new_adult_age=1, has_sex_chromosomes=false,
+// undeclared equilibrium, growth modes 0-3. These cover the branches left
+// untested: declared equilibrium, positive external eggs, mode 4 (ricker),
+// non-trivial new_adult_age, sex-chromosome sex assignment, and n_ztypes=1.
+// ---------------------------------------------------------------------------
+
+/// Blueprint with an explicit adult start age and optional sex chromosomes.
+///
+/// ## Parameters
+/// - `n_ages`, `n_ztypes`, `new_adult_age`: Model dimensions.
+/// - `sex_chrom`: Whether sex is assigned by chromosome masks.
+///
+/// ## Returns
+/// A blueprint whose adult range is `new_adult_age..n_ages`.
+fn evaluator_blueprint(
+    n_ages: usize,
+    n_ztypes: usize,
+    new_adult_age: usize,
+    sex_chrom: bool,
+) -> Blueprint {
+    let mut female_only = vec![false; n_ztypes];
+    let mut male_only = vec![false; n_ztypes];
+    if sex_chrom && n_ztypes >= 3 {
+        female_only[0] = true;
+        male_only[1] = true;
+    }
+    Blueprint {
+        n_sexes: 2,
+        n_ages,
+        n_ztypes,
+        n_gtypes: n_ztypes,
+        n_glabs: 1,
+        new_adult_age,
+        adult_ages: (new_adult_age as i64..n_ages as i64).collect(),
+        stochastic: false,
+        continuous_sampling: false,
+        fixed_egg_count: false,
+        has_sex_chromosomes: sex_chrom,
+        extreme_speed_mode: 0,
+        ztype_names: (0..n_ztypes).map(|z| format!("z{z}")).collect(),
+        gtype_names: (0..n_ztypes).map(|z| format!("g{z}")).collect(),
+        female_only_by_sex_chrom: female_only,
+        male_only_by_sex_chrom: male_only,
+        initial_individual_count: vec![],
+        initial_sperm_storage: vec![],
+        n_demes: 1,
+        migration_indptr: vec![0, 0],
+        migration_dest_idx: vec![],
+        migration_weights: vec![],
+    }
+}
+
+/// Single-deme ecology for arbitrary `n_ages`/`new_adult_age`.
+///
+/// ## Parameters
+/// - `n_ages`, `new_adult_age`: Model dimensions.
+/// - `mode`: Density growth mode.
+/// - `declared`: Whether to declare an equilibrium distribution.
+/// - `external`: `external_expected_eggs` value (negative = unused).
+///
+/// ## Returns
+/// Ecology columns sized for one deme.
+fn evaluator_ecology(
+    n_ages: usize,
+    new_adult_age: usize,
+    mode: i64,
+    declared: bool,
+    external: f64,
+) -> EcologyParams {
+    let mut survival = Vec::with_capacity(2 * n_ages);
+    for sex in 0..2 {
+        for age in 0..n_ages {
+            survival.push(0.95 - 0.05 * age as f64 - 0.02 * sex as f64);
+        }
+    }
+    let mut mating = Vec::with_capacity(2 * n_ages);
+    for _sex in 0..2 {
+        for age in 0..n_ages {
+            mating.push(if age >= new_adult_age { 0.9 } else { 0.0 });
+        }
+    }
+    let reproduction: Vec<f64> = (0..n_ages)
+        .map(|age| if age >= new_adult_age { 0.8 } else { 0.0 })
+        .collect();
+    let fertility: Vec<f64> = (0..n_ages)
+        .map(|age| if age >= new_adult_age { 0.9 } else { 0.0 })
+        .collect();
+    let competition: Vec<f64> = (0..n_ages).map(|age| 1.0 - 0.1 * age as f64).collect();
+    let distribution: Vec<f64> = if declared {
+        (0..2 * n_ages).map(|i| 1.0 + 0.5 * i as f64).collect()
+    } else {
+        vec![]
+    };
+    EcologyParams {
+        n_demes: 1,
+        carrying_capacity: vec![400.0],
+        eggs_per_female: vec![30.0],
+        sex_ratio: vec![0.5],
+        sperm_displacement_rate: vec![0.1],
+        low_density_growth_rate: vec![2.0],
+        growth_mode: vec![mode],
+        external_expected_eggs: vec![external],
+        survival_rates: survival,
+        mating_rates: mating,
+        reproduction_rates: reproduction,
+        fertility,
+        competition_weights: competition,
+        equilibrium_distribution: distribution,
+        equilibrium_declared: vec![declared],
+        migration_rate: vec![],
+        custom_slots: vec![HashMap::new()],
+    }
+}
+
+/// Assert one relative-error contract with a small absolute floor.
+///
+/// ## Parameters
+/// - `label`: Message prefix.
+/// - `got`, `want`: Device and host values.
+/// - `relative`: Maximum allowed relative error.
+fn assert_relative(label: &str, got: f32, want: f32, relative: f32) {
+    let tolerance = relative * want.abs().max(1.0);
+    assert!(
+        (got - want).abs() <= tolerance,
+        "{label}: device {got} vs host {want} (|diff|={}, tol={tolerance})",
+        (got - want).abs()
+    );
+}
+
+/// Run the density-scaling kernel and compare one scaling factor to the host.
+///
+/// ## Parameters
+/// - `mode`: Growth mode.
+/// - `declared`: Whether the equilibrium is declared.
+/// - `external`: `external_expected_eggs` value.
+fn evaluator_density_case(mode: i64, declared: bool, external: f64) {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 1;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let blueprint = evaluator_blueprint(n_ages, n_ztypes, 1, false);
+    let ecology = evaluator_ecology(n_ages, 1, mode, declared, external);
+    let ind: Vec<f32> = (0..n_batch * 2 * n_ages * n_ztypes)
+        .map(|i| ((i * 11) % 83) as f32)
+        .collect();
+    let sperm = vec![0.0f32; n_batch * n_ages * n_ztypes * n_ztypes];
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    let device = executor
+        .density_scaling(&blueprint, &ecology)
+        .expect("density launch");
+    let local: Vec<f64> = ind.iter().map(|value| f64::from(*value)).collect();
+    let expected = cpu_scaling(&blueprint, &ecology, 0, &local) as f32;
+    assert_relative(
+        &format!("density mode={mode} declared={declared} external={external}"),
+        device[0],
+        expected,
+        2e-6,
+    );
+}
+
+#[test]
+fn evaluator_density_declared_equilibrium_matches_host() {
+    for mode in 0..=4 {
+        evaluator_density_case(mode, true, -1.0);
+    }
+}
+
+#[test]
+fn evaluator_density_ricker_and_external_eggs_match_host() {
+    evaluator_density_case(4, false, -1.0);
+    evaluator_density_case(2, false, 123.0);
+    evaluator_density_case(3, false, 123.0);
+    evaluator_density_case(4, false, 250.0);
+    evaluator_density_case(4, true, 250.0);
+}
+
+/// Full-tick cross-check for a single panmictic deme over arbitrary shape.
+///
+/// ## Parameters
+/// - `n_ages`, `n_ztypes`, `new_adult_age`: Model dimensions.
+/// - `mode`, `declared`, `external`: Ecology options.
+/// - `sex_chrom`: Whether sex is assigned by chromosome masks.
+fn evaluator_full_tick_case(
+    n_ages: usize,
+    n_ztypes: usize,
+    new_adult_age: usize,
+    mode: i64,
+    declared: bool,
+    external: f64,
+    sex_chrom: bool,
+) {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 1;
+    let blueprint = evaluator_blueprint(n_ages, n_ztypes, new_adult_age, sex_chrom);
+    let ecology = evaluator_ecology(n_ages, new_adult_age, mode, declared, external);
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let mut genetics = reproduction_genetics(n_ages, n_ztypes);
+    // Non-unit, sex-specific viability on the class the survival kernel targets.
+    let target = new_adult_age - 1;
+    for sex in 0..2 {
+        for z in 0..n_ztypes {
+            genetics.viability_fitness[(sex * n_ages + target) * n_ztypes + z] =
+                0.5 + 0.1 * (sex + z) as f64;
+        }
+    }
+    if sex_chrom {
+        genetics.female_ztype_compatibility = (0..n_ztypes).map(|z| 0.7 - 0.1 * z as f64).collect();
+        genetics.male_ztype_compatibility = (0..n_ztypes).map(|z| 0.2 + 0.1 * z as f64).collect();
+    }
+    let variants = vec![genetics.clone()];
+
+    let mut ind_ref: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let mut sperm_ref: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    {
+        let mut rng = new_rng(99);
+        reproduction(
+            &mut rng,
+            &blueprint,
+            &ecology,
+            &genetics,
+            0,
+            &mut ind_ref,
+            &mut sperm_ref,
+        )
+        .expect("host reproduction");
+        survival(
+            &mut rng,
+            &blueprint,
+            &ecology,
+            &genetics,
+            0,
+            &mut ind_ref,
+            &mut sperm_ref,
+        )
+        .expect("host survival");
+        aging(&blueprint, &mut ind_ref, &mut sperm_ref);
+    }
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    executor
+        .tick(&blueprint, &ecology, &variants, &[0usize])
+        .expect("device tick");
+    let ind_out = executor.download_ind().expect("download individuals");
+    let sperm_out = executor.download_sperm().expect("download sperm");
+    let label = format!(
+        "tick A={n_ages} Z={n_ztypes} adult={new_adult_age} mode={mode} \
+         declared={declared} external={external} sex_chrom={sex_chrom}"
+    );
+    for (index, (got, want)) in ind_out.iter().zip(ind_ref.iter()).enumerate() {
+        assert_relative(&format!("{label} ind[{index}]"), *got, *want as f32, 1.2e-6);
+    }
+    for (index, (got, want)) in sperm_out.iter().zip(sperm_ref.iter()).enumerate() {
+        assert_relative(
+            &format!("{label} sperm[{index}]"),
+            *got,
+            *want as f32,
+            1.2e-6,
+        );
+    }
+}
+
+#[test]
+fn evaluator_full_tick_new_adult_age_and_declared_host_match() {
+    evaluator_full_tick_case(8, 2, 3, 2, false, -1.0, false);
+    evaluator_full_tick_case(8, 2, 3, 2, true, -1.0, false);
+    evaluator_full_tick_case(8, 3, 2, 3, true, 321.0, false);
+    evaluator_full_tick_case(4, 2, 1, 4, false, -1.0, false);
+}
+
+#[test]
+fn evaluator_full_tick_sex_chromosomes_host_match() {
+    evaluator_full_tick_case(4, 3, 1, 2, false, -1.0, true);
+    evaluator_full_tick_case(5, 4, 2, 3, true, -1.0, true);
+}
+
+#[test]
+fn evaluator_full_tick_single_ztype_host_match() {
+    evaluator_full_tick_case(4, 1, 1, 2, false, -1.0, false);
+    evaluator_full_tick_case(4, 1, 1, 4, true, 10.0, false);
+}
+
+/// Construct a one-batch executor for `(n_ages, n_ztypes)`.
+///
+/// ## Parameters
+/// - `n_ages`, `n_ztypes`: Model dimensions.
+///
+/// ## Returns
+/// A ready executor (device context included).
+fn evaluator_executor(n_ages: usize, n_ztypes: usize) -> GpuExecutor {
+    let ind = vec![3.0f32; 2 * n_ages * n_ztypes];
+    let sperm = vec![1.0f32; n_ages * n_ztypes * n_ztypes];
+    let context = GpuContext::new(0).expect("device 0 context");
+    GpuExecutor::new(context, 1, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles")
+}
+
+#[test]
+fn evaluator_max_dimensions_are_accepted() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // MAX_AGES = 64 is inclusive: density scaling must run.
+    let n_ages = 64;
+    let blueprint = evaluator_blueprint(n_ages, 2, 1, false);
+    let ecology = evaluator_ecology(n_ages, 1, 2, false, -1.0);
+    let executor = evaluator_executor(n_ages, 2);
+    let scaling = executor
+        .density_scaling(&blueprint, &ecology)
+        .expect("density at MAX_AGES");
+    assert!(scaling[0].is_finite(), "scaling must be finite");
+
+    // MAX_Z = 32 is inclusive: reproduction must run.
+    let (blueprint, ecology) = (
+        evaluator_blueprint(4, 32, 1, false),
+        evaluator_ecology(4, 1, 2, false, -1.0),
+    );
+    let genetics = reproduction_genetics(4, 32);
+    let variants = [genetics];
+    let mut executor = evaluator_executor(4, 32);
+    executor
+        .reproduction_tick(&blueprint, &ecology, &variants, &[0usize])
+        .expect("reproduction at MAX_Z");
+}
+
+/// Regression: CPU `reproduction` clears age-0 newborns when the stage
+/// produces no recruits (`!has_any`), but the device kernel returns from its
+/// `has_any` / `total` early-exit without touching age 0, preserving whatever
+/// the caller seeded there. On tick 0 (or a direct `reproduction_tick` call)
+/// the state then diverges.
+#[test]
+fn evaluator_reproduction_clears_newborns_when_no_recruits() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 1;
+    let n_ages = 4;
+    let n_ztypes = 1;
+    let blueprint = evaluator_blueprint(n_ages, n_ztypes, 1, false);
+    // Male adults mate (effective males > 0) but females never do, so no sperm
+    // is seeded and `fertilize` produces no recruits at all.
+    let ecology = EcologyParams {
+        n_demes: 1,
+        carrying_capacity: vec![400.0],
+        eggs_per_female: vec![30.0],
+        sex_ratio: vec![0.5],
+        sperm_displacement_rate: vec![0.1],
+        low_density_growth_rate: vec![2.0],
+        growth_mode: vec![1],
+        external_expected_eggs: vec![-1.0],
+        survival_rates: vec![0.9, 0.8, 0.7, 0.6, 0.85, 0.75, 0.65, 0.55],
+        mating_rates: vec![0.0, 0.0, 0.0, 0.0, 0.0, 0.9, 0.9, 0.9],
+        reproduction_rates: vec![0.0, 0.8, 0.7, 0.6],
+        fertility: vec![0.0, 1.0, 0.9, 0.8],
+        competition_weights: vec![1.0, 0.8, 0.7, 0.6],
+        equilibrium_distribution: vec![],
+        equilibrium_declared: vec![false],
+        migration_rate: vec![],
+        custom_slots: vec![HashMap::new()],
+    };
+    // Nonzero individuals at every age plus empty stored sperm.
+    let (ind, _) = populated_state(n_batch, n_ages, n_ztypes);
+    let sperm = vec![0.0f32; n_batch * n_ages * n_ztypes * n_ztypes];
+    let genetics = reproduction_genetics(n_ages, n_ztypes);
+    let variants = [genetics.clone()];
+
+    let mut ind_ref: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let mut sperm_ref: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    let mut rng = new_rng(3);
+    reproduction(
+        &mut rng,
+        &blueprint,
+        &ecology,
+        &genetics,
+        0,
+        &mut ind_ref,
+        &mut sperm_ref,
+    )
+    .expect("host reproduction");
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    executor
+        .reproduction_tick(&blueprint, &ecology, &variants, &[0usize])
+        .expect("device reproduction");
+    let ind_out = executor.download_ind().expect("download individuals");
+
+    for (index, (got, want)) in ind_out.iter().zip(ind_ref.iter()).enumerate() {
+        assert_relative(
+            &format!("no-recruit reproduction ind[{index}]"),
+            *got,
+            *want as f32,
+            1.2e-6,
+        );
+    }
+}
+
+/// Regression: CPU `compute_mating_probability_matrix` zeroes a female mating
+/// row whose weighted male sum is `<= EPS` (1e-10, `rng.rs`), but the device
+/// kernel uses a hardcoded `1e-12f` threshold. A row sum in `(1e-12, 1e-10]`
+/// is therefore normalized on the GPU and suppressed on the CPU, so the GPU
+/// produces offspring where the reference produces none.
+#[test]
+fn evaluator_mating_row_epsilon_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 1;
+    let n_ages = 4;
+    let n_ztypes = 1;
+    let blueprint = evaluator_blueprint(n_ages, n_ztypes, 1, false);
+    let mut ecology = evaluator_ecology(n_ages, 1, 2, false, -1.0);
+    // Both sexes mate, but the selection table is ~0, so the row sum lands in
+    // the divergence window.
+    ecology.mating_rates = vec![0.0, 0.9, 0.9, 0.9, 0.0, 0.9, 0.9, 0.9];
+    let (mut ind, _) = populated_state(n_batch, n_ages, n_ztypes);
+    for z in 0..n_ztypes {
+        ind[(0 * n_ages + 0) * n_ztypes + z] = 0.0;
+        ind[(1 * n_ages + 0) * n_ztypes + z] = 0.0;
+    }
+    let sperm = vec![0.0f32; n_batch * n_ages * n_ztypes * n_ztypes];
+    let mut genetics = reproduction_genetics(n_ages, n_ztypes);
+    genetics.sexual_selection_fitness = vec![1e-12];
+    let variants = [genetics.clone()];
+
+    let mut ind_ref: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let mut sperm_ref: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    let mut rng = new_rng(3);
+    reproduction(
+        &mut rng,
+        &blueprint,
+        &ecology,
+        &genetics,
+        0,
+        &mut ind_ref,
+        &mut sperm_ref,
+    )
+    .expect("host reproduction");
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    executor
+        .reproduction_tick(&blueprint, &ecology, &variants, &[0usize])
+        .expect("device reproduction");
+    let ind_out = executor.download_ind().expect("download individuals");
+    for (index, (got, want)) in ind_out.iter().zip(ind_ref.iter()).enumerate() {
+        assert_relative(&format!("epsilon ind[{index}]"), *got, *want as f32, 1.2e-6);
+    }
+}
+
+#[test]
+fn evaluator_over_max_dimensions_are_rejected() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_ages = 65;
+    let blueprint = evaluator_blueprint(n_ages, 2, 1, false);
+    let ecology = evaluator_ecology(n_ages, 1, 2, false, -1.0);
+    let executor = evaluator_executor(n_ages, 2);
+    assert!(
+        executor.density_scaling(&blueprint, &ecology).is_err(),
+        "density must reject n_ages > MAX_AGES"
+    );
+
+    let blueprint = evaluator_blueprint(4, 33, 1, false);
+    let ecology = evaluator_ecology(4, 1, 2, false, -1.0);
+    let genetics = reproduction_genetics(4, 33);
+    let variants = [genetics];
+    let mut executor = evaluator_executor(4, 33);
+    assert!(
+        executor
+            .reproduction_tick(&blueprint, &ecology, &variants, &[0usize])
+            .is_err(),
+        "reproduction must reject n_ztypes > MAX_Z"
+    );
+}

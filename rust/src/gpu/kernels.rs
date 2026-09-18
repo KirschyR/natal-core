@@ -348,7 +348,7 @@ extern "C" __global__ void reproduction(
             mating_prob[gf * Z + gm] = v;
             row_sum += v;
         }
-        if (isfinite(row_sum) && row_sum > 1e-12f) {
+        if (isfinite(row_sum) && row_sum > 1e-10f) {
             for (int gm = 0; gm < Z; ++gm) {
                 mating_prob[gf * Z + gm] /= row_sum;
             }
@@ -377,7 +377,7 @@ extern "C" __global__ void reproduction(
             float n_mating_virgins = virgins * pm;
             float p_remating = p_displace * pm;
             float removed = mated * p_remating;
-            if (removed > 1e-12f && mated > 1e-12f) {
+            if (removed > 1e-10f && mated > 1e-10f) {
                 float frac = removed / mated;
                 if (frac > 1.0f) {
                     frac = 1.0f;
@@ -388,7 +388,7 @@ extern "C" __global__ void reproduction(
                 }
             }
             float n_new = n_mating_virgins + removed;
-            if (n_new > 1e-12f) {
+            if (n_new > 1e-10f) {
                 for (int gm = 0; gm < Z; ++gm) {
                     int idx = ((age * Z + gf) * Z + gm) * n_batch + b;
                     sperm[idx] += n_new * mating_prob[gf * Z + gm];
@@ -401,9 +401,9 @@ extern "C" __global__ void reproduction(
     for (int z = 0; z < Z; ++z) {
         offspring_acc[z] = 0.0f;
     }
-    bool has_any = false;
+    // NaN or negative eggs-per-female -> 0, matching the host `.max(0.0)`.
     float epf = eggs_per_female[b];
-    if (epf < 0.0f) {
+    if (!(epf > 0.0f)) {
         epf = 0.0f;
     }
     const float* ff = fecundity + b * 2 * Z;
@@ -418,10 +418,9 @@ extern "C" __global__ void reproduction(
                 if (n_pairs <= 0.0f) {
                     continue;
                 }
-                has_any = true;
                 float eggs_per_pair = epf * ff[gf] * ff[Z + gm] * ft;
                 float n_total = n_pairs * pr * eggs_per_pair;
-                if (n_total <= 1e-12f) {
+                if (n_total <= 1e-10f) {
                     continue;
                 }
                 const float* off = offspring + b * Z * Z * Z + (gf * Z + gm) * Z;
@@ -431,16 +430,9 @@ extern "C" __global__ void reproduction(
             }
         }
     }
-    if (!has_any) {
-        return;
-    }
-    float total = 0.0f;
-    for (int go = 0; go < Z; ++go) {
-        total += offspring_acc[go];
-    }
-    if (total <= 1e-12f) {
-        return;
-    }
+    // No early return on "no recruits": the host `reproduction` always
+    // overwrites age 0 with `n_female`/`n_male` (zero when `fertilize`
+    // produced nothing), so the device must clear age 0 here too.
 
     float sr = sex_ratio[b];
     sr = (sr <= 0.0f) ? 0.0f : ((sr >= 1.0f) ? 1.0f : sr);
@@ -451,7 +443,7 @@ extern "C" __global__ void reproduction(
         float n_g = offspring_acc[go];
         float n_f = 0.0f;
         float n_m = 0.0f;
-        if (n_g > 1e-12f) {
+        if (n_g > 1e-10f) {
             if (has_sex_chromosomes && female_only[go]) {
                 n_f = n_g;
             } else if (has_sex_chromosomes && male_only[go]) {
@@ -460,7 +452,7 @@ extern "C" __global__ void reproduction(
                 float p_f;
                 if (has_sex_chromosomes) {
                     float denom = fcompat[go] + mcompat[go];
-                    p_f = (denom > 1e-12f) ? (fcompat[go] / denom) : 0.5f;
+                    p_f = (denom > 1e-10f) ? (fcompat[go] / denom) : 0.5f;
                     p_f = (p_f <= 0.0f) ? 0.0f : ((p_f >= 1.0f) ? 1.0f : p_f);
                 } else {
                     p_f = sr;

@@ -244,14 +244,33 @@ impl GpuExecutor {
                 n_batch * 2 * n_ages,
             )?;
         }
+        expect_len(
+            "external_expected_eggs",
+            ecology.external_expected_eggs.len(),
+            n_batch,
+        )?;
+        expect_len(
+            "carrying_capacity",
+            ecology.carrying_capacity.len(),
+            n_batch,
+        )?;
+        expect_len("eggs_per_female", ecology.eggs_per_female.len(), n_batch)?;
+        expect_len("sex_ratio", ecology.sex_ratio.len(), n_batch)?;
+        expect_len(
+            "low_density_growth_rate",
+            ecology.low_density_growth_rate.len(),
+            n_batch,
+        )?;
+        expect_len("growth_mode", ecology.growth_mode.len(), n_batch)?;
         if let Some((deme, mode)) = ecology
             .growth_mode
             .iter()
             .enumerate()
-            .find(|(_, mode)| **mode >= 5)
+            .find(|(_, mode)| !(0..=4).contains(*mode))
         {
             return Err(format!(
-                "growth mode {mode} at deme {deme} is a custom curve and is not portable to the device"
+                "growth mode {mode} at deme {deme} is outside the portable range 0..=4 \
+                 (custom curves are not supported on the device)"
             ));
         }
         let declared: Vec<i32> = ecology
@@ -515,6 +534,15 @@ impl GpuExecutor {
                 "offspring_tensor",
                 variant_id,
             )?;
+        }
+        if blueprint.female_only_by_sex_chrom.len() != n_ztypes
+            || blueprint.male_only_by_sex_chrom.len() != n_ztypes
+        {
+            return Err(format!(
+                "reproduction_tick needs {n_ztypes} sex-chromosome flags per sex, got {} female and {} male",
+                blueprint.female_only_by_sex_chrom.len(),
+                blueprint.male_only_by_sex_chrom.len()
+            ));
         }
         let female_only: Vec<i32> = blueprint
             .female_only_by_sex_chrom

@@ -96,16 +96,38 @@ impl CudaBindingProbe {
     /// compilation failure is recorded in [`CudaBindingProbe::error`]; the
     /// call never panics, even when `cudarc` would.
     pub fn run() -> Self {
-        match catch_unwind(AssertUnwindSafe(Self::run_inner)) {
+        Self::from_outcome(catch_unwind(AssertUnwindSafe(Self::run_inner)))
+    }
+
+    /// Translate a caught [`CudaBindingProbe::run_inner`] outcome into a probe.
+    ///
+    /// Split out from [`CudaBindingProbe::run`] so both failure arms can be
+    /// tested without a missing driver.
+    ///
+    /// ## Parameters
+    /// - `outcome`: The result of catching a panic around `run_inner`.
+    ///
+    /// ## Returns
+    /// The probe, or a probe whose `error` describes the failure.
+    pub(crate) fn from_outcome(outcome: std::thread::Result<Result<Self, String>>) -> Self {
+        match outcome {
             Ok(Ok(probe)) => probe,
             Ok(Err(error)) => Self {
                 error: Some(error),
                 ..Self::default()
             },
-            Err(_) => Self {
-                error: Some("CUDA driver library could not be loaded".to_owned()),
-                ..Self::default()
-            },
+            Err(_) => Self::driver_missing(),
+        }
+    }
+
+    /// Probe value reported when the driver library cannot be loaded.
+    ///
+    /// ## Returns
+    /// A probe with `error` set and every discovered field unset.
+    pub(crate) fn driver_missing() -> Self {
+        Self {
+            error: Some("CUDA driver library could not be loaded".to_owned()),
+            ..Self::default()
         }
     }
 

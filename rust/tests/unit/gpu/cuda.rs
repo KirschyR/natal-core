@@ -123,3 +123,38 @@ fn cuda_context_is_send() {
     assert_send::<cudarc::driver::CudaStream>();
     assert_send::<cudarc::driver::CudaSlice<f32>>();
 }
+
+#[test]
+fn default_binding_report_covers_unknown_branches() {
+    let probe = CudaBindingProbe::default();
+    let report = probe.report();
+    assert!(report.contains("device count    : <unknown>"));
+    assert!(report.contains("compute capab.  : <unknown>"));
+    assert!(report.contains("device memory   : <unknown>"));
+    assert!(report.contains("NVRTC           : NOT USABLE"));
+    assert!(report.contains("kernel run      : NOT USABLE"));
+    assert!(!probe.is_usable());
+}
+
+#[test]
+fn binding_probe_failure_arms_are_recorded() {
+    let failed = CudaBindingProbe::from_outcome(Ok(Err("boom".to_owned())));
+    assert_eq!(failed.error.as_deref(), Some("boom"));
+    assert!(!failed.is_usable());
+
+    let panicked =
+        CudaBindingProbe::from_outcome(Err(Box::new("panic") as Box<dyn std::any::Any + Send>));
+    assert!(panicked.error.is_some());
+
+    let ok = CudaBindingProbe::from_outcome(Ok(Ok(CudaBindingProbe::default())));
+    assert!(ok.error.is_none());
+}
+
+#[test]
+fn binding_report_includes_the_error_line() {
+    let probe = CudaBindingProbe {
+        error: Some("boom".to_owned()),
+        ..CudaBindingProbe::default()
+    };
+    assert!(probe.report().contains("error           : boom"));
+}

@@ -43,3 +43,15 @@ fn gpu_context_is_send_and_sync() {
     // handles ever lose that property.
     assert_send_sync::<GpuContext>();
 }
+
+#[test]
+fn out_of_range_ordinal_is_rejected() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    assert!(
+        GpuContext::new(9999).is_err(),
+        "an impossible ordinal must report an error, not a context"
+    );
+}

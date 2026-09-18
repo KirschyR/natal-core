@@ -1045,3 +1045,175 @@ fn evaluator_over_max_dimensions_are_rejected() {
         "reproduction must reject n_ztypes > MAX_Z"
     );
 }
+
+#[test]
+fn executor_rejects_malformed_inputs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    assert_eq!(executor.n_batch(), n_batch);
+    let _ = executor.context().compute_capability();
+
+    // Blueprint dimensions must agree with the executor.
+    let mut bad_blueprint = blueprint.clone();
+    bad_blueprint.n_ages = 5;
+    assert!(executor.density_scaling(&bad_blueprint, &ecology).is_err());
+    let genetics = reproduction_genetics(n_ages, n_ztypes);
+    assert!(executor
+        .survival_tick(
+            &bad_blueprint,
+            &ecology,
+            &[genetics.clone()],
+            &vec![0usize; n_batch]
+        )
+        .is_err());
+    assert!(executor
+        .reproduction_tick(
+            &bad_blueprint,
+            &ecology,
+            &[genetics.clone()],
+            &vec![0usize; n_batch]
+        )
+        .is_err());
+
+    // Ecology column counts must match the batch.
+    let mut bad_ecology = ecology.clone();
+    bad_ecology.n_demes = 3;
+    assert!(executor.density_scaling(&blueprint, &bad_ecology).is_err());
+
+    // Every column length is validated (survival shown; the kernel indexes by b).
+    let mut short_ecology = ecology.clone();
+    short_ecology.survival_rates.pop();
+    assert!(executor
+        .density_scaling(&blueprint, &short_ecology)
+        .is_err());
+    let mut short_eggs = ecology.clone();
+    short_eggs.eggs_per_female.clear();
+    assert!(executor.density_scaling(&blueprint, &short_eggs).is_err());
+
+    // Growth modes outside 0..=4 are rejected.
+    let mut custom = ecology.clone();
+    custom.growth_mode[0] = 5;
+    assert!(executor.density_scaling(&blueprint, &custom).is_err());
+    let mut negative = ecology.clone();
+    negative.growth_mode[0] = -1;
+    assert!(executor.density_scaling(&blueprint, &negative).is_err());
+
+    // Per-batch variant ids must cover the batch.
+    assert!(executor
+        .survival_tick(&blueprint, &ecology, &[genetics.clone()], &[0usize])
+        .is_err());
+    assert!(executor
+        .reproduction_tick(&blueprint, &ecology, &[genetics.clone()], &[0usize])
+        .is_err());
+
+    // Reproduction validates its ecology and genetics tables.
+    let mut short_repro = ecology.clone();
+    short_repro.mating_rates.pop();
+    assert!(executor
+        .reproduction_tick(
+            &blueprint,
+            &short_repro,
+            &[genetics.clone()],
+            &vec![0usize; n_batch]
+        )
+        .is_err());
+    let mut bad_genetics = genetics.clone();
+    bad_genetics.offspring_tensor.clear();
+    assert!(executor
+        .reproduction_tick(
+            &blueprint,
+            &ecology,
+            &[bad_genetics],
+            &vec![0usize; n_batch]
+        )
+        .is_err());
+
+    // Sex-chromosome flags must be sized to the zygote-type axis.
+    let mut bad_flags = blueprint.clone();
+    bad_flags.female_only_by_sex_chrom.clear();
+    assert!(executor
+        .reproduction_tick(
+            &bad_flags,
+            &ecology,
+            &[genetics.clone()],
+            &vec![0usize; n_batch]
+        )
+        .is_err());
+}
+
+#[test]
+fn executor_rejects_mismatched_state_lengths() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    assert!(GpuExecutor::new(context, 1, 4, 2, &[0.0f32; 3], &[0.0f32; 8]).is_err());
+    let context = GpuContext::new(0).expect("device 0 context");
+    assert!(GpuExecutor::new(context, 1, 4, 2, &[0.0f32; 16], &[0.0f32; 3]).is_err());
+}
+
+#[test]
+fn memory_budget_helper_reports_over_budget() {
+    assert!(super::ensure_memory_budget(10, 20).is_err());
+    assert!(super::ensure_memory_budget(20, 10).is_ok());
+    assert!(super::ensure_memory_budget(0, 0).is_ok());
+}
+
+#[test]
+fn executor_rejects_bad_variants() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    let genetics = reproduction_genetics(n_ages, n_ztypes);
+    let ids = vec![0usize; n_batch];
+
+    // Out-of-range variant id.
+    assert!(executor
+        .survival_tick(
+            &blueprint,
+            &ecology,
+            &[genetics.clone()],
+            &vec![7usize; n_batch]
+        )
+        .is_err());
+    assert!(executor
+        .reproduction_tick(
+            &blueprint,
+            &ecology,
+            &[genetics.clone()],
+            &vec![7usize; n_batch]
+        )
+        .is_err());
+
+    // Malformed variant tables are rejected by the copy helper.
+    let mut short_viability = genetics.clone();
+    short_viability.viability_fitness.truncate(3);
+    assert!(executor
+        .survival_tick(&blueprint, &ecology, &[short_viability], &ids)
+        .is_err());
+    let mut short_fecundity = genetics.clone();
+    short_fecundity.fecundity_fitness.truncate(1);
+    assert!(executor
+        .reproduction_tick(&blueprint, &ecology, &[short_fecundity], &ids)
+        .is_err());
+}

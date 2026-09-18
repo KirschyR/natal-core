@@ -216,23 +216,14 @@ impl AgeStructuredSession {
                 vec![0.0; want]
             }
         };
-        Ok(Self {
-            blueprint: bp,
-            params: pr,
+        Ok(Self::assemble(
+            bp,
+            pr,
             genetics,
-            rng: new_rng(seed),
-            hooks: HookProgram::default(),
-            eco_journal: Vec::new(),
-            checkpoints: Vec::new(),
-            history_store: None,
+            seed,
             state_ind,
             state_sperm,
-            state_tick: 0,
-            execution: crate::sessions::status::ExecutionStatus::Ready,
-            phase: 0,
-            #[cfg(feature = "gpu")]
-            gpu: None,
-        })
+        ))
     }
 
     /// Enable the optional CUDA bypass for this session.
@@ -1166,6 +1157,46 @@ impl HookProgram {
 }
 
 impl AgeStructuredSession {
+    /// Assemble a fresh session from owned contract copies.
+    ///
+    /// Split out from [`AgeStructuredSession::from_parts`] so the constructor
+    /// (including the GPU-disabled default) is covered without a Python
+    /// interpreter.
+    ///
+    /// ## Parameters
+    /// - `blueprint`, `params`, `genetics`: Owned Rust contracts.
+    /// - `seed`: RNG seed.
+    /// - `state_ind`, `state_sperm`: Session-owned initial state.
+    ///
+    /// ## Returns
+    /// A ready, GPU-disabled session.
+    fn assemble(
+        blueprint: Blueprint,
+        params: EcologyParams,
+        genetics: GeneticsTensors,
+        seed: u64,
+        state_ind: Vec<f64>,
+        state_sperm: Vec<f64>,
+    ) -> Self {
+        Self {
+            blueprint,
+            params,
+            genetics,
+            rng: new_rng(seed),
+            hooks: HookProgram::default(),
+            eco_journal: Vec::new(),
+            checkpoints: Vec::new(),
+            history_store: None,
+            state_ind,
+            state_sperm,
+            state_tick: 0,
+            execution: crate::sessions::status::ExecutionStatus::Ready,
+            phase: 0,
+            #[cfg(feature = "gpu")]
+            gpu: None,
+        }
+    }
+
     /// Execute `n_ticks` deterministic ticks on the device, then copy the
     /// final state back into the f64 session state.
     ///
@@ -1387,3 +1418,7 @@ impl AgeStructuredSession {
         Ok((current_tick, history, stopped))
     }
 }
+
+#[cfg(all(test, feature = "gpu"))]
+#[path = "../../tests/unit/gpu/session.rs"]
+mod gpu_session_tests;

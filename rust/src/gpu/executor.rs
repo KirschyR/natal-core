@@ -96,14 +96,7 @@ impl GpuExecutor {
         // aging. Check before allocating so an over-budget run fails cleanly.
         let required = 2 * Self::state_bytes(n_batch, n_ages, n_ztypes);
         let (free, _total) = context.memory_info()?;
-        if required > free {
-            return Err(format!(
-                "GPU memory budget exceeded: the state needs {} MiB ({required} B), \
-                 but only {} MiB is free; reduce the batch size or free the device",
-                required / (1024 * 1024),
-                free / (1024 * 1024)
-            ));
-        }
+        ensure_memory_budget(free, required)?;
         let ind_axes = [2usize, n_ages, n_ztypes];
         let sperm_axes = [n_ages, n_ztypes, n_ztypes];
         let ind_inner = batch_to_inner(ind_host, &ind_axes, n_batch)?;
@@ -701,6 +694,27 @@ fn copy_narrow(dst: &mut [f32], src: &[f64], name: &str, variant_id: usize) -> R
     }
     for (slot, value) in dst.iter_mut().zip(src) {
         *slot = *value as f32;
+    }
+    Ok(())
+}
+
+/// Fail explicitly when the state would not fit in the measured free memory.
+///
+/// ## Parameters
+/// - `free`: Free device memory in bytes, as measured.
+/// - `required`: Bytes the executor needs.
+///
+/// ## Errors
+/// Returns a readable description when `required > free`; the caller never
+/// falls back to the CPU.
+fn ensure_memory_budget(free: usize, required: usize) -> Result<(), String> {
+    if required > free {
+        return Err(format!(
+            "GPU memory budget exceeded: the state needs {} MiB ({required} B), \
+             but only {} MiB is free; reduce the batch size or free the device",
+            required / (1024 * 1024),
+            free / (1024 * 1024)
+        ));
     }
     Ok(())
 }

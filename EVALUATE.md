@@ -14,9 +14,9 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 1 轮：**NOT APPROVED**（§9，2 个阻塞项） |
-| 主 agent 处理 | 已修复并自测（§10），**待第 2 轮独立复核** |
-| 待 evaluator 动作 | 按 §11 的交接请求复核，并把第 2 轮结论写入 §12 |
+| 最近回执 | 第 2 轮：**NOT APPROVED**（§12，仅剩覆盖率/会话测试） |
+| 主 agent 处理 | 已补测试：`src/gpu` 行覆盖 **95.08%**；会话设备路径已有 Rust 测试（§13） |
+| 待 evaluator 动作 | 复核 §13，把第 3 轮结论写入 §14 |
 
 ## 0. 一句话目标
 
@@ -362,9 +362,172 @@ export PYO3_PYTHON=/opt/conda/bin/python PYTHONHOME=/opt/conda
 
 ---
 
+## 13. 第 3 轮交接 — 覆盖率与会话测试补齐
+
+- 日期：2026-09-18
+- 针对 §12.4（覆盖率 / 缺失测试）的回应。
+- 本轮工作树改动：`rust/src/gpu/{cuda,executor}.rs`、`rust/src/sessions/age_structured.rs`、
+  `rust/tests/unit/gpu/{context,cuda,executor,kernels,probe,session}.rs`（`session.rs` 为新增）、`EVALUATE.md`。
+- 产品代码未改数值语义：仅为可测性抽取 `CudaBindingProbe::from_outcome`/`driver_missing`、
+  `AgeStructuredSession::assemble`、`ensure_memory_budget`，并新增会话测试；CPU 路径与 kernel 数值不变。
+
+### 13.1 覆盖率证据（主 agent 自测；命令可复现）
+
+```bash
+cd rust
+export RUSTUP_HOME="$PWD/../.venv/rustup" CARGO_HOME="$PWD/../.venv/cargo"
+export PATH="$PWD/../.venv/cargo/bin:$PATH" CARGO_TARGET_DIR="$PWD/../.venv/cargo-target"
+export LD_LIBRARY_PATH="/opt/conda/lib:/opt/conda/lib/python3.11/site-packages/nvidia/cu13/lib:$LD_LIBRARY_PATH"
+export PYO3_PYTHON=/opt/conda/bin/python PYTHONHOME=/opt/conda
+rm -rf /tmp/cov && mkdir -p /tmp/cov
+export RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="/tmp/cov/%p-%m.profraw"
+cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.json
+# 取 executable 后运行，再用 llvm-profdata/llvm-cov report --sources src/gpu
+```
+
+结果：`src/gpu` **行覆盖 95.08%（61 missed / 1241）**，超过 95% 门槛；
+`rust/tests/unit/gpu/session.rs` 覆盖了会话设备路径。
+
+### 13.2 会话设备路径的 Rust 测试（§12.4 第二处缺口）
+
+新增 `rust/tests/unit/gpu/session.rs`（由 `src/sessions/age_structured.rs` 的 `#[cfg(all(test, feature="gpu"))]` 挂载）：
+
+- `session_device_branch_matches_cpu_and_covers_wiring`：构造会话 → `enable_gpu()` 成功 →
+  `gpu_status()=="enabled"` → `run_inner` 设备分支跑 3 tick 并回写；同一 fixture 再跑 CPU 分支，
+  逐元素比较 `state_ind/state_sperm`，相对误差 ≤ 1.2e-6。
+- `session_enable_gpu_rejects_ineligible_models`：覆盖 stochastic / `n_demes>1` / 自定义 growth_mode /
+  `n_hooks>0` / **python_callbacks 非空**（`n_hooks==0`）五条拒绝分支。
+
+### 13.3 剩余未覆盖行（请 evaluator 判定是否在范围内）
+
+以 driver 失败/平台分支为主，当前测试环境下无法执行（非“用排除隐藏行”）：
+
+- `executor.rs` 18 行：多行 kernel 调用尾部的 `)?;` 错误传播分支（仅 CUDA 返回 Err 时执行）。
+- `cuda.rs` ~12 行：`run_inner` 各设备查询失败的 `map_err` 闭包体。
+- `context.rs` / `buffers.rs`：`CudaContext::new`、`clone_htod/dtoh` 的 driver 错误映射闭包。
+- `probe.rs` ~7 行：`CUDA_PATH` 未设、`/usr/local/cuda*` 不存在、Windows 专属分支（本机 Linux）。
+
+聚合行覆盖已 ≥95%。**请 evaluator 明确判定口径**：
+1. 若按 `src/gpu` 聚合行覆盖（§规范“new modules”复数、上一轮用 TOTAL），则门槛已满足；
+2. 若要求**每个文件**都 ≥95%，则上列 driver 失败/平台分支会使其不达标——请提出：
+   (a) 以文档化残余风险接受，或 (b) 授权“错误映射可测化重构”（将 `map_err` 抽取为可用构造错误单测的辅助函数）。
+   该选择涉及规范解释，需用户裁定；请在第 3 轮结论中给出你的判定与依据。
+
+### 13.4 自测门禁（非独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **124 passed**（含 evaluator 9 + 会话 2 + 新增守卫/错误分支用例） |
+| `cargo test` | 67 passed |
+| `cargo clippy --features gpu -- -D warnings` / `fmt --check` | 通过 |
+| `check_rust.py` / `phase0` | EXIT=0 / bit-identical |
+| `ruff` / `pyright` / `pytest` | 通过 / 0 errors / 3606 passed |
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
 > 使用 §12、§13… 编号；不要改写上面的历史轮次。
 
-## 12. 第 2 轮结论（待 evaluator 填写）
+## 12. 第 2 轮结论（evaluator 独立执行，2026-09-18，HEAD=`52544cf`）
+
+### 12.1 裁定：**NOT APPROVED**
+
+- §9.2 的两个正确性阻塞项：**已解除**（独立复核通过，修复是产品语义层面的，非绕过测试）。
+- **新增 1 个阻塞项**：Rust 行覆盖率未达项目规范 95%，且新增的会话设备接线 **0% 覆盖、无任何仓库测试**。
+  依据 `quality_checks_spec.md` §Coverage（「New modules require at least 95% line coverage」）与判定表
+  （「measured coverage below 95% requires repair」）。
+
+> 若项目对硬件/FFI/错误路径代码**不**强制 Rust 95% 线覆盖率策略，请由用户**显式豁免**；
+> 豁免前按规范维持 NOT APPROVED。正确性修复本身已通过。
+
+### 12.2 §9.2 两个目标复核（独立运行）
+
+命令（环境见 §11）：
+- `cargo test --features gpu evaluator_reproduction_clears_newborns_when_no_recruits` → **1 passed**（原 max diff 3 → 0）
+- `cargo test --features gpu evaluator_mating_row_epsilon_matches_cpu` → **1 passed**（原 262.44 → 0）
+- `cargo test --features gpu` → **105 passed, 0 failed**
+- `cargo test` → **67 passed**；`NATAL_GPU_REQUIRE=0 cargo test --features gpu` → **105 passed**
+- evaluator 两个测试**未被改动**：无 `#[ignore]`、`assert_relative` 与断言值未被削弱。
+
+修复语义核对（读 `373fcbf..52544cf` 产品 diff）：
+- **BLOCKER-1**：`rust/src/gpu/kernels.rs` 删除 `!has_any` 与 `total<=eps` 两处提前返回，改为
+  **无条件写 age-0**（`n_g<=eps` 写 0），与 CPU `age_structured.rs:503-506` 一致；
+  `eff_sum==0` 的提前返回两边都保留且都不清 age-0，仍一致。逐分支等价（`total<=eps` 时 CPU 也写全 0）。
+- **BLOCKER-2**：6 处 `1e-12f` 全部改为 `1e-10f`，与 CPU `EPS=1e-10`（`rng.rs:21`）逐点对齐：
+  `kernels.rs:351/380/391/423/446/455`。确定性路径的 CPU EPS 点无遗漏
+  （`age_structured.rs` 其余 EPS 点属随机分支，本阶段未实现）；`equilibrium` 的 `1e-10f` 本就一致。
+- 附加修复（NaN `eggs_per_female`、density 六列长度、负 `growth_mode`、性染色体标志长度）均正确无副作用；
+  默认 feature / CPU 路径未受影响（`git diff 373fcbf..52544cf -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空）。
+
+### 12.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `python scripts/check_rust.py` | EXIT=0（67 passed；需 `PYO3_PYTHON=/opt/conda/bin/python`） |
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | 105 passed |
+| `cargo clippy --features gpu -- -D warnings` | 通过 |
+| `cargo fmt -- --check` | 通过 |
+| `ruff check src demos` | 通过 |
+| `pyright` | 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| `maturin develop --features "gpu,extension-module"` + L3（mode 3，5 tick） | `max_rel=1.68e-7` → PASS |
+| 拒绝路径（stochastic / hooks / `CUDA_VISIBLE_DEVICES=""`） | 均显式报错，失败后仍可 CPU → PASS |
+
+### 12.4 新增阻塞项：Rust 覆盖率 < 95%（含缺失测试）
+
+`rustup component add llvm-tools`（需网络）后，命令（`rust/` 下）：
+```bash
+export RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="/tmp/cov/%p-%m.profraw"
+mkdir -p /tmp/cov && cargo test --features gpu --lib
+LLVM_BIN="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+"$LLVM_BIN/llvm-profdata" merge -sparse /tmp/cov/*.profraw -o /tmp/cov/merged.profdata
+"$LLVM_BIN/llvm-cov" report --object <test_bin> --instr-profile=/tmp/cov/merged.profdata --sources src/gpu
+```
+scope：`rust/src/gpu/`（基线 `adda656` 无此目录，全为新增）+ `rust/src/sessions/age_structured.rs` 新增行。
+
+| 文件 | 行覆盖 | 未覆盖行（要点） |
+|---|---|---|
+| buffers.rs | 23/23 = 100% | — |
+| layout.rs | 41/41 = 100% | — |
+| mod.rs | 3/3 = 100% | — |
+| kernels.rs | 273/288 = 94.8% | 640-650/695/703-705/769/818/865/912（launcher 错误 `map_err`） |
+| context.rs | 29/31 = 93.5% | 46-47（`new` 错误路径） |
+| cuda.rs | 100/113 = 88.5% | 101-108（catch_unwind 错误臂）、174-195（`report()` None 分支） |
+| probe.rs | 155/181 = 85.6% | 112/124-139/245-252/290-322/348-392（解析失败/缺字段分支） |
+| executor.rs | 406/495 = 82.0% | 89 行，几乎全为长度校验/`map_err` 错误路径与访问器（如 84-105、207-217、658-721） |
+| **TOTAL** | **1030/1175 = 87.7%** | **< 95%** |
+
+新增会话接线 `rust/src/sessions/age_structured.rs`：
+- `enable_gpu` / `gpu_status`：**0/46** 行覆盖
+- `run_gpu` 与 `run_inner` 设备分支：**0/29** 行覆盖
+- 即：**没有任何仓库测试触碰设备会话路径**（`rg enable_gpu tests rust/tests` 无命中；
+  我的 Python L3 为手动验证，且 Python 覆盖不能替代 Rust 覆盖）。
+
+判定：按 `quality_checks_spec.md` 覆盖率门槛与判定表，此项需补测试后修复。
+
+建议（交主 agent）：
+1. 新增 Rust 测试覆盖会话设备路径：`enable_gpu` 成功 + 各拒绝分支、`gpu_status`、
+   `run_gpu` 的 tick 循环与下载（可借助现有嵌入解释器测试基建）；
+2. 为 `executor.rs` / `cuda.rs` / `probe.rs` / `kernels.rs` 的 `is_err()` 错误分支补用例；
+3. 若用户豁免 Rust 95% 策略，则记录豁免依据，本轮即可视为正确性通过。
+
+### 12.5 非阻塞 / 残余
+
+- §9.5 剩余项（设备路径 history 静默为空、宿主直接改状态不同步、空间/离散无 `enable_gpu` 入口）
+  本轮未处理，维持为**非阻塞已知限制**。
+- 上述未覆盖行以防御性错误路径与格式化分支为主，数值内核覆盖良好；但这不改变 §12.4 的规范判定。
+
+### 12.6 状态
+
+- 正确性修复：**独立验证通过**。
+- 整体裁定：**NOT APPROVED**（仅剩覆盖率 / 缺失测试阻塞）。
+- 待主 agent：补测试或取得用户豁免后，回交第 3 轮复核。
+
+## 14. 第 3 轮结论（待 evaluator 填写）
+
+（请在此追加：裁定 APPROVED / NOT APPROVED、覆盖率口径判定、剩余 driver 失败/平台分支是否在范围内、
+独立运行证据、残余风险。只追加，不改写历史轮次。）

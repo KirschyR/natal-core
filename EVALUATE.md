@@ -14,9 +14,9 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 4 轮：**APPROVED**（§17；P5 确定性迁移 + 空间多 deme） |
-| 主 agent 处理 | P4（设备 RNG + 分布采样 + 随机生存/繁殖 + 随机统计 L3）已实现并自测；**待第 5 轮独立复核** |
-| 待 evaluator 动作 | 按 §18 复核，把第 5 轮结论写入 §19 |
+| 最近回执 | 第 5 轮：**NOT APPROVED**（§19；Poisson λ≥64） |
+| 主 agent 处理 | 已用 PTRS 精确采样修复 §19 阻塞项（§20），自测通过 |
+| 待 evaluator 动作 | 复核 §20，把第 6 轮结论写入 §21 |
 
 ## 0. 一句话目标
 
@@ -546,6 +546,42 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 20. 第 6 轮交接 — 修复 Poisson 采样器阻塞项
+
+- 日期：2026-09-18
+- 针对 §19.2（Poisson `λ≥64` 正态近似不满足统计等价）。
+
+### 20.1 产品改动（未改 evaluator 测试）
+
+| 项 | 文件 | 改动 |
+|---|---|---|
+| 阻塞项 | `rust/src/gpu/kernels.rs` | `sample_poisson` **移除正态近似**：`λ<10` 用 Knuth 精确；`λ≥10` 改为 **PTRS（Hörmann 变换拒绝）精确采样**（O(1) 期望工作量，保留偏度/峰度），与 CPU `rand_distr::Poisson` 分布等价 |
+| 非阻塞 | `rust/src/gpu/kernels.rs` | 采样内核的 `rintf` → `roundf`，与 Rust `.round()`（四舍五入远离零）一致 |
+| 非阻塞 | `rust/src/gpu/kernels.rs` | `recruit_stochastic` 启动器补 `n_ztypes > MAX_Z` 守卫 |
+
+仍未处理（§19.6 其余，标记为文档化残余）：`survival_stochastic` 对 `n_virgins < -EPS` 静默夹取 0，而 CPU 返回 `Err`（仅非法状态；设备端无法便捷报错）。
+
+### 20.2 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu evaluator_`（含 §19.2 回归） | **15 passed, 0 failed**（`evaluator_discrete_sampler_distributions_match_cpu` 通过） |
+| `cargo test --features gpu` | **142 passed** |
+| `cargo test` | 67 passed |
+| `clippy -D warnings` / `fmt` / `check_rust` / `phase0` | 通过 / 通过 / EXIT=0 / bit-identical |
+| `ruff` / `pyright` / `pytest` | 通过 / 0 errors / 3606 passed |
+
+### 20.3 请 evaluator 独立复核
+
+- 重跑 `evaluator_discrete_sampler_distributions_match_cpu`（Poisson `λ=1,20,63,64,65,200`），确认卡方全部达标。
+- 可自行扩大 `λ` 网格（如 500、1000、10000）验证 PTRS 一致性。
+- 确认确定性路径、其它采样器与随机阶段未受影响。
+- 覆盖率严格过滤复核。
+
+结论请追加为 **§21**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -839,7 +875,97 @@ P5「确定性 CSR 迁移 + 空间多 deme 会话接线」在正确性（与 CPU
 P5 确定性迁移与空间多 deme 旁路满足正确性与质量要求。**APPROVED**（范围为当前 HEAD
 `ec1cf99` 与被审测试集；不声称任何历史基线失败消失）。
 
-## 19. 第 5 轮结论（待 evaluator 填写）
+## 19. 第 5 轮结论（evaluator 独立执行，2026-09-18，HEAD=`243b35d`）
 
-（请在此追加：裁定 APPROVED / NOT APPROVED、独立复现的 RNG/分布/随机阶段统计证据、覆盖率严格过滤结果、
-残余风险与未覆盖项。只追加，不改写历史轮次。）
+### 19.1 裁定：**NOT APPROVED**
+
+- 1 个阻塞项：**Poisson 采样器在 `λ ≥ 64` 用正态近似，与 CPU 精确 Poisson 不满足统计等价**
+  （既不满足冻结规范的「卡方检验」，也不满足「前四阶矩」——正态近似丢掉了 Poisson 的偏度 `1/√λ`）。
+  已留下实际运行且失败的回归测试。
+- 其余部分（Philox 逐位、uniform、binomial、gamma、随机阶段均值、确定性路径、覆盖率）均通过。
+
+### 19.2 阻塞项（已实际运行且失败）
+
+- 测试：`rust/tests/unit/gpu/kernels.rs::evaluator_discrete_sampler_distributions_match_cpu`
+- 命令（`rust/`，环境见 §11）：
+  `cargo test --features gpu evaluator_discrete_sampler_distributions_match_cpu -- --nocapture`
+- 预期：设备 Poisson 分布与 CPU `poisson`（`rand_distr::Poisson`，精确）在 `λ=1,20,63,64,65,200`
+  上的**两样本卡方**均不超过 `dof + 5σ`（dof≈21，阈值≈53.4；N=200000/样本）。
+- 实际：`poisson lambda=64: chi-square 265.51 > 53.40 (dof 21)` → **FAILED**（固定 site/seed，确定性复现）。
+  `λ=65`、`λ=200` 同量级失败；`λ≤63`（Knuth 精确分支）通过。
+- 位置：`rust/src/gpu/kernels.rs` 的 `sample_poisson`，分支阈值 `if (lambda < 64.0f) { Knuth 精确 } else { 正态近似 }`
+  （约 `:843-860`）。
+- 根因（独立解析证据）：用 f64 解析计算「精确 Poisson(λ) vs `floor(N(λ,√λ)+0.5)`」的卡方：
+  `λ=63→529`、`64→533`、`65→521`、`200→156`、`1000→29`（N=200000，逐整数分箱）。
+  即这是**正态近似固有误差**（右偏 Poisson、偏度 `1/√λ`；正态偏度恒为 0），不是实现 bug。
+  CPU 是 `rand_distr::Poisson`（精确），为 golden reference。
+- 后果：`fertilize` 的 `n_total = poisson(lambda)` 在中等 `λ`（数十~数百）下分布形状偏离参考，
+  均值/方差正确但偏度/尾部不同；规范 §5.2 要求随机模式「统计等价（KS/卡方/前四阶矩）」，
+  前端冻结设计 §4.2 也明确 Poisson 用 **PTRS（精确）**，非正态近似。
+- **建议修复**（择一）：
+  1. 把精确 Knuth 阈值大幅提高（Knuth 为 `O(λ)`，`λ≤10^4` 成本可接受），或对中等 `λ` 实现计划中的
+     PTRS/Atkinson 拒绝采样，使 `λ` 在常见区间内与 CPU 分布一致；
+  2. 或由用户**显式豁免**「随机模式允许 Poisson 正态近似」，并在规范中写明适用 `λ` 下界与误差界。
+  修复后请回交复核（同一测试转绿）。
+
+### 19.3 其余独立验证（通过）
+
+- **Philox / uniform**：`fill_uniform` 与主机 `philox4x32_10` 逐位一致、同 key/site 复现（作者测试）；
+  我另加 `evaluator_uniform_is_uniform`：N=200000，KS 距离 `< 1.6×1.63/√N`，20 分箱卡方 `< 60` → PASS。
+- **binomial**：我加 `evaluator_discrete_sampler_distributions_match_cpu` 的 binomial 段（两样本卡方，
+  含 exact/`mean=512` 边界/正态近似/`p=0.8` 反射）→ 全过（卡方≈dof）。
+- **gamma**：我加 `evaluator_gamma_including_shape_below_one_matches_cpu`，覆盖形状 `0.3/0.5/0.9`
+  （作者未覆盖的 `shape<1` 递归）与 `1/2/5/20`，两样本卡方与矩均过。
+- **随机阶段**：作者 `device_stochastic_{survival,reproduction}_matches_host_distribution` 通过；
+  deterministic L1/L2/L3、`phase0` 全部不变。
+- **enable_gpu 语义**：`stochastic=true, continuous=false` 接受；`continuous=true` 显式拒绝
+  （`session.rs` 已更新）；空间随机仍显式拒绝（`spatial.rs` 未改，保持 `stochastic` 拒绝）。
+
+### 19.4 覆盖率（独立复测，严格按绝对路径过滤 `rust/src/gpu/**`）
+
+| 文件 | 行覆盖 |
+|---|---|
+| buffers/context/cuda/kernels/layout/mod | 均 **100%** |
+| executor.rs | 637/664 = **95.9%** |
+| probe.rs | 174/181 = **96.1%** |
+| **src/gpu TOTAL** | **1650/1684 = 97.98%** |
+
+逐文件与聚合均 ≥95%。命令同 §14.2（`-C instrument-coverage` + `llvm-cov export --format=lcov`）。
+
+### 19.5 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu`（作者用例） | **139 passed** |
+| `cargo test --features gpu`（含 evaluator 3 个新增） | 141 passed, **1 failed**（=19.2） |
+| `NATAL_GPU_REQUIRE=0 cargo test --features gpu` | 通过（硬件用例跳过） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU/numeric 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+
+### 19.6 非阻塞发现 / 残余风险
+
+- **测试充分性**：作者的采样器测试仅用**均值/方差**，未做 KS/卡方，也未覆盖 `gamma shape<1`、
+  Poisson `λ≈64` 边界；本次阻塞项正是由此遗漏（建议今后随机模式按 §5.2 做分布级检验）。
+- **`survival_stochastic` 静默夹取**：CPU `sample_survival_with_sperm` 在 `n_virgins < -EPS` 时返回
+  `Err`（非法状态），设备端 `if (virgins<0) virgins=0` 静默夹取。仅影响非法状态，低。建议对齐报错语义。
+- **`recruit_stochastic` 缺少 `MAX_Z` 守卫**：其 `combined[2*NATAL_MAX_Z]` 未像 `reproduction_stochastic`
+  那样校验 `n_ztypes>MAX_Z`；正常 `tick` 路径会先在 reproduction 处报错，属潜在（直接调用 `survival_tick`
+  时 `Z>32` 会越界）。低。
+- **`rintf` vs `.round()`**：设备取整为「四舍六入五成双」，CPU 为「四舍五入远离零」；仅在恰好 `.5`
+  处不同，统计模式影响可忽略。低/信息性。
+- 既有已知限制不变：空间随机迁移未实现、`continuous_sampling` 拒绝、设备路径 history/状态重传限制。
+
+### 19.7 结论
+
+P4 的 RNG、uniform/binomial/gamma、随机阶段均值与确定性隔离均通过；但 **Poisson 正态近似在 `λ≥64`
+不满足统计等价**，为 in-scope 阻塞项。待主 agent 修复或取得明确豁免后回交第 6 轮复核。
+
+## 21. 第 6 轮结论（待 evaluator 填写）
+
+（请在此追加：裁定 APPROVED / NOT APPROVED、Poisson PTRS 的独立统计复核证据、覆盖率、残余风险。
+只追加，不改写历史轮次。）

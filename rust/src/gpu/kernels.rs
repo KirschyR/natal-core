@@ -844,7 +844,8 @@ __device__ __forceinline__ float sample_poisson(RngState* state, float lambda) {
     if (lambda <= 0.0f) {
         return 0.0f;
     }
-    if (lambda < 64.0f) {
+    if (lambda < 10.0f) {
+        // Knuth product method: exact for small mean.
         float limit = expf(-lambda);
         float count = 0.0f;
         float product = 1.0f;
@@ -854,9 +855,30 @@ __device__ __forceinline__ float sample_poisson(RngState* state, float lambda) {
         } while (product > limit);
         return count - 1.0f;
     }
-    float z = rng_normal(state);
-    float result = floorf(lambda + sqrtf(lambda) * z + 0.5f);
-    return result < 0.0f ? 0.0f : result;
+    // PTRS (Hörmann transformed rejection): exact for lambda >= 10, O(1)
+    // expected work. Unlike a normal approximation it preserves the Poisson
+    // skew/kurtosis, which the CPU reference and the statistical gate require.
+    float b = 0.931f + 2.53f * sqrtf(lambda);
+    float a = -0.059f + 0.02483f * b;
+    float inv_alpha = 1.1239f + 1.1328f / (b - 3.4f);
+    float v_r = 0.9277f - 3.6224f / (b - 2.0f);
+    for (;;) {
+        float u = rng_uniform(state) - 0.5f;
+        float v = rng_uniform(state);
+        float us = 0.5f - fabsf(u);
+        float k = floorf((2.0f * a / us + b) * u + lambda + 0.43f);
+        if (us >= 0.07f && v <= v_r) {
+            return k;
+        }
+        if (k < 0.0f || (us < 0.013f && v > us)) {
+            continue;
+        }
+        if (logf(v * inv_alpha / (a / (us * us) + b))
+            <= k * logf(lambda) - lambda - lgammaf(k + 1.0f))
+        {
+            return k;
+        }
+    }
 }
 
 // Marsaglia-Tsang gamma sampler.
@@ -1006,7 +1028,7 @@ extern "C" __global__ void recruit_stochastic(
     int cursor = 0;
     for (int sex = 0; sex < 2; ++sex) {
         for (int z = 0; z < Z; ++z) {
-            float value = rintf(ind[((sex * A + 0) * Z + z) * n_batch + b]);
+            float value = roundf(ind[((sex * A + 0) * Z + z) * n_batch + b]);
             combined[cursor++] = value;
             if (sex == 0) {
                 female_sum += value;
@@ -1020,7 +1042,7 @@ extern "C" __global__ void recruit_stochastic(
     for (int i = 0; i < 2 * Z; ++i) {
         total_counts += combined[i];
     }
-    float desired = total > 0.0f ? rintf(total * scaling[b]) : 0.0f;
+    float desired = total > 0.0f ? roundf(total * scaling[b]) : 0.0f;
     if (total <= 0.0f || desired <= 0.0f) {
         for (int sex = 0; sex < 2; ++sex) {
             for (int z = 0; z < Z; ++z) {
@@ -1109,11 +1131,11 @@ extern "C" __global__ void survival_stochastic(
     if (virgins < 0.0f) {
         virgins = 0.0f;
     }
-    float n_virgins = rintf(virgins);
+    float n_virgins = roundf(virgins);
     float new_sperm_sum = 0.0f;
     for (int mz = 0; mz < Z; ++mz) {
         int index = ((age * Z + g) * Z + mz) * n_batch + b;
-        float count = rintf(sperm[index]);
+        float count = roundf(sperm[index]);
         float survived = (count > 1e-10f) ? sample_binomial(&state, count, p_f) : 0.0f;
         sperm[index] = survived;
         new_sperm_sum += survived;
@@ -1121,7 +1143,7 @@ extern "C" __global__ void survival_stochastic(
     float survived_virgins = (n_virgins > 1e-10f) ? sample_binomial(&state, n_virgins, p_f) : 0.0f;
     ind[((0 * A + age) * Z + g) * n_batch + b] = new_sperm_sum + survived_virgins;
 
-    float n_m = rintf(ind[((1 * A + age) * Z + g) * n_batch + b]);
+    float n_m = roundf(ind[((1 * A + age) * Z + g) * n_batch + b]);
     float survived_m = (n_m > 1e-10f) ? sample_binomial(&state, n_m, p_m) : 0.0f;
     ind[((1 * A + age) * Z + g) * n_batch + b] = survived_m;
 }
@@ -1248,7 +1270,7 @@ extern "C" __global__ void reproduction_stochastic(
             if (virgins < 0.0f) {
                 virgins = 0.0f;
             }
-            float n_mating_virgins = sample_binomial(&state, rintf(virgins), p_mating);
+            float n_mating_virgins = sample_binomial(&state, roundf(virgins), p_mating);
             float p_remating = p_displace * p_mating;
             float n_remating = 0.0f;
             if (mated > 1e-10f && p_remating > 1e-10f) {
@@ -1256,7 +1278,7 @@ extern "C" __global__ void reproduction_stochastic(
                     int index = ((age * Z + gf) * Z + gm) * n_batch + b;
                     float count = sperm[index];
                     if (count > 1e-10f) {
-                        float removed = sample_binomial(&state, rintf(count), p_remating);
+                        float removed = sample_binomial(&state, roundf(count), p_remating);
                         float left = sperm[index] - removed;
                         sperm[index] = left < 0.0f ? 0.0f : left;
                         n_remating += removed;
@@ -1265,7 +1287,7 @@ extern "C" __global__ void reproduction_stochastic(
             }
             float n_new = n_mating_virgins + n_remating;
             if (n_new > 1e-10f) {
-                float n_int = rintf(n_new);
+                float n_int = roundf(n_new);
                 if (n_int > 0.0f) {
                     float row[NATAL_MAX_Z];
                     float drawn[NATAL_MAX_Z];
@@ -1300,7 +1322,7 @@ extern "C" __global__ void reproduction_stochastic(
                     continue;
                 }
                 float eggs_per_pair = epf * ff[gf] * ff[Z + gm] * ft;
-                float n_pairs_eff = rintf(n_pairs);
+                float n_pairs_eff = roundf(n_pairs);
                 if (n_pairs_eff <= 0.0f) {
                     continue;
                 }
@@ -1309,7 +1331,7 @@ extern "C" __global__ void reproduction_stochastic(
                     : n_pairs_eff;
                 float total_lambda = n_reproducing * eggs_per_pair;
                 float n_total = fixed_egg_count
-                    ? rintf(total_lambda)
+                    ? roundf(total_lambda)
                     : sample_poisson(&state, total_lambda);
                 if (n_total <= 1e-10f) {
                     continue;
@@ -1324,7 +1346,7 @@ extern "C" __global__ void reproduction_stochastic(
                 }
                 float n_viable = (p_surv >= 1.0f - 1e-10f)
                     ? n_total
-                    : sample_binomial(&state, rintf(n_total), p_surv);
+                    : sample_binomial(&state, roundf(n_total), p_surv);
                 if (n_viable <= 1e-10f) {
                     continue;
                 }
@@ -1334,7 +1356,7 @@ extern "C" __global__ void reproduction_stochastic(
                 for (int go = 0; go < Z; ++go) {
                     prob_norm[go] = off[go] * inv;
                 }
-                natal_multinomial(&state, rintf(n_viable), prob_norm, Z, drawn);
+                natal_multinomial(&state, roundf(n_viable), prob_norm, Z, drawn);
                 for (int go = 0; go < Z; ++go) {
                     offspring_acc[go] += drawn[go];
                 }
@@ -1363,16 +1385,16 @@ extern "C" __global__ void reproduction_stochastic(
                 } else {
                     p_f = sr;
                 }
-                float n_fem = sample_binomial(&state, rintf(n_g), p_f);
+                float n_fem = sample_binomial(&state, roundf(n_g), p_f);
                 n_f = n_fem;
                 n_m = n_g - n_fem;
             }
         }
         float fv = (n_f > 0.0f)
-            ? sample_binomial(&state, rintf(n_f), natal_clamp01(zyg[go]))
+            ? sample_binomial(&state, roundf(n_f), natal_clamp01(zyg[go]))
             : 0.0f;
         float mv = (n_m > 0.0f)
-            ? sample_binomial(&state, rintf(n_m), natal_clamp01(zyg[Z + go]))
+            ? sample_binomial(&state, roundf(n_m), natal_clamp01(zyg[Z + go]))
             : 0.0f;
         ind[((0 * A + 0) * Z + go) * n_batch + b] = fv;
         ind[((1 * A + 0) * Z + go) * n_batch + b] = mv;
@@ -2165,6 +2187,11 @@ impl Kernels {
     ) -> Result<(), String> {
         if n_batch == 0 {
             return Ok(());
+        }
+        if n_ztypes > MAX_Z {
+            return Err(format!(
+                "recruit_stochastic supports at most {MAX_Z} zygote types, got {n_ztypes}"
+            ));
         }
         let n_batch_i = n_batch as i32;
         let n_ages_i = n_ages as i32;

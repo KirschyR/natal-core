@@ -5,6 +5,7 @@
 
 use crate::gpu::context::GpuContext;
 use crate::gpu::hardware_required;
+use crate::kernels::rng::{binomial, gamma, new_rng, poisson};
 use cudarc::driver::CudaStream;
 use std::sync::Arc;
 
@@ -488,4 +489,246 @@ fn stochastic_launchers_short_circuit_or_reject() {
             3,
         )
         .is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator independent distribution tests (P4). The author tested only
+// moments; these compare the full device distribution against the CPU golden
+// reference with two-sample chi-square / KS tests over parameter grids that
+// include the exact/approximate sampler boundaries.
+// ---------------------------------------------------------------------------
+
+/// Draw `n` device samples for one sampler with an explicit site.
+///
+/// ## Parameters
+/// - `kernels`, `stream`: Loaded kernels and stream.
+/// - `kind`, `a`, `b`: Sampler selector and parameters.
+/// - `n`: Sample count.
+/// - `site`: Draw-site counter (varies the stream).
+///
+/// ## Returns
+/// Host samples.
+fn evaluator_draw(
+    kernels: &Kernels,
+    stream: &Arc<CudaStream>,
+    kind: u32,
+    a: f32,
+    b: f32,
+    n: usize,
+    site: u32,
+) -> Vec<f64> {
+    let mut out = stream.alloc_zeros::<f32>(n).expect("alloc");
+    kernels
+        .sample_into(stream, &mut out, kind, a, b, 0x1234_5678, 0x9ABC_DEF0, site)
+        .expect("sample");
+    stream
+        .clone_dtoh(&out)
+        .expect("download")
+        .into_iter()
+        .map(f64::from)
+        .collect()
+}
+
+/// Two-sample chi-square statistic and degrees of freedom over `bins` equal
+/// bins on `[lo, hi]`, skipping bins whose expected count is below 5.
+///
+/// ## Parameters
+/// - `gpu`, `cpu`: The two samples.
+/// - `lo`, `hi`: Bin range.
+/// - `bins`: Number of equal-width bins.
+///
+/// ## Returns
+/// `(statistic, dof)`.
+fn evaluator_chi_square(gpu: &[f64], cpu: &[f64], lo: f64, hi: f64, bins: usize) -> (f64, usize) {
+    let mut counts_g = vec![0f64; bins];
+    let mut counts_c = vec![0f64; bins];
+    let width = (hi - lo) / bins as f64;
+    let index = |x: f64| -> usize {
+        if x < lo {
+            0
+        } else if x >= hi {
+            bins - 1
+        } else {
+            (((x - lo) / width) as usize).min(bins - 1)
+        }
+    };
+    for &x in gpu {
+        counts_g[index(x)] += 1.0;
+    }
+    for &x in cpu {
+        counts_c[index(x)] += 1.0;
+    }
+    let total_g: f64 = counts_g.iter().sum();
+    let total_c: f64 = counts_c.iter().sum();
+    let mut statistic = 0.0;
+    let mut used = 0usize;
+    for i in 0..bins {
+        let observed = counts_g[i];
+        let reference = counts_c[i];
+        if observed + reference >= 10.0 {
+            // Pooled two-sample chi-square: both samples are random, so the
+            // common proportion is estimated from the pooled counts.
+            let p = (observed + reference) / (total_g + total_c);
+            let expected_g = total_g * p;
+            let expected_c = total_c * p;
+            statistic += (observed - expected_g) * (observed - expected_g) / expected_g;
+            statistic += (reference - expected_c) * (reference - expected_c) / expected_c;
+            used += 1;
+        }
+    }
+    (statistic, used.saturating_sub(1))
+}
+
+/// Assert two samples have the same distribution using the two-sample
+/// chi-square test at a deliberately generous 5-sigma threshold.
+///
+/// ## Parameters
+/// - `label`: Message prefix.
+/// - `gpu`, `cpu`: Samples.
+/// - `lo`, `hi`, `bins`: Binning.
+fn assert_same_distribution(label: &str, gpu: &[f64], cpu: &[f64], lo: f64, hi: f64, bins: usize) {
+    let (statistic, dof) = evaluator_chi_square(gpu, cpu, lo, hi, bins);
+    let threshold = dof as f64 + 5.0 * (2.0 * dof as f64).sqrt();
+    assert!(
+        statistic <= threshold,
+        "{label}: chi-square {statistic} > {threshold} (dof {dof})"
+    );
+}
+
+/// Kolmogorov-Smirnov distance of a sample from `U(0, 1)`.
+///
+/// ## Parameters
+/// - `samples`: Sample values.
+///
+/// ## Returns
+/// The maximum empirical-CDF deviation.
+fn ks_uniform(samples: &[f64]) -> f64 {
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = sorted.len() as f64;
+    let mut d = 0.0f64;
+    for (i, &x) in sorted.iter().enumerate() {
+        let i = i as f64;
+        d = d.max((x - i / n).abs()).max(((i + 1.0) / n - x).abs());
+    }
+    d
+}
+
+#[test]
+fn evaluator_uniform_is_uniform() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let samples = evaluator_draw(&kernels, &stream, 0, 0.0, 0.0, 200_000, 41);
+    for (i, &x) in samples.iter().enumerate() {
+        assert!((0.0..1.0).contains(&x), "sample {i} out of range: {x}");
+    }
+    let n = samples.len() as f64;
+    let ks = ks_uniform(&samples);
+    // 1.63/sqrt(n) is the 1% critical value; 1.6x gives a safe margin.
+    let ks_limit = 1.6 * 1.63 / n.sqrt();
+    assert!(ks <= ks_limit, "KS {ks} > {ks_limit}");
+    // Chi-square on 20 equiprobable bins, 1% critical ~37.6; use 60.
+    let mut bins = [0f64; 20];
+    for &x in &samples {
+        bins[(x * 20.0) as usize % 20] += 1.0;
+    }
+    let expected = n / 20.0;
+    let chi: f64 = bins
+        .iter()
+        .map(|c| (c - expected) * (c - expected) / expected)
+        .sum();
+    assert!(chi <= 60.0, "uniform chi-square {chi}");
+}
+
+#[test]
+fn evaluator_discrete_sampler_distributions_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let n_dev = 200_000usize;
+    let n_cpu = 200_000usize;
+
+    // Binomial grid: exact branch, the mean=512 boundary, the normal
+    // approximation, and the p>0.5 reflection path.
+    let binomial_cases: [(i64, f64); 6] = [
+        (16, 0.3),
+        (100, 0.5),
+        (1024, 0.5),  // mean = 512 exactly
+        (1024, 0.52), // mean = 532.48 -> normal branch
+        (1000, 0.8),  // reflection
+        (10_000, 0.3),
+    ];
+    for (n, p) in binomial_cases {
+        let gpu = evaluator_draw(&kernels, &stream, 1, n as f32, p as f32, n_dev, 51);
+        let mut rng = new_rng(0xC0FFEE);
+        let cpu: Vec<f64> = (0..n_cpu).map(|_| binomial(&mut rng, n, p)).collect();
+        let label = format!("binomial n={n} p={p}");
+        assert_same_distribution(&label, &gpu, &cpu, 0.0, n as f64 + 1.0, 40);
+        let mean = gpu.iter().sum::<f64>() / n_dev as f64;
+        let want = n as f64 * p;
+        let sd = (n as f64 * p * (1.0 - p)).sqrt();
+        let se = sd / (n_dev as f64).sqrt();
+        assert!(
+            (mean - want).abs() <= 6.0 * se,
+            "{label}: mean {mean} vs {want}"
+        );
+    }
+
+    // Poisson grid around the Knuth/normal boundary at lambda = 64.
+    for lambda in [1.0f64, 20.0, 63.0, 64.0, 65.0, 200.0] {
+        let gpu = evaluator_draw(&kernels, &stream, 2, lambda as f32, 0.0, n_dev, 61);
+        let mut rng = new_rng(0xBEEF);
+        let cpu: Vec<f64> = (0..n_cpu).map(|_| poisson(&mut rng, lambda)).collect();
+        let hi = lambda + 8.0 * lambda.sqrt() + 4.0;
+        let label = format!("poisson lambda={lambda}");
+        assert_same_distribution(&label, &gpu, &cpu, 0.0, hi, 40);
+        let mean = gpu.iter().sum::<f64>() / n_dev as f64;
+        let se = lambda.sqrt() / (n_dev as f64).sqrt();
+        assert!(
+            (mean - lambda).abs() <= 6.0 * se,
+            "{label}: mean {mean} vs {lambda}"
+        );
+    }
+}
+
+#[test]
+fn evaluator_gamma_including_shape_below_one_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let n_dev = 200_000usize;
+    let n_cpu = 200_000usize;
+    for shape in [0.3f64, 0.5, 0.9, 1.0, 2.0, 5.0, 20.0] {
+        let gpu = evaluator_draw(&kernels, &stream, 3, shape as f32, 1.0, n_dev, 71);
+        let mut rng = new_rng(0xDEAD);
+        let cpu: Vec<f64> = (0..n_cpu).map(|_| gamma(&mut rng, shape)).collect();
+        let hi = shape * 8.0 + 8.0;
+        let label = format!("gamma shape={shape}");
+        assert_same_distribution(&label, &gpu, &cpu, 0.0, hi, 45);
+        let mean = gpu.iter().sum::<f64>() / n_dev as f64;
+        let var = gpu.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / n_dev as f64;
+        let se_mean = (shape / n_dev as f64).sqrt();
+        let se_var = shape * (2.0 / n_dev as f64).sqrt();
+        assert!(
+            (mean - shape).abs() <= 6.0 * se_mean,
+            "{label}: mean {mean} vs {shape}"
+        );
+        assert!(
+            (var - shape).abs() <= 6.0 * se_var,
+            "{label}: var {var} vs {shape}"
+        );
+    }
 }

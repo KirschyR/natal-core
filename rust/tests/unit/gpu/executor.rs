@@ -2263,3 +2263,186 @@ fn execution_rejects_overwide_stochastic_csr_rows() {
         .migrate_tick_stochastic(&blueprint, &ecology)
         .is_err());
 }
+
+#[test]
+fn device_ensemble_matches_independent_cpu_runs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 2000usize;
+    let n_ages = 4usize;
+    let z = 2usize;
+    let ticks = 3;
+
+    let mut blueprint = dimension_blueprint(n_ages, z);
+    blueprint.stochastic = true;
+    blueprint.fixed_egg_count = false;
+    blueprint.n_demes = n_batch;
+
+    let tile = |values: &[f64]| -> Vec<f64> {
+        (0..n_batch).flat_map(|_| values.iter().copied()).collect()
+    };
+    let mut one_ecology = density_fixture().1;
+    one_ecology.n_demes = 1;
+    one_ecology.carrying_capacity.truncate(1);
+    one_ecology.eggs_per_female.truncate(1);
+    one_ecology.sex_ratio.truncate(1);
+    one_ecology.sperm_displacement_rate.truncate(1);
+    one_ecology.low_density_growth_rate.truncate(1);
+    one_ecology.growth_mode.truncate(1);
+    one_ecology.external_expected_eggs.truncate(1);
+    one_ecology.equilibrium_declared.truncate(1);
+    one_ecology.survival_rates.truncate(8);
+    one_ecology.mating_rates.truncate(8);
+    one_ecology.reproduction_rates.truncate(4);
+    one_ecology.fertility.truncate(4);
+    one_ecology.competition_weights.truncate(4);
+    one_ecology.migration_rate.clear();
+    one_ecology.custom_slots.truncate(1);
+    one_ecology.growth_mode[0] = 0;
+    one_ecology.mating_rates = vec![0.0, 0.9, 0.9, 0.9, 0.0, 0.9, 0.9, 0.9];
+    one_ecology.eggs_per_female[0] = 10.0;
+
+    let ecology = EcologyParams {
+        n_demes: n_batch,
+        carrying_capacity: tile(&one_ecology.carrying_capacity),
+        eggs_per_female: tile(&one_ecology.eggs_per_female),
+        sex_ratio: tile(&one_ecology.sex_ratio),
+        sperm_displacement_rate: tile(&one_ecology.sperm_displacement_rate),
+        low_density_growth_rate: tile(&one_ecology.low_density_growth_rate),
+        growth_mode: tile_i64(&one_ecology.growth_mode, n_batch),
+        external_expected_eggs: tile(&one_ecology.external_expected_eggs),
+        survival_rates: tile(&one_ecology.survival_rates),
+        mating_rates: tile(&one_ecology.mating_rates),
+        reproduction_rates: tile(&one_ecology.reproduction_rates),
+        fertility: tile(&one_ecology.fertility),
+        competition_weights: tile(&one_ecology.competition_weights),
+        equilibrium_distribution: vec![],
+        equilibrium_declared: vec![false; n_batch],
+        migration_rate: vec![],
+        custom_slots: vec![HashMap::new(); n_batch],
+    };
+    let genetics = reproduction_genetics(n_ages, z);
+    let variants = vec![genetics.clone()];
+    let deme_variants = vec![0usize; n_batch];
+
+    let ind_stride = 2 * n_ages * z;
+    let sperm_stride = n_ages * z * z;
+    let mut one_ind = vec![0.0f64; ind_stride];
+    for sex in 0..2 {
+        for age in 0..n_ages {
+            for zz in 0..z {
+                one_ind[(sex * n_ages + age) * z + zz] = if age == 0 { 0.0 } else { 100.0 };
+            }
+        }
+    }
+    let mut one_sperm = vec![0.0f64; sperm_stride];
+    for age in 1..n_ages {
+        for gf in 0..z {
+            for gm in 0..z {
+                one_sperm[(age * z + gf) * z + gm] = 3.0;
+            }
+        }
+    }
+    let ind_one_f32: Vec<f32> = one_ind.iter().map(|v| *v as f32).collect();
+    let sperm_one_f32: Vec<f32> = one_sperm.iter().map(|v| *v as f32).collect();
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::ensemble(
+        context,
+        n_batch,
+        n_ages,
+        z,
+        &ind_one_f32,
+        &sperm_one_f32,
+        0x5EED_1234_ABCD_0001,
+    )
+    .expect("ensemble executor");
+    for _ in 0..ticks {
+        executor
+            .tick(&blueprint, &ecology, &variants, &deme_variants)
+            .expect("ensemble tick");
+    }
+    let device_ind = executor.download_ind().expect("download");
+    let device_sperm = executor.download_sperm().expect("download");
+
+    let mut cpu_sum_ind = vec![0.0f64; ind_stride];
+    let mut cpu_sq_ind = vec![0.0f64; ind_stride];
+    let mut cpu_sum_sperm = vec![0.0f64; sperm_stride];
+    let mut cpu_sq_sperm = vec![0.0f64; sperm_stride];
+    for trial in 0..n_batch {
+        let mut rng = new_rng(90_000 + trial as u64);
+        let mut ind = one_ind.clone();
+        let mut sperm = one_sperm.clone();
+        for _ in 0..ticks {
+            crate::kernels::age_structured::reproduction(
+                &mut rng,
+                &blueprint,
+                &one_ecology,
+                &genetics,
+                0,
+                &mut ind,
+                &mut sperm,
+            )
+            .expect("host reproduction");
+            crate::kernels::age_structured::survival(
+                &mut rng,
+                &blueprint,
+                &one_ecology,
+                &genetics,
+                0,
+                &mut ind,
+                &mut sperm,
+            )
+            .expect("host survival");
+            crate::kernels::age_structured::aging(&blueprint, &mut ind, &mut sperm);
+        }
+        for (slot, value) in ind.iter().enumerate() {
+            cpu_sum_ind[slot] += value;
+            cpu_sq_ind[slot] += value * value;
+        }
+        for (slot, value) in sperm.iter().enumerate() {
+            cpu_sum_sperm[slot] += value;
+            cpu_sq_sperm[slot] += value * value;
+        }
+    }
+    let trials = n_batch as f64;
+    for slot in 0..ind_stride {
+        let cpu_mean = cpu_sum_ind[slot] / trials;
+        let cpu_var = (cpu_sq_ind[slot] / trials - cpu_mean * cpu_mean).max(0.0);
+        let device_mean = (0..n_batch)
+            .map(|b| device_ind[b * ind_stride + slot] as f64)
+            .sum::<f64>()
+            / trials;
+        let tolerance = 5.0 * (cpu_var / trials).sqrt() + 0.5;
+        assert!(
+            (device_mean - cpu_mean).abs() <= tolerance,
+            "ind[{slot}]: device mean {device_mean} vs host {cpu_mean} (tol {tolerance})"
+        );
+    }
+    for slot in 0..sperm_stride {
+        let cpu_mean = cpu_sum_sperm[slot] / trials;
+        let cpu_var = (cpu_sq_sperm[slot] / trials - cpu_mean * cpu_mean).max(0.0);
+        let device_mean = (0..n_batch)
+            .map(|b| device_sperm[b * sperm_stride + slot] as f64)
+            .sum::<f64>()
+            / trials;
+        let tolerance = 5.0 * (cpu_var / trials).sqrt() + 0.5;
+        assert!(
+            (device_mean - cpu_mean).abs() <= tolerance,
+            "sperm[{slot}]: device mean {device_mean} vs host {cpu_mean} (tol {tolerance})"
+        );
+    }
+}
+
+/// Tile an `i64` column across `n` batch elements.
+///
+/// ## Parameters
+/// - `values`, `n`: Source column and repeat count.
+///
+/// ## Returns
+/// The tiled column.
+fn tile_i64(values: &[i64], n: usize) -> Vec<i64> {
+    (0..n).flat_map(|_| values.iter().copied()).collect()
+}

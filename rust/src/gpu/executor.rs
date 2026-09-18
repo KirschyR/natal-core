@@ -134,6 +134,67 @@ impl GpuExecutor {
         self.seed = seed;
     }
 
+    /// Build an executor running `n_replicates` independent copies of one
+    /// panmictic model.
+    ///
+    /// Every replicate is a batch element; the counter-based RNG gives each a
+    /// disjoint stream, so the replicates are statistically independent yet
+    /// reproducible from `seed`.
+    ///
+    /// ## Parameters
+    /// - `context`: An owned device context.
+    /// - `n_replicates`: Number of independent trajectories.
+    /// - `n_ages`, `n_ztypes`: Model dimensions.
+    /// - `ind_one`, `sperm_one`: One replicate's initial state (batch-major).
+    /// - `seed`: Ensemble seed.
+    ///
+    /// ## Returns
+    /// A ready executor with `n_batch == n_replicates`.
+    ///
+    /// ## Errors
+    /// Returns a description when the single-replicate slices are the wrong
+    /// size or the underlying upload fails.
+    pub fn ensemble(
+        context: GpuContext,
+        n_replicates: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        ind_one: &[f32],
+        sperm_one: &[f32],
+        seed: u64,
+    ) -> Result<Self, String> {
+        if ind_one.len() != 2 * n_ages * n_ztypes {
+            return Err(format!(
+                "ensemble individual state needs {} elements per replicate, got {}",
+                2 * n_ages * n_ztypes,
+                ind_one.len()
+            ));
+        }
+        if sperm_one.len() != n_ages * n_ztypes * n_ztypes {
+            return Err(format!(
+                "ensemble sperm state needs {} elements per replicate, got {}",
+                n_ages * n_ztypes * n_ztypes,
+                sperm_one.len()
+            ));
+        }
+        let ind_all: Vec<f32> = (0..n_replicates)
+            .flat_map(|_| ind_one.iter().copied())
+            .collect();
+        let sperm_all: Vec<f32> = (0..n_replicates)
+            .flat_map(|_| sperm_one.iter().copied())
+            .collect();
+        let mut executor = Self::new(
+            context,
+            n_replicates,
+            n_ages,
+            n_ztypes,
+            &ind_all,
+            &sperm_all,
+        )?;
+        executor.set_seed(seed);
+        Ok(executor)
+    }
+
     /// The two Philox key words derived from the executor seed.
     ///
     /// ## Returns

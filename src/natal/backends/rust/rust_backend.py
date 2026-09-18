@@ -268,6 +268,43 @@ class RustLifecycleBackend:
             return "unavailable"
         return str(status())
 
+    def enable_gpu_ensemble(self, n_replicates: int) -> None:
+        """Enable the GPU ensemble (many independent replicates).
+
+        Args:
+            n_replicates: Number of independent trajectories (>= 1).
+
+        Raises:
+            RuntimeError: The installed extension has no GPU ensemble support.
+        """
+        enable = getattr(self._session, "enable_gpu_ensemble", None)
+        if enable is None:
+            raise RuntimeError(
+                "this _engine_rs build has no GPU ensemble support; rebuild with "
+                "`maturin develop --features gpu`"
+            )
+        enable(int(n_replicates))
+
+    def run_gpu_ensemble(
+        self, n_ticks: int
+    ) -> tuple[int, NDArray[np.float64], NDArray[np.float64]]:
+        """Advance every ensemble replicate and return the stacked final state.
+
+        Args:
+            n_ticks: Number of ticks to run.
+
+        Returns:
+            ``(n_ticks, ind_flat, sperm_flat)``; the caller reshapes.
+        """
+        run = getattr(self._session, "run_gpu_ensemble", None)
+        if run is None:
+            raise RuntimeError(
+                "this _engine_rs build has no GPU ensemble support; rebuild with "
+                "`maturin develop --features gpu`"
+            )
+        tick, ind, sperm = _session_call(lambda: run(int(n_ticks)))
+        return int(tick), ind, sperm
+
     def refresh_params(self, fields: list[str], params_obj: Params) -> None:
         """Pull exactly *fields* from the contract params into the session.
 

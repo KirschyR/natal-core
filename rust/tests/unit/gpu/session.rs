@@ -6,6 +6,7 @@
 //! eligibility rejections. The success path cross-checks the device run against
 //! the CPU run on the same fixture.
 
+use numpy::{PyArrayMethods, PyUntypedArrayMethods};
 use pyo3::Python;
 
 use super::AgeStructuredSession;
@@ -242,4 +243,44 @@ fn session_enable_gpu_rejects_ineligible_models() {
             "python callbacks must reject"
         );
     });
+}
+
+#[test]
+fn session_gpu_ensemble_runs_and_covers_wiring() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (mut blueprint, params, genetics) = fixture();
+        blueprint.stochastic = true;
+        let (ind, sperm) = initial_state();
+        let mut session = make_session(blueprint, params, genetics, ind, sperm);
+        session.enable_gpu_ensemble(256).expect("enable ensemble");
+        assert_eq!(session.gpu_status(), "enabled");
+        let (tick, ind_arr, sperm_arr) = session.run_gpu_ensemble(py, 3).expect("run ensemble");
+        assert_eq!(tick, 3);
+        assert_eq!(ind_arr.len(), 256 * 2 * 4 * 2);
+        assert_eq!(sperm_arr.len(), 256 * 4 * 2 * 2);
+        assert!(ind_arr
+            .readonly()
+            .as_slice()
+            .expect("array slice")
+            .iter()
+            .all(|value| value.is_finite()));
+    });
+}
+
+#[test]
+fn session_gpu_ensemble_rejects_ineligible() {
+    let (mut blueprint, params, genetics) = fixture();
+    blueprint.continuous_sampling = true;
+    let (ind, sperm) = initial_state();
+    let mut continuous = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+    assert!(continuous.enable_gpu_ensemble(4).is_err());
+
+    let (blueprint, params, genetics) = fixture();
+    let mut session = make_session(blueprint, params, genetics, ind, sperm);
+    assert!(session.enable_gpu_ensemble(0).is_err());
 }

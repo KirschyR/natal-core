@@ -41,6 +41,45 @@ fn map_lifecycle_error(err: String) -> PyErr {
     crate::hooks::transaction::map_error(err)
 }
 
+/// Tile one-deme ecology columns into `n` identical columns for the ensemble.
+///
+/// ## Parameters
+/// - `one`: One-deme ecology.
+/// - `n`: Replicate count.
+///
+/// ## Returns
+/// The tiled ecology, with `n_demes == n`.
+#[cfg(feature = "gpu")]
+fn tile_ecology(one: &EcologyParams, n: usize) -> EcologyParams {
+    let f = |values: &[f64]| -> Vec<f64> { (0..n).flat_map(|_| values.iter().copied()).collect() };
+    let i = |values: &[i64]| -> Vec<i64> { (0..n).flat_map(|_| values.iter().copied()).collect() };
+    EcologyParams {
+        n_demes: n,
+        carrying_capacity: f(&one.carrying_capacity),
+        eggs_per_female: f(&one.eggs_per_female),
+        sex_ratio: f(&one.sex_ratio),
+        sperm_displacement_rate: f(&one.sperm_displacement_rate),
+        low_density_growth_rate: f(&one.low_density_growth_rate),
+        growth_mode: i(&one.growth_mode),
+        external_expected_eggs: f(&one.external_expected_eggs),
+        survival_rates: f(&one.survival_rates),
+        mating_rates: f(&one.mating_rates),
+        reproduction_rates: f(&one.reproduction_rates),
+        fertility: f(&one.fertility),
+        competition_weights: f(&one.competition_weights),
+        equilibrium_distribution: if one.equilibrium_distribution.is_empty() {
+            Vec::new()
+        } else {
+            f(&one.equilibrium_distribution)
+        },
+        equilibrium_declared: (0..n)
+            .flat_map(|_| one.equilibrium_declared.iter().copied())
+            .collect(),
+        migration_rate: one.migration_rate.clone(),
+        custom_slots: vec![HashMap::new(); n],
+    }
+}
+
 /// Snapshot tuple: ``(tick, ind_flat, sperm_flat, rng_words, ecology)``.
 pub type AgeSnapshot<'py> = (
     i64,
@@ -49,6 +88,10 @@ pub type AgeSnapshot<'py> = (
     Vec<u64>,
     Bound<'py, PyDict>,
 );
+
+/// Ensemble readout: ``(tick, ind_flat, sperm_flat)``.
+#[cfg(feature = "gpu")]
+pub type EnsembleReadout<'py> = (i64, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>);
 
 /// PyO3-exported stateful session for the age-structured Rust backend.
 ///
@@ -298,6 +341,124 @@ impl AgeStructuredSession {
         } else {
             "disabled".to_owned()
         }
+    }
+
+    /// Enable the GPU **ensemble**: `n_replicates` independent copies of this
+    /// panmictic model on the device batch axis.
+    ///
+    /// Each replicate uses a disjoint counter-based RNG stream, so the
+    /// trajectories are statistically independent and reproducible from the
+    /// session seed.
+    ///
+    /// ## Parameters
+    /// - `n_replicates`: Number of independent trajectories (>= 1).
+    ///
+    /// ## Errors
+    /// Returns ``PyValueError`` for ineligible models and a runtime error when
+    /// the device is unavailable.
+    #[cfg(feature = "gpu")]
+    fn enable_gpu_ensemble(&mut self, n_replicates: usize) -> PyResult<()> {
+        if n_replicates == 0 {
+            return Err(PyValueError::new_err("n_replicates must be >= 1"));
+        }
+        if self.blueprint.continuous_sampling {
+            return Err(PyValueError::new_err(
+                "GPU ensemble requires continuous_sampling=false",
+            ));
+        }
+        if self.blueprint.n_demes != 1 || self.params.n_demes != 1 {
+            return Err(PyValueError::new_err(
+                "GPU ensemble supports a single panmictic model",
+            ));
+        }
+        if self.hooks.n_hooks != 0
+            || self
+                .hooks
+                .python_callbacks
+                .iter()
+                .any(|callbacks| !callbacks.is_empty())
+        {
+            return Err(PyValueError::new_err(
+                "GPU ensemble requires a hook-free model",
+            ));
+        }
+        if self
+            .params
+            .growth_mode
+            .iter()
+            .any(|mode| !(0..=4).contains(mode))
+        {
+            return Err(PyValueError::new_err(
+                "GPU ensemble does not support custom growth curves",
+            ));
+        }
+        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
+        let ind_one: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
+        let sperm_one: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
+        let executor = crate::gpu::executor::GpuExecutor::ensemble(
+            context,
+            n_replicates,
+            self.blueprint.n_ages,
+            self.blueprint.n_ztypes,
+            &ind_one,
+            &sperm_one,
+            self.seed,
+        )
+        .map_err(map_lifecycle_error)?;
+        self.gpu = Some(executor);
+        Ok(())
+    }
+
+    /// Advance every ensemble replicate by `n_ticks` and return the final
+    /// stacked state.
+    ///
+    /// ## Parameters
+    /// - `n_ticks`: Number of ticks (negative treated as zero).
+    ///
+    /// ## Returns
+    /// ``(n_ticks, ind_flat, sperm_flat)`` where ``ind_flat`` is the stacked
+    /// ``(n_replicates, 2, A, Z)`` counts and ``sperm_flat`` the stacked
+    /// ``(n_replicates, A, Z, Z)`` storage.
+    ///
+    /// ## Errors
+    /// Returns a runtime error when ``enable_gpu_ensemble`` was not called.
+    #[cfg(feature = "gpu")]
+    #[pyo3(signature = (n_ticks))]
+    fn run_gpu_ensemble<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_ticks: i64,
+    ) -> PyResult<EnsembleReadout<'py>> {
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Err(map_lifecycle_error(
+                "run_gpu_ensemble requires enable_gpu_ensemble first".to_owned(),
+            ));
+        };
+        let n_batch = gpu.n_batch();
+        let ecology = tile_ecology(&self.params, n_batch);
+        let variants = [self.genetics.clone()];
+        let deme_variants = vec![0usize; n_batch];
+        for _ in 0..n_ticks.max(0) {
+            gpu.tick(&self.blueprint, &ecology, &variants, &deme_variants)
+                .map_err(map_lifecycle_error)?;
+        }
+        let ind: Vec<f64> = gpu
+            .download_ind()
+            .map_err(map_lifecycle_error)?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        let sperm: Vec<f64> = gpu
+            .download_sperm()
+            .map_err(map_lifecycle_error)?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        Ok((
+            n_ticks.max(0),
+            PyArray1::from_vec(py, ind),
+            PyArray1::from_vec(py, sperm),
+        ))
     }
 
     /// Pull exactly the named contract fields from the Python params object.

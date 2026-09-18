@@ -1125,6 +1125,259 @@ extern "C" __global__ void survival_stochastic(
     float survived_m = (n_m > 1e-10f) ? sample_binomial(&state, n_m, p_m) : 0.0f;
     ind[((1 * A + age) * Z + g) * n_batch + b] = survived_m;
 }
+
+// Sequential conditional-binomial multinomial over `K` categories, for use by
+// a single thread (the batch element is the outer axis).
+__device__ __forceinline__ void natal_multinomial(
+    RngState* state, float total, const float* probs, int K, float* out)
+{
+    float remaining = total;
+    float tail = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        tail += probs[k];
+    }
+    for (int k = 0; k < K - 1; ++k) {
+        float draw = 0.0f;
+        if (remaining > 0.0f && tail > 0.0f) {
+            float conditional = natal_clamp01(probs[k] / tail);
+            draw = sample_binomial(state, remaining, conditional);
+            if (draw > remaining) {
+                draw = remaining;
+            }
+        }
+        out[k] = draw;
+        remaining -= draw;
+        tail -= probs[k];
+        if (remaining < 0.0f) {
+            remaining = 0.0f;
+        }
+        if (tail < 0.0f) {
+            tail = 0.0f;
+        }
+    }
+    out[K - 1] = remaining;
+}
+
+// Stochastic reproduction: `sample_mating` + `fertilize` + zygote viability,
+// stochastic (continuous_sampling=false). One thread per batch element.
+extern "C" __global__ void reproduction_stochastic(
+    float* ind,
+    float* sperm,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    int new_adult_age,
+    int has_sex_chromosomes,
+    int fixed_egg_count,
+    const float* mating_rates,
+    const float* sperm_displacement_rate,
+    const float* reproduction_rates,
+    const float* fertility,
+    const float* eggs_per_female,
+    const float* sex_ratio,
+    const int* female_only,
+    const int* male_only,
+    const float* fecundity,
+    const float* sexual_selection,
+    const float* offspring,
+    const float* zygote_viability,
+    const float* female_compat,
+    const float* male_compat,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+
+    float effective[NATAL_MAX_Z];
+    for (int z = 0; z < Z; ++z) {
+        effective[z] = 0.0f;
+    }
+    for (int age = new_adult_age; age < A; ++age) {
+        float mr = mating_rates[b * 2 * A + A + age];
+        for (int z = 0; z < Z; ++z) {
+            effective[z] += ind[((1 * A + age) * Z + z) * n_batch + b] * mr;
+        }
+    }
+    float eff_sum = 0.0f;
+    for (int z = 0; z < Z; ++z) {
+        eff_sum += effective[z];
+    }
+    if (eff_sum == 0.0f) {
+        return;
+    }
+
+    float mating_prob[NATAL_MAX_Z * NATAL_MAX_Z];
+    const float* sel = sexual_selection + b * Z * Z;
+    for (int gf = 0; gf < Z; ++gf) {
+        float row_sum = 0.0f;
+        for (int gm = 0; gm < Z; ++gm) {
+            float v = sel[gf * Z + gm] * effective[gm];
+            mating_prob[gf * Z + gm] = v;
+            row_sum += v;
+        }
+        if (isfinite(row_sum) && row_sum > 1e-10f) {
+            for (int gm = 0; gm < Z; ++gm) {
+                mating_prob[gf * Z + gm] /= row_sum;
+            }
+        } else {
+            for (int gm = 0; gm < Z; ++gm) {
+                mating_prob[gf * Z + gm] = 0.0f;
+            }
+        }
+    }
+
+    RngState state;
+    rng_init(&state, (unsigned long long)b, key0, key1, site);
+    float p_displace = natal_clamp01(sperm_displacement_rate[b]);
+
+    for (int age = new_adult_age; age < A; ++age) {
+        float p_mating = natal_clamp01(mating_rates[b * 2 * A + age]);
+        for (int gf = 0; gf < Z; ++gf) {
+            float n_female = ind[((0 * A + age) * Z + gf) * n_batch + b];
+            float mated = 0.0f;
+            for (int gm = 0; gm < Z; ++gm) {
+                mated += sperm[((age * Z + gf) * Z + gm) * n_batch + b];
+            }
+            float virgins = n_female - mated;
+            if (virgins < 0.0f) {
+                virgins = 0.0f;
+            }
+            float n_mating_virgins = sample_binomial(&state, rintf(virgins), p_mating);
+            float p_remating = p_displace * p_mating;
+            float n_remating = 0.0f;
+            if (mated > 1e-10f && p_remating > 1e-10f) {
+                for (int gm = 0; gm < Z; ++gm) {
+                    int index = ((age * Z + gf) * Z + gm) * n_batch + b;
+                    float count = sperm[index];
+                    if (count > 1e-10f) {
+                        float removed = sample_binomial(&state, rintf(count), p_remating);
+                        float left = sperm[index] - removed;
+                        sperm[index] = left < 0.0f ? 0.0f : left;
+                        n_remating += removed;
+                    }
+                }
+            }
+            float n_new = n_mating_virgins + n_remating;
+            if (n_new > 1e-10f) {
+                float n_int = rintf(n_new);
+                if (n_int > 0.0f) {
+                    float row[NATAL_MAX_Z];
+                    float drawn[NATAL_MAX_Z];
+                    for (int gm = 0; gm < Z; ++gm) {
+                        row[gm] = mating_prob[gf * Z + gm];
+                    }
+                    natal_multinomial(&state, n_int, row, Z, drawn);
+                    for (int gm = 0; gm < Z; ++gm) {
+                        sperm[((age * Z + gf) * Z + gm) * n_batch + b] += drawn[gm];
+                    }
+                }
+            }
+        }
+    }
+
+    float offspring_acc[NATAL_MAX_Z];
+    for (int z = 0; z < Z; ++z) {
+        offspring_acc[z] = 0.0f;
+    }
+    float epf = eggs_per_female[b];
+    if (!(epf > 0.0f)) {
+        epf = 0.0f;
+    }
+    const float* ff = fecundity + b * 2 * Z;
+    for (int age = new_adult_age; age < A; ++age) {
+        float pr = natal_clamp01(reproduction_rates[b * A + age]);
+        float ft = natal_clamp01(fertility[b * A + age]);
+        for (int gf = 0; gf < Z; ++gf) {
+            for (int gm = 0; gm < Z; ++gm) {
+                float n_pairs = sperm[((age * Z + gf) * Z + gm) * n_batch + b];
+                if (n_pairs <= 0.0f) {
+                    continue;
+                }
+                float eggs_per_pair = epf * ff[gf] * ff[Z + gm] * ft;
+                float n_pairs_eff = rintf(n_pairs);
+                if (n_pairs_eff <= 0.0f) {
+                    continue;
+                }
+                float n_reproducing = (pr < 1.0f - 1e-10f)
+                    ? sample_binomial(&state, n_pairs_eff, pr)
+                    : n_pairs_eff;
+                float total_lambda = n_reproducing * eggs_per_pair;
+                float n_total = fixed_egg_count
+                    ? rintf(total_lambda)
+                    : sample_poisson(&state, total_lambda);
+                if (n_total <= 1e-10f) {
+                    continue;
+                }
+                const float* off = offspring + b * Z * Z * Z + (gf * Z + gm) * Z;
+                float p_surv = 0.0f;
+                for (int go = 0; go < Z; ++go) {
+                    p_surv += off[go];
+                }
+                if (p_surv <= 1e-10f) {
+                    continue;
+                }
+                float n_viable = (p_surv >= 1.0f - 1e-10f)
+                    ? n_total
+                    : sample_binomial(&state, rintf(n_total), p_surv);
+                if (n_viable <= 1e-10f) {
+                    continue;
+                }
+                float inv = 1.0f / p_surv;
+                float prob_norm[NATAL_MAX_Z];
+                float drawn[NATAL_MAX_Z];
+                for (int go = 0; go < Z; ++go) {
+                    prob_norm[go] = off[go] * inv;
+                }
+                natal_multinomial(&state, rintf(n_viable), prob_norm, Z, drawn);
+                for (int go = 0; go < Z; ++go) {
+                    offspring_acc[go] += drawn[go];
+                }
+            }
+        }
+    }
+
+    float sr = natal_clamp01(sex_ratio[b]);
+    const float* fcompat = female_compat + b * Z;
+    const float* mcompat = male_compat + b * Z;
+    const float* zyg = zygote_viability + b * 2 * Z;
+    for (int go = 0; go < Z; ++go) {
+        float n_g = offspring_acc[go];
+        float n_f = 0.0f;
+        float n_m = 0.0f;
+        if (n_g > 1e-10f) {
+            if (has_sex_chromosomes && female_only[go]) {
+                n_f = n_g;
+            } else if (has_sex_chromosomes && male_only[go]) {
+                n_m = n_g;
+            } else {
+                float p_f;
+                if (has_sex_chromosomes) {
+                    float denom = fcompat[go] + mcompat[go];
+                    p_f = (denom > 1e-10f) ? natal_clamp01(fcompat[go] / denom) : 0.5f;
+                } else {
+                    p_f = sr;
+                }
+                float n_fem = sample_binomial(&state, rintf(n_g), p_f);
+                n_f = n_fem;
+                n_m = n_g - n_fem;
+            }
+        }
+        float fv = (n_f > 0.0f)
+            ? sample_binomial(&state, rintf(n_f), natal_clamp01(zyg[go]))
+            : 0.0f;
+        float mv = (n_m > 0.0f)
+            ? sample_binomial(&state, rintf(n_m), natal_clamp01(zyg[Z + go]))
+            : 0.0f;
+        ind[((0 * A + 0) * Z + go) * n_batch + b] = fv;
+        ind[((1 * A + 0) * Z + go) * n_batch + b] = mv;
+    }
+}
 "#;
 
 /// Device arguments for [`Kernels::density_scaling`].
@@ -1228,6 +1481,8 @@ pub struct Kernels {
     recruit_stochastic: CudaFunction,
     /// `survival_stochastic(...)`.
     survival_stochastic: CudaFunction,
+    /// `reproduction_stochastic(...)`.
+    reproduction_stochastic: CudaFunction,
 }
 
 impl Kernels {
@@ -1300,6 +1555,9 @@ impl Kernels {
         let survival_stochastic = module
             .load_function("survival_stochastic")
             .map_err(|err| format!("loading kernel `survival_stochastic` failed: {err}"))?;
+        let reproduction_stochastic = module
+            .load_function("reproduction_stochastic")
+            .map_err(|err| format!("loading kernel `reproduction_stochastic` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -1315,6 +1573,7 @@ impl Kernels {
             multinomial_seq,
             recruit_stochastic,
             survival_stochastic,
+            reproduction_stochastic,
         })
     }
 
@@ -1969,6 +2228,77 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("survival_stochastic launch failed: {err}"))
+    }
+
+    /// Run the stochastic reproduction stage in place.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn reproduction_stochastic(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        sperm: &mut CudaSlice<f32>,
+        buffers: &ReproductionBuffers<'_>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        new_adult_age: usize,
+        has_sex_chromosomes: bool,
+        fixed_egg_count: bool,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        if n_ztypes > MAX_Z {
+            return Err(format!(
+                "reproduction_stochastic supports at most {MAX_Z} zygote types, got {n_ztypes}"
+            ));
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let new_adult_i = new_adult_age as i32;
+        let sex_chrom_i = i32::from(has_sex_chromosomes);
+        let fixed_eggs_i = i32::from(fixed_egg_count);
+        let config = LaunchConfig {
+            grid_dim: ((n_batch as u32).div_ceil(64), 1, 1),
+            block_dim: (64, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut launch = stream.launch_builder(&self.reproduction_stochastic);
+        launch.arg(&mut *ind);
+        launch.arg(&mut *sperm);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&new_adult_i);
+        launch.arg(&sex_chrom_i);
+        launch.arg(&fixed_eggs_i);
+        launch.arg(buffers.mating_rates);
+        launch.arg(buffers.sperm_displacement_rate);
+        launch.arg(buffers.reproduction_rates);
+        launch.arg(buffers.fertility);
+        launch.arg(buffers.eggs_per_female);
+        launch.arg(buffers.sex_ratio);
+        launch.arg(buffers.female_only);
+        launch.arg(buffers.male_only);
+        launch.arg(buffers.fecundity);
+        launch.arg(buffers.sexual_selection);
+        launch.arg(buffers.offspring);
+        launch.arg(buffers.zygote_viability);
+        launch.arg(buffers.female_compat);
+        launch.arg(buffers.male_compat);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("reproduction_stochastic launch failed: {err}"))
     }
 }
 

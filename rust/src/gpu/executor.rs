@@ -629,32 +629,58 @@ impl GpuExecutor {
         let zygote_buf = DeviceBuffer::from_host(&stream, &zygote)?;
         let female_compat_buf = DeviceBuffer::from_host(&stream, &female_compat)?;
         let male_compat_buf = DeviceBuffer::from_host(&stream, &male_compat)?;
-        self.kernels.reproduction(
-            &stream,
-            self.ind.slice_mut(),
-            self.sperm.slice_mut(),
-            &ReproductionBuffers {
-                mating_rates: mating_rates.slice(),
-                sperm_displacement_rate: displacement.slice(),
-                reproduction_rates: reproduction_rates.slice(),
-                fertility: fertility.slice(),
-                eggs_per_female: eggs.slice(),
-                sex_ratio: sex_ratio.slice(),
-                female_only: female_only_buf.slice(),
-                male_only: male_only_buf.slice(),
-                fecundity: fecundity_buf.slice(),
-                sexual_selection: sexual_selection_buf.slice(),
-                offspring: offspring_buf.slice(),
-                zygote_viability: zygote_buf.slice(),
-                female_compat: female_compat_buf.slice(),
-                male_compat: male_compat_buf.slice(),
-            },
-            n_batch,
-            n_ages,
-            n_ztypes,
-            blueprint.new_adult_age,
-            blueprint.has_sex_chromosomes,
-        )?;
+        let reproduction_buffers = ReproductionBuffers {
+            mating_rates: mating_rates.slice(),
+            sperm_displacement_rate: displacement.slice(),
+            reproduction_rates: reproduction_rates.slice(),
+            fertility: fertility.slice(),
+            eggs_per_female: eggs.slice(),
+            sex_ratio: sex_ratio.slice(),
+            female_only: female_only_buf.slice(),
+            male_only: male_only_buf.slice(),
+            fecundity: fecundity_buf.slice(),
+            sexual_selection: sexual_selection_buf.slice(),
+            offspring: offspring_buf.slice(),
+            zygote_viability: zygote_buf.slice(),
+            female_compat: female_compat_buf.slice(),
+            male_compat: male_compat_buf.slice(),
+        };
+        if blueprint.stochastic {
+            if blueprint.continuous_sampling {
+                return Err(
+                    "GPU stochastic reproduction requires continuous_sampling=false".to_owned(),
+                );
+            }
+            let (key0, key1) = self.rng_key();
+            let site = self.rng_site(2);
+            self.kernels.reproduction_stochastic(
+                &stream,
+                self.ind.slice_mut(),
+                self.sperm.slice_mut(),
+                &reproduction_buffers,
+                n_batch,
+                n_ages,
+                n_ztypes,
+                blueprint.new_adult_age,
+                blueprint.has_sex_chromosomes,
+                blueprint.fixed_egg_count,
+                key0,
+                key1,
+                site,
+            )?;
+        } else {
+            self.kernels.reproduction(
+                &stream,
+                self.ind.slice_mut(),
+                self.sperm.slice_mut(),
+                &reproduction_buffers,
+                n_batch,
+                n_ages,
+                n_ztypes,
+                blueprint.new_adult_age,
+                blueprint.has_sex_chromosomes,
+            )?;
+        }
         Ok(())
     }
 

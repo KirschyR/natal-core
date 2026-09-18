@@ -215,7 +215,7 @@ fn spatial_device_branch_matches_cpu_and_covers_wiring() {
         {
             let want = *want as f32;
             let got = *got as f32;
-            let tolerance = 1e-5f32 * want.abs().max(1.0);
+            let tolerance = 1.2e-6f32 * want.abs().max(1.0);
             assert!(
                 (got - want).abs() <= tolerance,
                 "stay_after={stay_after} ind[{index}]: device {got} vs host {want}"
@@ -229,7 +229,7 @@ fn spatial_device_branch_matches_cpu_and_covers_wiring() {
         {
             let want = *want as f32;
             let got = *got as f32;
-            let tolerance = 1e-5f32 * want.abs().max(1.0);
+            let tolerance = 1.2e-6f32 * want.abs().max(1.0);
             assert!(
                 (got - want).abs() <= tolerance,
                 "stay_after={stay_after} sperm[{index}]: device {got} vs host {want}"

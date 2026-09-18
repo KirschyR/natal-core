@@ -663,6 +663,71 @@ extern "C" __global__ void migration_male(
 }
 "#;
 
+/// CUDA C for the counter-based device RNG (§D3).
+///
+/// Philox4x32-10 keyed on `(seed, draw_site)` and counted by a 64-bit index:
+/// every draw is a pure function of `(key, counter, site)`, so results are
+/// reproducible run to run and independent of thread scheduling. `fill_uniform`
+/// is the reference launcher the sampling kernels are built on.
+const RNG_SOURCE: &str = r#"
+__device__ __forceinline__ unsigned int philox_mulhi(unsigned int a, unsigned int b) {
+    return (unsigned int)(((unsigned long long)a * (unsigned long long)b) >> 32);
+}
+
+__device__ __forceinline__ void philox4x32_10(
+    unsigned int c0, unsigned int c1, unsigned int c2, unsigned int c3,
+    unsigned int key0, unsigned int key1,
+    unsigned int* o0, unsigned int* o1, unsigned int* o2, unsigned int* o3)
+{
+    const unsigned int M0 = 0xD2511F53u;
+    const unsigned int M1 = 0xCD9E8D57u;
+    const unsigned int W0 = 0x9E3779B9u;
+    const unsigned int W1 = 0xBB67AE85u;
+    for (int i = 0; i < 10; ++i) {
+        unsigned int h0 = philox_mulhi(M0, c0);
+        unsigned int l0 = M0 * c0;
+        unsigned int h1 = philox_mulhi(M1, c2);
+        unsigned int l1 = M1 * c2;
+        unsigned int n0 = h1 ^ c1 ^ key0;
+        unsigned int n1 = l1;
+        unsigned int n2 = h0 ^ c3 ^ key1;
+        unsigned int n3 = l0;
+        c0 = n0; c1 = n1; c2 = n2; c3 = n3;
+        key0 += W0;
+        key1 += W1;
+    }
+    *o0 = c0; *o1 = c1; *o2 = c2; *o3 = c3;
+}
+
+__device__ __forceinline__ float uniform_from_u32(unsigned int bits) {
+    // 24-bit mantissa keeps every value exact in f32 and inside [0, 1).
+    return (float)(bits >> 8) * (1.0f / 16777216.0f);
+}
+
+extern "C" __global__ void fill_uniform(
+    float* out,
+    unsigned long long n,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    unsigned int o0, o1, o2, o3;
+    philox4x32_10(
+        (unsigned int)(i & 0xFFFFFFFFu),
+        (unsigned int)(i >> 32),
+        site,
+        0u,
+        key0,
+        key1,
+        &o0, &o1, &o2, &o3);
+    out[i] = uniform_from_u32(o0);
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -754,6 +819,8 @@ pub struct Kernels {
     migration_sperm: CudaFunction,
     /// `migration_male(...)`.
     migration_male: CudaFunction,
+    /// `fill_uniform(...)`.
+    fill_uniform: CudaFunction,
 }
 
 impl Kernels {
@@ -777,7 +844,7 @@ impl Kernels {
             ..Default::default()
         };
         let source = format!(
-            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}"
+            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}"
         );
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
@@ -811,6 +878,9 @@ impl Kernels {
         let migration_male = module
             .load_function("migration_male")
             .map_err(|err| format!("loading kernel `migration_male` failed: {err}"))?;
+        let fill_uniform = module
+            .load_function("fill_uniform")
+            .map_err(|err| format!("loading kernel `fill_uniform` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -821,6 +891,7 @@ impl Kernels {
             migration_female,
             migration_sperm,
             migration_male,
+            fill_uniform,
         })
     }
 
@@ -1270,6 +1341,43 @@ impl Kernels {
         unsafe { sperm.launch(sperm_cfg) }
             .map(|_| ())
             .map_err(|err| format!("migration_sperm launch failed: {err}"))
+    }
+
+    /// Fill `out` with counter-based Philox4x32-10 uniforms in `[0, 1)`.
+    ///
+    /// Each element is a pure function of `(key0, key1, site, index)`, so the
+    /// sequence is reproducible regardless of thread count or scheduling.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `out`: Destination uniforms.
+    /// - `key0`, `key1`: 64-bit key split into two words (e.g. from the seed).
+    /// - `site`: Draw-site counter distinguishing different draws in a tick.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    pub fn fill_uniform(
+        &self,
+        stream: &Arc<CudaStream>,
+        out: &mut CudaSlice<f32>,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        let n = out.len() as u64;
+        if n == 0 {
+            return Ok(());
+        }
+        let config = LaunchConfig::for_num_elems(n as u32);
+        let mut launch = stream.launch_builder(&self.fill_uniform);
+        launch.arg(&mut *out);
+        launch.arg(&n);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("fill_uniform launch failed: {err}"))
     }
 }
 

@@ -1274,7 +1274,7 @@ fn device_migration_matches_the_host_reference() {
         ] {
             for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
                 let want = *want as f32;
-                let tolerance = 1e-5f32 * want.abs().max(1.0);
+                let tolerance = 1.2e-6f32 * want.abs().max(1.0);
                 assert!(
                     (got - want).abs() <= tolerance,
                     "stay_after={stay_after} {label}[{index}]: device {got} vs host {want}"
@@ -1315,4 +1315,234 @@ fn migration_tick_validates_inputs() {
     assert!(executor
         .migrate_tick(&out_of_range, &ecology, false)
         .is_err());
+}
+
+// ---------------------------------------------------------------------------
+// Evaluator adversarial migration topologies (P5).
+// ---------------------------------------------------------------------------
+
+/// Tiled ecology for a general `(n_demes, n_ages)` migration case.
+///
+/// ## Parameters
+/// - `n_demes`, `n_ages`: Model dimensions.
+/// - `rate`: `(n_demes, 2, n_ages)` migration column.
+///
+/// ## Returns
+/// An ecology whose only exercised column is `migration_rate`.
+fn evaluator_migration_ecology(n_demes: usize, n_ages: usize, rate: &[f64]) -> EcologyParams {
+    let tile = |values: &[f64]| -> Vec<f64> {
+        (0..n_demes).flat_map(|_| values.iter().copied()).collect()
+    };
+    let survival: Vec<f64> = (0..2 * n_ages).map(|i| 0.9 - 0.01 * i as f64).collect();
+    let per_age: Vec<f64> = (0..n_ages).map(|i| 0.5 + 0.01 * i as f64).collect();
+    EcologyParams {
+        n_demes,
+        carrying_capacity: vec![500.0; n_demes],
+        eggs_per_female: vec![10.0; n_demes],
+        sex_ratio: vec![0.5; n_demes],
+        sperm_displacement_rate: vec![0.1; n_demes],
+        low_density_growth_rate: vec![3.0; n_demes],
+        growth_mode: vec![2; n_demes],
+        external_expected_eggs: vec![-1.0; n_demes],
+        survival_rates: tile(&survival),
+        mating_rates: tile(&per_age),
+        reproduction_rates: tile(&per_age),
+        fertility: tile(&per_age),
+        competition_weights: tile(&per_age),
+        equilibrium_distribution: vec![],
+        equilibrium_declared: vec![false; n_demes],
+        migration_rate: rate.to_vec(),
+        custom_slots: vec![HashMap::new(); n_demes],
+    }
+}
+
+/// Compare one device migration against the host reference for an arbitrary CSR.
+///
+/// ## Parameters
+/// - `indptr`, `dest`, `weights`: CSR routing table.
+/// - `rate`: Migration column.
+/// - `n_demes`, `n_ages`, `n_ztypes`: Model dimensions.
+/// - `stay_after`: Migration bookkeeping mode.
+/// - `relative`: Allowed relative error.
+/// - `label`: Message prefix.
+fn evaluator_migration_case(
+    indptr: &[i64],
+    dest: &[i64],
+    weights: &[f64],
+    rate: &[f64],
+    n_demes: usize,
+    n_ages: usize,
+    n_ztypes: usize,
+    stay_after: bool,
+    relative: f32,
+    label: &str,
+) {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let mut blueprint = dimension_blueprint(n_ages, n_ztypes);
+    blueprint.n_demes = n_demes;
+    blueprint.migration_indptr = indptr.to_vec();
+    blueprint.migration_dest_idx = dest.to_vec();
+    blueprint.migration_weights = weights.to_vec();
+    let ecology = evaluator_migration_ecology(n_demes, n_ages, rate);
+    let (ind, sperm) = populated_state(n_demes, n_ages, n_ztypes);
+    let ind_f64: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let sperm_f64: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    let (cpu_ind, cpu_sperm) = migrate_csr_deterministic(
+        &ind_f64, &sperm_f64, indptr, dest, weights, rate, stay_after, n_demes, n_ages, n_ztypes,
+    )
+    .expect("host migration");
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_demes, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    executor
+        .migrate_tick(&blueprint, &ecology, stay_after)
+        .expect("device migration");
+    let gpu_ind = executor.download_ind().expect("download individuals");
+    let gpu_sperm = executor.download_sperm().expect("download sperm");
+    for (name, got, want) in [
+        ("ind", &gpu_ind, &cpu_ind),
+        ("sperm", &gpu_sperm, &cpu_sperm),
+    ] {
+        for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+            assert_relative(
+                &format!("{label} stay_after={stay_after} {name}[{index}]"),
+                *got,
+                *want as f32,
+                relative,
+            );
+        }
+    }
+}
+
+/// Build a `(n_demes, 2, n_ages)` rate column with non-trivial values.
+///
+/// ## Parameters
+/// - `n_demes`, `n_ages`: Model dimensions.
+///
+/// ## Returns
+/// A deterministic rate column.
+fn evaluator_rate(n_demes: usize, n_ages: usize) -> Vec<f64> {
+    (0..n_demes * 2 * n_ages)
+        .map(|i| 0.05 + 0.01 * (i % 9) as f64)
+        .collect()
+}
+
+#[test]
+fn evaluator_migration_topologies_match_host_tightly() {
+    for stay_after in [false, true] {
+        let rate = evaluator_rate(3, 4);
+        // Ring with weights that do not sum to one (exercises row_sum_w).
+        evaluator_migration_case(
+            &[0, 2, 4, 6],
+            &[1, 2, 0, 2, 0, 1],
+            &[0.3, 0.4, 0.25, 0.35, 0.45, 0.15],
+            &rate,
+            3,
+            4,
+            2,
+            stay_after,
+            1.2e-6,
+            "ring-nonunit",
+        );
+        let rate = evaluator_rate(2, 4);
+        // Self-loop on deme 0, isolated (empty-row) deme 1.
+        evaluator_migration_case(
+            &[0, 1, 1],
+            &[0],
+            &[0.5],
+            &rate,
+            2,
+            4,
+            2,
+            stay_after,
+            1.2e-6,
+            "selfloop-empty",
+        );
+        // Duplicate edges to the same destination plus a self-loop.
+        evaluator_migration_case(
+            &[0, 3, 3],
+            &[1, 1, 0],
+            &[0.2, 0.3, 0.5],
+            &rate,
+            2,
+            4,
+            2,
+            stay_after,
+            1.2e-6,
+            "duplicate-edges",
+        );
+        // Larger dims: 4-deme cycle with heterogeneous weights, A=8, Z=3.
+        let rate = evaluator_rate(4, 8);
+        evaluator_migration_case(
+            &[0, 2, 4, 6, 8],
+            &[1, 3, 0, 2, 1, 3, 0, 2],
+            &[0.2, 0.3, 0.4, 0.1, 0.25, 0.25, 0.3, 0.35],
+            &rate,
+            4,
+            8,
+            3,
+            stay_after,
+            1.2e-6,
+            "cycle4-a8-z3",
+        );
+    }
+}
+
+#[test]
+fn evaluator_migration_zero_rate_is_host_equivalent() {
+    // The session short-circuits all-zero rates before calling the kernel, but
+    // the executor kernel itself must still match the host reference when run.
+    for stay_after in [false, true] {
+        evaluator_migration_case(
+            &[0, 2, 4, 6],
+            &[1, 2, 0, 2, 0, 1],
+            &[0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            &vec![0.0; 3 * 2 * 4],
+            3,
+            4,
+            2,
+            stay_after,
+            1.2e-6,
+            "zero-rate",
+        );
+    }
+}
+
+#[test]
+fn evaluator_migration_empty_csr_and_overmigration_match_host() {
+    for stay_after in [false, true] {
+        // Fully empty CSR: every deme isolated, nnz = 0.
+        evaluator_migration_case(
+            &[0, 0, 0],
+            &[],
+            &[],
+            &evaluator_rate(2, 4),
+            2,
+            4,
+            2,
+            stay_after,
+            1.2e-6,
+            "nnz-zero",
+        );
+        // Over-migration: rate > 1 drives outbound above the source count.
+        let mut rate = evaluator_rate(3, 4);
+        for value in rate.iter_mut() {
+            *value = 1.5;
+        }
+        evaluator_migration_case(
+            &[0, 2, 4, 6],
+            &[1, 2, 0, 2, 0, 1],
+            &[0.5, 0.5, 0.5, 0.5, 0.5, 0.5],
+            &rate,
+            3,
+            4,
+            2,
+            stay_after,
+            1.2e-6,
+            "over-migration",
+        );
+    }
 }

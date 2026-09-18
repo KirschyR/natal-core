@@ -14,9 +14,9 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 3 轮：**APPROVED**（P0–P3） |
-| 主 agent 处理 | P5（确定性迁移 + 空间接线 + 空间 L3）已实现并自测；**待第 4 轮独立复核** |
-| 待 evaluator 动作 | 按 §16 复核，把第 4 轮结论写入 §17 |
+| 最近回执 | 第 4 轮：**APPROVED**（§17；P5 确定性迁移 + 空间多 deme） |
+| 主 agent 处理 | 已完成；无待办 |
+| 待 evaluator 动作 | —（若后续有实质改动，重跑受影响门禁并追加回执） |
 
 ## 0. 一句话目标
 
@@ -700,7 +700,89 @@ LLVM_BIN="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
 精度分档、显式失败、会话接线与测试覆盖上均满足要求。**APPROVED**（范围为当前 HEAD `34f8cc2`
 与被审测试集；不声称任何历史基线失败消失）。
 
-## 17. 第 4 轮结论（待 evaluator 填写）
+## 17. 第 4 轮结论（evaluator 独立执行，2026-09-18，HEAD=`ec1cf99`）
 
-（请在此追加：裁定 APPROVED / NOT APPROVED、独立复现的迁移 L1/空间 L3 证据、覆盖率口径与逐文件结果、
-残余风险。只追加，不改写历史轮次。）
+### 17.1 裁定：**APPROVED**
+
+P5「确定性 CSR 迁移 + 空间多 deme 会话接线」在正确性（与 CPU `migrate_csr_deterministic`
+逐分支等价）、tick 顺序、零速率跳过、CPU golden reference 隔离、默认关闭、显式失败、
+覆盖率与空间 L3 上均满足要求。
+
+### 17.2 迁移正确性（独立证伪）
+
+我自行设计了主 agent 未覆盖的 CSR 拓扑与边界，在 `rust/tests/unit/gpu/executor.rs`
+新增 3 个 evaluator 用例（`evaluator_migration_*`），以**1.2e-6**（含算术 kernel 分档）对照
+`migrate_csr_deterministic`，`stay_after` 真/假各跑一遍，全部通过：
+
+| 拓扑/输入 | 说明 |
+|---|---|
+| `ring-nonunit` | 3 环，权重和 ≠ 1（触发 `row_sum_w` 路径） |
+| `selfloop-empty` | 自环 + 空行（孤立 deme） |
+| `duplicate-edges` | 同一 src→dst 双入边 + 自环（反 CSR 顺序） |
+| `cycle4-a8-z3` | 4 环、A=8、Z=3、异质权重 |
+| `nnz-zero` | 全空 CSR（nnz=0，所有 deme 孤立） |
+| `over-migration` | rate=1.5>1（outbound 超源，stay 变负） |
+| `zero-rate` | 全 0 速率（executor 直跑仍与主机一致） |
+
+命令：`cargo test --features gpu evaluator_migration` → 3 passed。
+
+逐分支核对（读代码）：gather 的 `self`（stay_after 用 `virgin - outbound·row_sum_w`；
+非 stay 用 `virgin - outbound`；空行用 `virgin`）与入边累加 `(s_virgin·fr_src)·w` 及各 `mz`
+的储精项，与 CPU scatter 的 `out_ind[src] += virgin - moved_total` / `out_ind[dst] += outbound·w`
+逐项对齐；储精质量同时进入雌性个体平面；`row_empty` 用目的行 `indptr[dst..dst+1]`，与 scatter 的
+源行空判一致；`virgin<0 && |virgin|<1e-9` 归零语义一致。
+
+### 17.3 空间会话接线（独立复核）
+
+- 设备 tick 顺序 = 生命周期（reproduction→survival→aging，批量 deme）→ 迁移，与 CPU
+  `run_inner`（`run_spatial_tick_*` → migration → `state_tick += 1`）一致。
+- `all_zero = migration_rate.iter().all(|&r| r <= 0.0)` 时跳过迁移，与 CPU 完全相同；
+  全 0 速率不消耗设备迁移（避免 f32 抵消误差）。
+- `enable_gpu` 拒绝：discrete / stochastic / hooks（含 python_callbacks）/ 自定义 growth /
+  `n_demes != deme_variants.len()`；CPU 路径仅在 `gpu.is_none()` 时执行（提前返回，未改 CPU）。
+
+### 17.4 覆盖率（独立复测，口径沿用 §14.3）
+
+命令同 §14.2（`-C instrument-coverage` + llvm-cov lcov，仅统计 `rust/src/gpu/**`）：
+
+| 文件 | 行覆盖 |
+|---|---|
+| buffers/context/cuda/kernels/layout/mod | 均 **100%** |
+| executor.rs | 573/593 = **96.6%** |
+| probe.rs | 174/181 = **96.1%** |
+| **src/gpu TOTAL** | **1342/1369 = 98.03%** |
+
+`rust/src/sessions/spatial.rs` 新增可执行行：88/91 = **96.7%**（未覆盖 336-337 的
+`#[cfg] gpu: None` 构造初始化、1242 的一个 `?` 错误传播尾；均非逻辑路径）。
+逐文件与聚合口径**均 ≥95%**。
+
+### 17.5 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | **132 passed, 0 failed**（作者 129 + evaluator 3） |
+| `NATAL_GPU_REQUIRE=0 cargo test --features gpu` | 131 passed（跳过硬件用例，含新增） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 空间 L3（`demos/gpu_spatial/age_structured` 5×5，25 tick，重编扩展后独立跑） | tick 一致；ind `max_rel=9.140e-7`、sperm `9.149e-7` → PASS |
+| CPU/numeric 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+
+主 agent 仅**追加**测试，未削弱既有 evaluator 断言。
+
+### 17.6 非阻塞观察 / 残余风险
+
+- 作者迁移 L1 / 空间会话测试用 `1e-5·max(|want|,1)` 容差，松于规范 `1.2e-6`；evaluator 以
+  `1.2e-6` 复测通过，未掩盖缺陷。建议后续统一收紧（不阻塞）。
+- **性能（非正确性）**：`migrate_tick` 每 tick 在主机重建反向 CSR + `row_sum_w` 并整列上传，
+  且设备分支逐 tick 回传状态；这是当前取舍（§16.2 第 4 点已声明），后续可缓存 CSR/减少同步。
+- 既有已知限制不变：设备路径不记录 history、`enable_gpu` 后宿主直接改状态不重传、
+  离散/随机/迁移随机变体未接入、f32 在超大计数/长链归约下的理论误差。
+
+### 17.7 结论
+
+P5 确定性迁移与空间多 deme 旁路满足正确性与质量要求。**APPROVED**（范围为当前 HEAD
+`ec1cf99` 与被审测试集；不声称任何历史基线失败消失）。

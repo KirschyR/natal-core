@@ -467,6 +467,202 @@ extern "C" __global__ void reproduction(
 }
 "#;
 
+/// CUDA C for deterministic CSR migration.
+///
+/// Migration couples batch elements (demes), so it gathers per destination
+/// from a host-built reverse CSR: each output cell is written by exactly one
+/// thread that sums its incoming sources in a fixed order. That keeps the
+/// device result deterministic (no atomics) and mirrors
+/// `kernels::spatial::migrate_csr_deterministic`; the source's own "stay" mass
+/// is the `self` term.
+///
+/// Three kernels split the work: females (plus the sperm mass that counts as
+/// individuals), stored sperm, and males. All read the pre-migration planes
+/// and write fresh output planes.
+const MIGRATION_SOURCE: &str = r#"
+#define MIG_EPS 1e-9f
+
+extern "C" __global__ void migration_female(
+    const float* ind_in,
+    const float* sperm_in,
+    float* ind_out,
+    const float* rate,
+    const int* indptr,
+    const int* rev_indptr,
+    const int* rev_src,
+    const float* rev_weight,
+    const float* row_sum_w,
+    int stay_after,
+    int n_batch,
+    int n_ages,
+    int n_ztypes)
+{
+    int cells = n_batch * n_ages * n_ztypes;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= cells) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int fz = idx % Z;
+    int t = idx / Z;
+    int age = t % A;
+    int dst = t / A;
+
+    float fr_dst = rate[dst * 2 * A + age];
+    float stored = 0.0f;
+    for (int mz = 0; mz < Z; ++mz) {
+        stored += sperm_in[((age * Z + fz) * Z + mz) * n_batch + dst];
+    }
+    float female_total = ind_in[((0 * A + age) * Z + fz) * n_batch + dst];
+    float virgin = female_total - stored;
+    if (virgin < 0.0f && fabsf(virgin) < MIG_EPS) {
+        virgin = 0.0f;
+    }
+    float outbound = virgin * fr_dst;
+    int row_empty = (indptr[dst + 1] == indptr[dst]);
+    float self;
+    if (stay_after) {
+        self = virgin - outbound * row_sum_w[dst];
+    } else if (row_empty) {
+        self = virgin;
+    } else {
+        self = virgin - outbound;
+    }
+    // Stored sperm that stays also counts as individuals in the female plane.
+    for (int mz = 0; mz < Z; ++mz) {
+        float value = sperm_in[((age * Z + fz) * Z + mz) * n_batch + dst];
+        float out_sperm = value * fr_dst;
+        if (stay_after) {
+            self += value - out_sperm * row_sum_w[dst];
+        } else if (row_empty) {
+            self += value;
+        } else {
+            self += value - out_sperm;
+        }
+    }
+    float total = self;
+    for (int e = rev_indptr[dst]; e < rev_indptr[dst + 1]; ++e) {
+        int src = rev_src[e];
+        float w = rev_weight[e];
+        float fr_src = rate[src * 2 * A + age];
+        float s_stored = 0.0f;
+        for (int mz = 0; mz < Z; ++mz) {
+            s_stored += sperm_in[((age * Z + fz) * Z + mz) * n_batch + src];
+        }
+        float s_total = ind_in[((0 * A + age) * Z + fz) * n_batch + src];
+        float s_virgin = s_total - s_stored;
+        if (s_virgin < 0.0f && fabsf(s_virgin) < MIG_EPS) {
+            s_virgin = 0.0f;
+        }
+        total += (s_virgin * fr_src) * w;
+        for (int mz = 0; mz < Z; ++mz) {
+            float sp = sperm_in[((age * Z + fz) * Z + mz) * n_batch + src];
+            total += (sp * fr_src) * w;
+        }
+    }
+    ind_out[((0 * A + age) * Z + fz) * n_batch + dst] = total;
+}
+
+extern "C" __global__ void migration_sperm(
+    const float* sperm_in,
+    float* sperm_out,
+    const float* rate,
+    const int* indptr,
+    const int* rev_indptr,
+    const int* rev_src,
+    const float* rev_weight,
+    const float* row_sum_w,
+    int stay_after,
+    int n_batch,
+    int n_ages,
+    int n_ztypes)
+{
+    int cells = n_batch * n_ages * n_ztypes * n_ztypes;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= cells) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int mz = idx % Z;
+    int t = idx / Z;
+    int fz = t % Z;
+    t /= Z;
+    int age = t % A;
+    int dst = t / A;
+
+    float fr_dst = rate[dst * 2 * A + age];
+    float value = sperm_in[((age * Z + fz) * Z + mz) * n_batch + dst];
+    float outbound = value * fr_dst;
+    int row_empty = (indptr[dst + 1] == indptr[dst]);
+    float total;
+    if (stay_after) {
+        total = value - outbound * row_sum_w[dst];
+    } else if (row_empty) {
+        total = value;
+    } else {
+        total = value - outbound;
+    }
+    for (int e = rev_indptr[dst]; e < rev_indptr[dst + 1]; ++e) {
+        int src = rev_src[e];
+        float w = rev_weight[e];
+        float fr_src = rate[src * 2 * A + age];
+        float moved = sperm_in[((age * Z + fz) * Z + mz) * n_batch + src];
+        total += (moved * fr_src) * w;
+    }
+    sperm_out[((age * Z + fz) * Z + mz) * n_batch + dst] = total;
+}
+
+extern "C" __global__ void migration_male(
+    const float* ind_in,
+    float* ind_out,
+    const float* rate,
+    const int* indptr,
+    const int* rev_indptr,
+    const int* rev_src,
+    const float* rev_weight,
+    const float* row_sum_w,
+    int stay_after,
+    int n_batch,
+    int n_ages,
+    int n_ztypes)
+{
+    int cells = n_batch * n_ages * n_ztypes;
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= cells) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int z = idx % Z;
+    int t = idx / Z;
+    int age = t % A;
+    int dst = t / A;
+
+    float mr_dst = rate[dst * 2 * A + A + age];
+    float value = ind_in[((1 * A + age) * Z + z) * n_batch + dst];
+    float outbound = value * mr_dst;
+    int row_empty = (indptr[dst + 1] == indptr[dst]);
+    float total;
+    if (stay_after) {
+        total = value - outbound * row_sum_w[dst];
+    } else if (row_empty) {
+        total = value;
+    } else {
+        total = value - outbound;
+    }
+    for (int e = rev_indptr[dst]; e < rev_indptr[dst + 1]; ++e) {
+        int src = rev_src[e];
+        float w = rev_weight[e];
+        float mr_src = rate[src * 2 * A + A + age];
+        float moved = ind_in[((1 * A + age) * Z + z) * n_batch + src];
+        total += (moved * mr_src) * w;
+    }
+    ind_out[((1 * A + age) * Z + z) * n_batch + dst] = total;
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -552,6 +748,12 @@ pub struct Kernels {
     survival_scale_sperm: CudaFunction,
     /// `reproduction(...)`.
     reproduction: CudaFunction,
+    /// `migration_female(...)`.
+    migration_female: CudaFunction,
+    /// `migration_sperm(...)`.
+    migration_sperm: CudaFunction,
+    /// `migration_male(...)`.
+    migration_male: CudaFunction,
 }
 
 impl Kernels {
@@ -574,8 +776,9 @@ impl Kernels {
             options: vec![format!("--gpu-architecture=compute_{major}{minor}")],
             ..Default::default()
         };
-        let source =
-            format!("{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}");
+        let source = format!(
+            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}"
+        );
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
         let module = context
@@ -599,6 +802,15 @@ impl Kernels {
         let reproduction = module
             .load_function("reproduction")
             .map_err(|err| format!("loading kernel `reproduction` failed: {err}"))?;
+        let migration_female = module
+            .load_function("migration_female")
+            .map_err(|err| format!("loading kernel `migration_female` failed: {err}"))?;
+        let migration_sperm = module
+            .load_function("migration_sperm")
+            .map_err(|err| format!("loading kernel `migration_sperm` failed: {err}"))?;
+        let migration_male = module
+            .load_function("migration_male")
+            .map_err(|err| format!("loading kernel `migration_male` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -606,6 +818,9 @@ impl Kernels {
             survival_scale_ind,
             survival_scale_sperm,
             reproduction,
+            migration_female,
+            migration_sperm,
+            migration_male,
         })
     }
 
@@ -951,6 +1166,110 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("reproduction launch failed: {err}"))
+    }
+
+    /// Run one deterministic CSR migration step in place across batch elements.
+    ///
+    /// Reads the pre-migration `ind_in`/`sperm_in` planes and writes fresh
+    /// `ind_out`/`sperm_out` planes (the caller swaps them). `rev_indptr` /
+    /// `rev_src` / `rev_weight` are the host-built reverse CSR; `row_sum_w` is
+    /// each source row's weight sum.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launches are ordered on.
+    /// - `ind_in`, `sperm_in`: Batch-minor source state.
+    /// - `ind_out`, `sperm_out`: Batch-minor destination state.
+    /// - `rate`: `(B, 2, A)` per-sex, per-age migration rates.
+    /// - `indptr`: `(B + 1)` source row pointers.
+    /// - `rev_indptr`, `rev_src`, `rev_weight`: Reverse CSR.
+    /// - `row_sum_w`: `(B)` per-source row weight sums.
+    /// - `stay_after`: Whether unmoved mass stays at the source (row sums).
+    /// - `n_batch`, `n_ages`, `n_ztypes`: Model dimensions.
+    ///
+    /// ## Errors
+    /// Returns a description when a launch fails.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn migration(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind_in: &CudaSlice<f32>,
+        sperm_in: &CudaSlice<f32>,
+        ind_out: &mut CudaSlice<f32>,
+        sperm_out: &mut CudaSlice<f32>,
+        rate: &CudaSlice<f32>,
+        indptr: &CudaSlice<i32>,
+        rev_indptr: &CudaSlice<i32>,
+        rev_src: &CudaSlice<i32>,
+        rev_weight: &CudaSlice<f32>,
+        row_sum_w: &CudaSlice<f32>,
+        stay_after: bool,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+    ) -> Result<(), String> {
+        let cells = n_batch * n_ages * n_ztypes;
+        if cells == 0 {
+            return Ok(());
+        }
+        let stay_after_i = i32::from(stay_after);
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let cfg = LaunchConfig::for_num_elems(cells as u32);
+
+        let mut female = stream.launch_builder(&self.migration_female);
+        female.arg(ind_in);
+        female.arg(sperm_in);
+        female.arg(&mut *ind_out);
+        female.arg(rate);
+        female.arg(indptr);
+        female.arg(rev_indptr);
+        female.arg(rev_src);
+        female.arg(rev_weight);
+        female.arg(row_sum_w);
+        female.arg(&stay_after_i);
+        female.arg(&n_batch_i);
+        female.arg(&n_ages_i);
+        female.arg(&n_ztypes_i);
+        unsafe { female.launch(cfg) }
+            .map(|_| ())
+            .map_err(|err| format!("migration_female launch failed: {err}"))?;
+
+        let mut male = stream.launch_builder(&self.migration_male);
+        male.arg(ind_in);
+        male.arg(&mut *ind_out);
+        male.arg(rate);
+        male.arg(indptr);
+        male.arg(rev_indptr);
+        male.arg(rev_src);
+        male.arg(rev_weight);
+        male.arg(row_sum_w);
+        male.arg(&stay_after_i);
+        male.arg(&n_batch_i);
+        male.arg(&n_ages_i);
+        male.arg(&n_ztypes_i);
+        unsafe { male.launch(cfg) }
+            .map(|_| ())
+            .map_err(|err| format!("migration_male launch failed: {err}"))?;
+
+        let sperm_cells = cells * n_ztypes;
+        let sperm_cfg = LaunchConfig::for_num_elems(sperm_cells as u32);
+        let mut sperm = stream.launch_builder(&self.migration_sperm);
+        sperm.arg(sperm_in);
+        sperm.arg(&mut *sperm_out);
+        sperm.arg(rate);
+        sperm.arg(indptr);
+        sperm.arg(rev_indptr);
+        sperm.arg(rev_src);
+        sperm.arg(rev_weight);
+        sperm.arg(row_sum_w);
+        sperm.arg(&stay_after_i);
+        sperm.arg(&n_batch_i);
+        sperm.arg(&n_ages_i);
+        sperm.arg(&n_ztypes_i);
+        unsafe { sperm.launch(sperm_cfg) }
+            .map(|_| ())
+            .map_err(|err| format!("migration_sperm launch failed: {err}"))
     }
 }
 

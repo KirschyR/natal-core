@@ -620,6 +620,122 @@ impl GpuExecutor {
         self.age_tick()
     }
 
+    /// Run one deterministic CSR migration step across the batch (demes).
+    ///
+    /// Mirrors `kernels::spatial::migrate_csr_deterministic`: each destination
+    /// gathers from the host-built reverse CSR in a fixed order, so the result
+    /// is deterministic (no atomics). A batch whose `migration_rate` column is
+    /// empty is left untouched, matching the session's "no migration declared"
+    /// short circuit.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Frozen CSR (row pointers, destinations, weights).
+    /// - `ecology`: Per-deme ecology; `migration_rate` is `(B, 2, A)` or empty.
+    /// - `stay_after`: Whether unmoved mass stays at the source (row sums).
+    ///
+    /// ## Returns
+    /// `Ok(())` after the state is replaced by the migrated planes.
+    ///
+    /// ## Errors
+    /// Returns a description when the CSR or ecology lengths are inconsistent.
+    pub fn migrate_tick(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        stay_after: bool,
+    ) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        if blueprint.migration_indptr.len() != n_batch + 1 {
+            return Err(format!(
+                "migrate_tick needs {} CSR row pointers, got {}",
+                n_batch + 1,
+                blueprint.migration_indptr.len()
+            ));
+        }
+        if ecology.migration_rate.is_empty() {
+            return Ok(());
+        }
+        expect_len(
+            "migration_rate",
+            ecology.migration_rate.len(),
+            n_batch * 2 * n_ages,
+        )?;
+        let indptr: Vec<i32> = blueprint
+            .migration_indptr
+            .iter()
+            .map(|value| *value as i32)
+            .collect();
+        let dest: Vec<i32> = blueprint
+            .migration_dest_idx
+            .iter()
+            .map(|value| *value as i32)
+            .collect();
+        let weights: Vec<f32> = blueprint
+            .migration_weights
+            .iter()
+            .map(|value| *value as f32)
+            .collect();
+        let nnz = dest.len();
+        // Reverse CSR: incoming (source, weight) lists per destination.
+        let mut rev_indptr = vec![0i32; n_batch + 1];
+        for &d in &dest {
+            if d < 0 || d as usize >= n_batch {
+                return Err(format!("migration destination {d} out of range"));
+            }
+            rev_indptr[d as usize + 1] += 1;
+        }
+        for i in 1..=n_batch {
+            rev_indptr[i] += rev_indptr[i - 1];
+        }
+        let mut rev_src = vec![0i32; nnz];
+        let mut rev_weight = vec![0f32; nnz];
+        let mut cursor: Vec<i32> = rev_indptr.clone();
+        let mut row_sum_w = vec![0f32; n_batch];
+        for src in 0..n_batch {
+            let start = indptr[src] as usize;
+            let end = indptr[src + 1] as usize;
+            let mut sum = 0.0f32;
+            for entry in start..end {
+                let d = dest[entry] as usize;
+                let position = cursor[d] as usize;
+                rev_src[position] = src as i32;
+                rev_weight[position] = weights[entry];
+                cursor[d] += 1;
+                sum += weights[entry];
+            }
+            row_sum_w[src] = sum;
+        }
+        let stream = self.context.stream();
+        let rate = upload_f64(&stream, &ecology.migration_rate)?;
+        let indptr_buf = DeviceBuffer::from_host(&stream, &indptr)?;
+        let rev_indptr_buf = DeviceBuffer::from_host(&stream, &rev_indptr)?;
+        let rev_src_buf = DeviceBuffer::from_host(&stream, &rev_src)?;
+        let rev_weight_buf = DeviceBuffer::from_host(&stream, &rev_weight)?;
+        let row_sum_buf = DeviceBuffer::from_host(&stream, &row_sum_w)?;
+        self.kernels.migration(
+            &stream,
+            self.ind.slice(),
+            self.sperm.slice(),
+            self.ind_scratch.slice_mut(),
+            self.sperm_scratch.slice_mut(),
+            rate.slice(),
+            indptr_buf.slice(),
+            rev_indptr_buf.slice(),
+            rev_src_buf.slice(),
+            rev_weight_buf.slice(),
+            row_sum_buf.slice(),
+            stay_after,
+            n_batch,
+            n_ages,
+            n_ztypes,
+        )?;
+        std::mem::swap(&mut self.ind, &mut self.ind_scratch);
+        std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
+        Ok(())
+    }
+
     /// Copy the individual state back in the batch-major CPU layout.
     ///
     /// ## Returns

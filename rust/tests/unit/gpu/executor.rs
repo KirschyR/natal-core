@@ -9,6 +9,7 @@ use crate::kernels::age_structured::{aging, reproduction, survival};
 use crate::kernels::density_regulation::regulation_scaling;
 use crate::kernels::equilibrium::equilibrium_metrics;
 use crate::kernels::rng::new_rng;
+use crate::kernels::spatial::migrate_csr_deterministic;
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
 use crate::model::genetics::GeneticsTensors;
@@ -1216,4 +1217,69 @@ fn executor_rejects_bad_variants() {
     assert!(executor
         .reproduction_tick(&blueprint, &ecology, &[short_fecundity], &ids)
         .is_err());
+}
+
+/// Blueprint carrying a small non-trivial CSR (4 demes, one empty row).
+///
+/// ## Returns
+/// A blueprint with destinations `0->{1,2}, 1->{0}, 2->{}, 3->{2}`.
+fn migration_blueprint() -> Blueprint {
+    let mut blueprint = dimension_blueprint(4, 2);
+    blueprint.n_demes = 4;
+    blueprint.migration_indptr = vec![0, 2, 3, 3, 4];
+    blueprint.migration_dest_idx = vec![1, 2, 0, 2];
+    blueprint.migration_weights = vec![0.5, 0.5, 1.0, 1.0];
+    blueprint
+}
+
+#[test]
+fn device_migration_matches_the_host_reference() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (_, mut ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let rate: Vec<f64> = (0..n_batch * 2 * n_ages)
+        .map(|i| 0.1 + 0.02 * (i % 7) as f64)
+        .collect();
+    ecology.migration_rate = rate.clone();
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let indptr = [0i64, 2, 3, 3, 4];
+    let dest = [1i64, 2, 0, 2];
+    let weights = [0.5f64, 0.5, 1.0, 1.0];
+    let blueprint = migration_blueprint();
+    let ind_f64: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let sperm_f64: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+
+    for stay_after in [false, true] {
+        let (cpu_ind, cpu_sperm) = migrate_csr_deterministic(
+            &ind_f64, &sperm_f64, &indptr, &dest, &weights, &rate, stay_after, n_batch, n_ages,
+            n_ztypes,
+        )
+        .expect("host migration");
+        let context = GpuContext::new(0).expect("device 0 context");
+        let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+            .expect("executor uploads and compiles");
+        executor
+            .migrate_tick(&blueprint, &ecology, stay_after)
+            .expect("device migration");
+        let gpu_ind = executor.download_ind().expect("download individuals");
+        let gpu_sperm = executor.download_sperm().expect("download sperm");
+        for (label, got, want) in [
+            ("ind", &gpu_ind, &cpu_ind),
+            ("sperm", &gpu_sperm, &cpu_sperm),
+        ] {
+            for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+                let want = *want as f32;
+                let tolerance = 1e-5f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "stay_after={stay_after} {label}[{index}]: device {got} vs host {want}"
+                );
+            }
+        }
+    }
 }

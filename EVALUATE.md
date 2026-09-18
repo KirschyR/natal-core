@@ -14,9 +14,9 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 2 轮：**NOT APPROVED**（§12，仅剩覆盖率/会话测试） |
-| 主 agent 处理 | 已补测试：`src/gpu` 行覆盖 **95.08%**；会话设备路径已有 Rust 测试（§13） |
-| 待 evaluator 动作 | 复核 §13，把第 3 轮结论写入 §14 |
+| 最近回执 | 第 3 轮：**APPROVED**（§14；§12.4 覆盖率阻塞已解除） |
+| 主 agent 处理 | 已完成；无待办 |
+| 待 evaluator 动作 | —（若后续有实质改动，重跑受影响门禁并追加回执） |
 
 ## 0. 一句话目标
 
@@ -425,6 +425,23 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 15. 第 4 轮交接（预告）— 下一阶段：P5 确定性迁移 + 空间多 deme
+
+- 日期：2026-09-18
+- 前置：§14 已 **APPROVED**（P0–P3，panmictic 确定性 age-structured）。
+- 主 agent 即将开展（尚未实现，**本阶段无待审内容**）：
+  1. 设备侧确定性 migration（CSR scatter/gather，对应 `kernels/spatial.rs` 的三个变体之一的确定性路径）；
+  2. 多 deme 空间模型上接入 `enable_gpu`（当前仅允许 `n_demes==1`，将放宽到空间确定性模型）；
+  3. 空间 L3：对 `demos/gpu_spatial/age_structured/reference_cpu.py` 的确定性模型做 CPU↔GPU 对照
+     （含算术阶段用相对误差 ~1.2e-6；纯搬运阶段逐位）。
+- 说明：迁移会让 batch 轴（deme）之间发生耦合，且涉及跨 deme 累加顺序，属高风险（科学公式 + 数据布局），
+  实现完成后将按 §9 格式递交独立审查；预计会新增 `rust/src/gpu/` 模块代码与测试、并可能改动
+  `sessions/spatial.rs` 的设备分支（仍保持“仅新增 + 提前返回”，不改 CPU 路径）。
+- 预计会请求 evaluator 重点关注：跨 deme 归约顺序与 f32 误差、`stay_after_send` 语义、边界/空行 deme、
+  迁移与生命周期同 tick 的拼接顺序、以及 CPU golden reference 的逐位/容差验收分档。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -527,7 +544,106 @@ scope：`rust/src/gpu/`（基线 `adda656` 无此目录，全为新增）+ `rust
 - 整体裁定：**NOT APPROVED**（仅剩覆盖率 / 缺失测试阻塞）。
 - 待主 agent：补测试或取得用户豁免后，回交第 3 轮复核。
 
-## 14. 第 3 轮结论（待 evaluator 填写）
+## 14. 第 3 轮结论（evaluator 独立执行，2026-09-18，HEAD=`34f8cc2`）
 
-（请在此追加：裁定 APPROVED / NOT APPROVED、覆盖率口径判定、剩余 driver 失败/平台分支是否在范围内、
-独立运行证据、残余风险。只追加，不改写历史轮次。）
+### 14.1 裁定：**APPROVED**
+
+- §12.4 的覆盖率 / 缺失测试阻塞：**已解除**（独立复测）。
+- §13.3 的口径争议：**判定通过**（见 14.3）。
+- 正确性、CPU 不变性、全部门禁、会话设备路径测试：均独立复核通过。
+
+### 14.2 覆盖率独立复测（evaluator 自跑，非引用主 agent）
+
+命令（`rust/` 下，`llvm-tools` 已装）：
+```bash
+export RUSTFLAGS="-C instrument-coverage" LLVM_PROFILE_FILE="/tmp/cov3/%p-%m.profraw"
+mkdir -p /tmp/cov3 && cargo test --features gpu --lib
+LLVM_BIN="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
+"$LLVM_BIN/llvm-profdata" merge -sparse /tmp/cov3/*.profraw -o /tmp/cov3/merged.profdata
+"$LLVM_BIN/llvm-cov" export --object <test_bin> \
+  --instr-profile=/tmp/cov3/merged.profdata --format=lcov > /tmp/cov3/all.lcov
+# 仅统计 rust/src/gpu/**（排除 rust/tests/unit/gpu/**）
+```
+
+结果（仅 `rust/src/gpu/`，逐文件）：
+
+| 文件 | 行覆盖 |
+|---|---|
+| buffers.rs | 23/23 = **100%** |
+| context.rs | 31/31 = **100%** |
+| cuda.rs | 119/119 = **100%** |
+| kernels.rs | 288/288 = **100%** |
+| layout.rs | 41/41 = **100%** |
+| mod.rs | 3/3 = **100%** |
+| executor.rs | 481/499 = **96.4%** |
+| probe.rs | 174/181 = **96.1%** |
+| **src/gpu TOTAL** | **1160/1185 = 97.89%** |
+
+新增会话接线 `rust/src/sessions/age_structured.rs`：
+- `enable_gpu`/`gpu_status`：**全部可执行行已覆盖**（区间内未覆盖的 311-315 属既有 `refresh_params`，
+  与 GPU 变更无关）。
+- `assemble`/`run_gpu`：GPU 行全部覆盖（区间内未覆盖的 1150-1156 属既有 `HookProgram::from_python`）。
+- `run_inner` 设备分支：**全部覆盖**（区间内未覆盖的 1269-1272 属其后的 CPU `observation_mask` 路径）。
+- 新测试 `session_device_branch_matches_cpu_and_covers_wiring` 实跑设备 3 tick 并与 CPU 逐元素比较
+  `state_ind/state_sperm`（容差 1.2e-6）；`session_enable_gpu_rejects_ineligible_models` 覆盖 5 条拒绝分支。
+
+### 14.3 §13.3 口径判定（本次裁定核心）
+
+采用规则：**先按「变更内全部新增可执行行」汇总，同时逐新模块核对**（规范原文
+“Measure executed new lines against all executable new lines in the change”）：
+
+1. **新模块 `rust/src/gpu/`**：聚合 **97.89% ≥ 95%**；且**逐文件均 ≥ 95%**
+   （最低 `probe.rs` 96.1%、`executor.rs` 96.4%）。→ 达标。
+2. **既有模块新增可执行行 `age_structured.rs`**：105/111 = **94.6%**，未覆盖 6 行
+   `[219,220,221,223,226,227]`，即 `from_parts` 委托 `Ok(Self::assemble(...))` 的 PyO3 构造调用；
+   既有模块中原有的 CPU 行不在“新增”口径内。
+3. **变更级新增可执行行合计**：1265/1296 = **97.6% ≥ 95%**。→ 达标。
+
+裁定：
+- §13.3 提出的 driver 失败 / 平台分支（`executor.rs` 内核调用尾部 `?`、`probe.rs` 的
+  `CUDA_PATH`/Windows 分支）**实测已使 `executor.rs` 96.4%、`probe.rs` 96.1%，逐文件亦达标**，
+  因此**不需要**选项 (b) 的错误映射可测化重构。
+- 唯一 94.6% 的单元格（`age_structured.rs` 的 6 行 `from_parts` 委托）是**重构搬迁的构造委托**，
+  非 GPU 数值逻辑，其功能已由 `assemble` 路径覆盖（集成侧 Python 亦走该构造函数）。
+  按 **§13.3 选项 1 / (a)：以文档化残余接受**，不作为阻塞。
+- 若用户要求「每个既有模块的新增行也严格逐文件 ≥95%」，唯一补测点是给 `from_parts` 加嵌入解释器
+  用例；从成本/收益看不建议，且不影响本裁定的正确性结论。
+
+### 14.4 正确性与硬约束（独立复核）
+
+- `rust/src/kernels`、`rust/src/model`、`src/natal/contracts`、`rust/src/lib.rs` 自 `373fcbf` 起**零改动**。
+- 本轮产品改动为**可测性重构，无数值语义变化**：`cuda.rs` 抽取 `from_outcome`/`driver_missing`
+  （`run` 行为不变）、`executor.rs` 抽取 `ensure_memory_budget`（比较与报错文本不变）、
+  `age_structured.rs` 抽取 `assemble` 构造（字段初始化不变，`from_parts` 委托之）。
+- `phase0_baseline.py --check` → `all scenarios bit-identical`（CPU golden reference 未受影响）。
+- 主 agent 仅**追加**测试，**未改动** evaluator 既有测试（`git diff 52544cf..HEAD -- rust/tests/unit/gpu/executor.rs`
+  为纯新增；两个阻塞回归测试断言未削弱，无 `#[ignore]`）。
+
+### 14.5 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | **124 passed, 0 failed** |
+| `NATAL_GPU_REQUIRE=0 cargo test --features gpu` | 124 passed（硬件用例跳过） |
+| `cargo clippy --features gpu -- -D warnings` | 通过 |
+| `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff check src demos` | 通过 |
+| `pyright` | 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| `cargo test --features gpu evaluator_*`（含两个旧阻塞回归） | 全绿 |
+
+### 14.6 残余风险（非阻塞，留档）
+
+- 设备路径不记录 history（静默为空）；`enable_gpu` 后宿主直接改状态不自动重传；
+  空间/离散后端无 `enable_gpu` 入口；显存预算未计入 ecology 上传与模块开销；
+  f32 在计数 >2²⁴ 或长链归约时理论上可能超 1.2e-6（未找到具体越界输入）。
+- `age_structured.rs` 新增行覆盖 94.6%（6 行 `from_parts` 委托）已按 §14.3 接受为文档化残余。
+
+### 14.7 结论
+
+`feat/gpu-merge-test` 的 CUDA 旁路 P0–P3 在正确性、CPU golden reference 隔离、默认关闭、
+精度分档、显式失败、会话接线与测试覆盖上均满足要求。**APPROVED**（范围为当前 HEAD `34f8cc2`
+与被审测试集；不声称任何历史基线失败消失）。

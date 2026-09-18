@@ -1997,3 +1997,269 @@ fn device_stochastic_migration_matches_host_distribution() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Evaluator adversarial tests for P4 spatial stochastic migration.
+// ---------------------------------------------------------------------------
+
+/// Base CSR topology used by the block-diagonal evaluator test.
+///
+/// ## Returns
+/// `(indptr, dest, weights)` for `n0 = 4` demes:
+/// `0 -> {1,1,0}`, `1 -> {}`, `2 -> {3}`, `3 -> {0,2}`.
+fn evaluator_migration_stoch_topology() -> (Vec<i64>, Vec<i64>, Vec<f64>) {
+    (
+        vec![0, 3, 3, 4, 6],
+        vec![1, 1, 0, 3, 0, 2],
+        vec![0.3, 0.2, 0.5, 1.0, 0.4, 0.6],
+    )
+}
+
+/// Base per-deme migration rate for the evaluator topology (A = 3).
+///
+/// ## Returns
+/// `(n0, 2, 3)` rates including zero, <1, ==1 and >1 rows.
+fn evaluator_migration_stoch_rates() -> Vec<f64> {
+    vec![
+        0.0, 0.3, 1.5, 0.0, 0.3, 1.5, // deme 0
+        0.5, 0.5, 0.5, 0.5, 0.5, 0.5, // deme 1
+        1.0, 1.0, 1.0, 1.0, 1.0, 1.0, // deme 2
+        0.0, 0.0, 0.0, 0.0, 0.0, 0.0, // deme 3
+    ]
+}
+
+/// Build a block-diagonal blueprint/ecology with `copies` independent copies.
+///
+/// ## Parameters
+/// - `n0`, `n_ages`, `n_ztypes`: Base model dimensions.
+/// - `copies`: Number of independent copies.
+///
+/// ## Returns
+/// `(blueprint, ecology)` for `n_batch = n0 * copies`.
+fn evaluator_block_diagonal(
+    n0: usize,
+    n_ages: usize,
+    n_ztypes: usize,
+    copies: usize,
+) -> (Blueprint, EcologyParams) {
+    let (base_indptr, base_dest, base_weights) = evaluator_migration_stoch_topology();
+    let base_rates = evaluator_migration_stoch_rates();
+    let n_batch = n0 * copies;
+    let mut indptr = vec![0i64];
+    let mut dest = Vec::new();
+    let mut weights = Vec::new();
+    for copy in 0..copies {
+        let offset = (copy * n0) as i64;
+        for row in 0..n0 {
+            let start = base_indptr[row] as usize;
+            let end = base_indptr[row + 1] as usize;
+            dest.extend(base_dest[start..end].iter().map(|d| d + offset));
+            weights.extend_from_slice(&base_weights[start..end]);
+            indptr.push(dest.len() as i64);
+        }
+    }
+    let mut blueprint = dimension_blueprint(n_ages, n_ztypes);
+    blueprint.stochastic = true;
+    blueprint.n_demes = n_batch;
+    blueprint.migration_indptr = indptr;
+    blueprint.migration_dest_idx = dest;
+    blueprint.migration_weights = weights;
+    let rate: Vec<f64> = (0..copies)
+        .flat_map(|_| base_rates.iter().copied())
+        .collect();
+    let ecology = evaluator_migration_ecology(n_batch, n_ages, &rate);
+    (blueprint, ecology)
+}
+
+/// Device one-shot stochastic migration helper.
+///
+/// ## Parameters
+/// - `blueprint`, `ecology`: Model.
+/// - `ind`, `sperm`: Host state (batch-major).
+/// - `seed`: Device seed.
+///
+/// ## Returns
+/// `(ind, sperm)` device results in batch-major order.
+fn evaluator_run_stochastic_migration(
+    blueprint: &Blueprint,
+    ecology: &EcologyParams,
+    ind: &[f32],
+    sperm: &[f32],
+    seed: u64,
+) -> (Vec<f32>, Vec<f32>) {
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(
+        context,
+        blueprint.n_demes,
+        blueprint.n_ages,
+        blueprint.n_ztypes,
+        ind,
+        sperm,
+    )
+    .expect("executor");
+    executor.set_seed(seed);
+    executor
+        .migrate_tick_stochastic(blueprint, ecology)
+        .expect("device stochastic migration");
+    (
+        executor.download_ind().expect("download ind"),
+        executor.download_sperm().expect("download sperm"),
+    )
+}
+
+#[test]
+fn evaluator_stochastic_migration_is_seed_reproducible() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n0 = 4;
+    let n_ages = 3;
+    let z = 2;
+    let copies = 200;
+    let (blueprint, ecology) = evaluator_block_diagonal(n0, n_ages, z, copies);
+    let n_batch = blueprint.n_demes;
+    let ind_len = n_batch * 2 * n_ages * z;
+    let sperm_len = n_batch * n_ages * z * z;
+    let ind: Vec<f32> = (0..ind_len).map(|i| ((i * 7) % 41) as f32 + 1.0).collect();
+    let sperm: Vec<f32> = (0..sperm_len).map(|i| ((i * 5) % 13) as f32).collect();
+
+    let (a_ind, a_sperm) =
+        evaluator_run_stochastic_migration(&blueprint, &ecology, &ind, &sperm, 0xABCDEF);
+    let (b_ind, b_sperm) =
+        evaluator_run_stochastic_migration(&blueprint, &ecology, &ind, &sperm, 0xABCDEF);
+    assert_eq!(
+        a_ind.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        b_ind.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "same seed must reproduce ind bit-for-bit"
+    );
+    assert_eq!(
+        a_sperm.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        b_sperm.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "same seed must reproduce sperm bit-for-bit"
+    );
+
+    let (c_ind, _) =
+        evaluator_run_stochastic_migration(&blueprint, &ecology, &ind, &sperm, 0x123456);
+    assert_ne!(
+        a_ind.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        c_ind.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "a different seed must change the result"
+    );
+}
+
+#[test]
+fn evaluator_stochastic_migration_topology_matches_host_mean() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n0 = 4usize;
+    let n_ages = 3usize;
+    let z = 2usize;
+    let copies = 500usize;
+    let trials = 300usize;
+    let (blueprint, ecology) = evaluator_block_diagonal(n0, n_ages, z, copies);
+    let n_batch = blueprint.n_demes;
+    let ind_stride = 2 * n_ages * z;
+    let sperm_stride = n_ages * z * z;
+    let ind: Vec<f32> = (0..n_batch * ind_stride)
+        .map(|i| ((i * 7) % 41) as f32 + 1.0)
+        .collect();
+    let sperm: Vec<f32> = (0..n_batch * sperm_stride)
+        .map(|i| ((i * 5) % 13) as f32)
+        .collect();
+    let (device_ind, device_sperm) =
+        evaluator_run_stochastic_migration(&blueprint, &ecology, &ind, &sperm, 0x5EED);
+
+    // CPU reference: pooled mean/variance over `trials` independent runs.
+    let ind_f64: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let sperm_f64: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    let mut sum = vec![vec![0.0f64; ind_stride]; n0];
+    let mut sq = vec![vec![0.0f64; ind_stride]; n0];
+    let mut sum_s = vec![vec![0.0f64; sperm_stride]; n0];
+    let mut sq_s = vec![vec![0.0f64; sperm_stride]; n0];
+    for trial in 0..trials {
+        let mut rngs: Vec<_> = (0..n_batch)
+            .map(|src| new_rng(90_000 + trial as u64 * 7919 + src as u64))
+            .collect();
+        let (host_ind, host_sperm) = crate::kernels::spatial::migrate_csr_stochastic_rngs(
+            &mut rngs,
+            &ind_f64,
+            &sperm_f64,
+            &blueprint.migration_indptr,
+            &blueprint.migration_dest_idx,
+            &blueprint.migration_weights,
+            &ecology.migration_rate,
+            false,
+            n_batch,
+            n_ages,
+            z,
+        )
+        .expect("host stochastic migration");
+        for copy in 0..copies {
+            for base in 0..n0 {
+                let deme = copy * n0 + base;
+                for slot in 0..ind_stride {
+                    let value = host_ind[deme * ind_stride + slot];
+                    sum[base][slot] += value;
+                    sq[base][slot] += value * value;
+                }
+                for slot in 0..sperm_stride {
+                    let value = host_sperm[deme * sperm_stride + slot];
+                    sum_s[base][slot] += value;
+                    sq_s[base][slot] += value * value;
+                }
+            }
+        }
+    }
+    let cpu_samples = (copies * trials) as f64;
+    for base in 0..n0 {
+        for slot in 0..ind_stride {
+            let cpu_mean = sum[base][slot] / cpu_samples;
+            let cpu_var = (sq[base][slot] / cpu_samples - cpu_mean * cpu_mean).max(0.0);
+            let device_mean = (0..copies)
+                .map(|copy| device_ind[(copy * n0 + base) * ind_stride + slot] as f64)
+                .sum::<f64>()
+                / copies as f64;
+            let tolerance = 5.0 * (cpu_var / copies as f64).sqrt() + 0.5;
+            assert!(
+                (device_mean - cpu_mean).abs() <= tolerance,
+                "ind base={base} slot={slot}: device {device_mean} vs host {cpu_mean} (tol {tolerance})"
+            );
+        }
+        for slot in 0..sperm_stride {
+            let cpu_mean = sum_s[base][slot] / cpu_samples;
+            let cpu_var = (sq_s[base][slot] / cpu_samples - cpu_mean * cpu_mean).max(0.0);
+            let device_mean = (0..copies)
+                .map(|copy| device_sperm[(copy * n0 + base) * sperm_stride + slot] as f64)
+                .sum::<f64>()
+                / copies as f64;
+            let tolerance = 5.0 * (cpu_var / copies as f64).sqrt() + 0.5;
+            assert!(
+                (device_mean - cpu_mean).abs() <= tolerance,
+                "sperm base={base} slot={slot}: device {device_mean} vs host {cpu_mean} (tol {tolerance})"
+            );
+        }
+    }
+}
+
+#[test]
+fn execution_rejects_overwide_stochastic_csr_rows() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (_, mut ecology) = density_fixture();
+    ecology.migration_rate = vec![0.2f64; 4 * 2 * 4];
+    let (ind, sperm) = populated_state(4, 4, 2);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, 4, 4, 2, &ind, &sperm).expect("executor");
+    let mut blueprint = migration_blueprint();
+    blueprint.migration_indptr = vec![0, 33, 33, 33, 33];
+    blueprint.migration_dest_idx = vec![1i64; 33];
+    blueprint.migration_weights = vec![1.0f64 / 33.0; 33];
+    assert!(executor
+        .migrate_tick_stochastic(&blueprint, &ecology)
+        .is_err());
+}

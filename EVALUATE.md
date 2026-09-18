@@ -14,9 +14,9 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 6 轮：**APPROVED**（§21；P4） |
-| 主 agent 处理 | 空间随机迁移已实现并自测；**待第 7 轮独立复核** |
-| 待 evaluator 动作 | 按 §22 复核，把第 7 轮结论写入 §23 |
+| 最近回执 | 第 7 轮：**APPROVED**（§23；空间随机迁移） |
+| 主 agent 处理 | 已完成；无待办 |
+| 待 evaluator 动作 | —（若后续有实质改动，重跑受影响门禁并追加回执） |
 
 ## 0. 一句话目标
 
@@ -634,6 +634,33 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 24. 第 8 轮交接 — 处理 §23.7 越界守卫建议（小改动）
+
+- 日期：2026-09-18
+- 针对 §23.7：`migration_stochastic_prepare` 的行数组按 `MAX_Z` 固定分配，但仅校验了 `n_ztypes`，
+  未校验 CSR **出度** `row_len`。
+
+### 24.1 改动
+
+| 文件 | 改动 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | 新增 `pub const MAX_CSR_ROW = MAX_Z` |
+| `rust/src/gpu/executor.rs` | `migrate_tick_stochastic` 在启动前检查最大 CSR 行宽 > `MAX_CSR_ROW` 即显式报错 |
+| 测试 | `execution_rejects_overwide_stochastic_csr_rows`（行宽 33 → `Err`） |
+
+### 24.2 自测（非独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **148 passed** |
+| `cargo test` | 67 passed |
+| `clippy -D warnings` / `fmt` / `check_rust` / `phase0` | 通过 / 通过 / EXIT=0 / bit-identical |
+| `ruff` / `pyright` / `pytest` | 通过 / 0 errors / 3606 passed |
+
+请 evaluator 快速复核此项（确认越界不再可达、无回归）。结论请追加为 **§25**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1090,7 +1117,83 @@ P4 的 RNG、uniform/binomial/gamma、随机阶段均值与确定性隔离均通
 P4 随机采样的唯一阻塞项已修复并经独立分布检验确认（PTRS 精确）。**APPROVED**（范围为当前 HEAD
 `d397f91` 与被审测试集；不声称任何历史基线失败消失）。
 
-## 23. 第 7 轮结论（待 evaluator 填写）
+## 23. 第 7 轮结论（evaluator 独立执行，2026-09-18，HEAD=`5b1ced6`）
 
-（请在此追加：裁定 APPROVED / NOT APPROVED、两趟随机迁移的独立统计/复现证据、覆盖率严格过滤结果、
-残余风险。只追加，不改写历史轮次。）
+### 23.1 裁定：**APPROVED**
+
+空间随机（两趟无原子 scatter/gather）迁移在正确性、统计等价、GPU↔GPU 可复现、seed 生效、
+确定性路径隔离与覆盖率上均满足要求。
+
+### 23.2 独立统计 / 复现证据
+
+我在 `rust/tests/unit/gpu/executor.rs` 新增 2 个 evaluator 用例：
+
+- `evaluator_stochastic_migration_is_seed_reproducible`：
+  同 seed 两次设备迁移 `ind`/`sperm` **逐位一致**；不同 seed 结果不同 → seed 确实生效（§22.2 修复有效）。
+- `evaluator_stochastic_migration_topology_matches_host_mean`：
+  自建**块对角**富拓扑（`0→{1,1,0}` 含重复边+自环、`1→{}` 空行、`2→{3}`、`3→{0,2}` 多入边；
+  速率含 `0 / 0.3 / 1.0 / 1.5`），复制 500 份独立副本，设备一次运行按副本池化均值，
+  与 CPU `migrate_csr_stochastic_rngs` 300 次试验的池化均值/方差对照（`5σ+0.5`）→ **通过**。
+  命令：`cargo test --features gpu evaluator_stochastic -- --nocapture` → 2 passed。
+
+逐分支核对（读代码）：`sample_outbound_device` 与 CPU `sample_outbound`（`rate>=1` 全走、
+否则 `binomial(round(value), rate)`）一致；prepare 的 `natal_multinomial`（按行权重归一）与
+CPU `distribute_csr_outbound` 一致；pass1 写 `src` stay（`virgin - moved_total`，储精 stay 计入雌性平面），
+pass2 按反向 CSR（`rev_entry` 为 CSR entry 索引，按 src 升序+行内顺序建立）累加到 `dst`，与 CPU per-src
+scatter 的累加顺序一致，且无 `atomicAdd`。
+
+### 23.3 会话级独立性（Python）
+
+- 空间随机 L3（`demos/gpu_spatial/age_structured` 5×5，`stochastic=True`，K=300×5 tick，
+  `_initialize_session(seed)` 逐 seed）→ `cpu_mean=56701.9`、`gpu_mean=56698.9`，
+  差 `3.05 ≪ tol 39.7` → PASS（独立重编扩展后运行）。
+- 我另做 **seed 敏感性**检查：空间与 panmictic 各 4 个 seed 的 GPU 总量均随 seed 变化
+  （spatial `[61890,62060,61965,61843]`，panmictic `[404,492,474,408]`）→ `set_seed` 已在
+  两条会话路径正确接线。
+
+### 23.4 确定性路径与非影响性（独立）
+
+- 确定性空间 L3（5×5，25 tick）→ `max_rel=9.140e-7 / 9.149e-7`（与 §21 完全相同，未回归）。
+- `phase0_baseline.py --check` → `all scenarios bit-identical`。
+- `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空。
+
+### 23.5 覆盖率（独立复测，严格过滤 `rust/src/gpu/**`）
+
+| 文件 | 行覆盖 |
+|---|---|
+| buffers/context/cuda/layout/mod | 均 **100%** |
+| kernels.rs | 730/745 = **98.0%** |
+| executor.rs | 726/762 = **95.3%** |
+| probe.rs | 174/181 = **96.1%** |
+| **src/gpu TOTAL** | **1847/1905 = 96.96%** |
+
+逐文件与聚合均 ≥95%。
+
+### 23.6 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | **147 passed, 0 failed**（作者 145 + evaluator 2） |
+| `NATAL_GPU_REQUIRE=0 cargo test --features gpu` | 147 passed |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+
+### 23.7 非阻塞发现 / 残余风险
+
+- **潜在越界（低）**：`migration_stochastic_prepare` 使用 `probs[NATAL_MAX_Z]`/`drawn[NATAL_MAX_Z]`，
+  但启动器只校验 `n_ztypes > MAX_Z`，未校验**每行出度** `row_len > MAX_Z`。常规空间邻域
+  （Moore ≤8）不触发；自定义宽 CSR（>32 目的地/行）会越界。建议在启动器拒绝 `row_len > MAX_Z`
+  或按实际最大行宽分配 scratch。
+- `survival_stochastic` 对 `n_virgins < -EPS` 静默夹取 0（CPU 返回 `Err`，仅非法状态；低）。
+- `continuous_sampling=true`、设备 history/状态重传限制不变。
+
+### 23.8 结论
+
+空间随机迁移的两趟设计正确、统计等价且可复现；唯一新增项为 §23.7 的低危越界守卫建议（非阻塞）。
+**APPROVED**（范围为当前 HEAD `5b1ced6` 与被审测试集；不声称任何历史基线失败消失）。
+
+## 25. 第 8 轮结论（待 evaluator 填写）

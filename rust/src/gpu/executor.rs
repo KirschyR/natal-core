@@ -26,7 +26,7 @@ use cudarc::driver::CudaStream;
 
 use crate::gpu::buffers::DeviceBuffer;
 use crate::gpu::context::GpuContext;
-use crate::gpu::kernels::{DensityBuffers, Kernels, ReproductionBuffers};
+use crate::gpu::kernels::{DensityBuffers, Kernels, ReproductionBuffers, MAX_CSR_ROW};
 use crate::gpu::layout::{batch_to_inner, batch_to_outer};
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
@@ -873,6 +873,14 @@ impl GpuExecutor {
             .iter()
             .map(|value| *value as i32)
             .collect();
+        if let Some(row_len) = indptr.windows(2).map(|pair| pair[1] - pair[0]).max() {
+            if row_len as usize > MAX_CSR_ROW {
+                return Err(format!(
+                    "stochastic migration CSR row length {row_len} exceeds the device scratch \
+                     limit of {MAX_CSR_ROW}"
+                ));
+            }
+        }
         let dest: Vec<i32> = blueprint
             .migration_dest_idx
             .iter()

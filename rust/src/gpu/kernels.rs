@@ -49,6 +49,10 @@ const MAX_AGES: usize = 64;
 /// Largest `n_ztypes` the reproduction kernel supports (fixed local arrays).
 const MAX_Z: usize = 32;
 
+/// Largest CSR row (destination count) the stochastic migration scratch
+/// supports; the prepare kernel uses fixed `MAX_Z`-sized row arrays.
+pub const MAX_CSR_ROW: usize = MAX_Z;
+
 /// CUDA C for the density-regulation scaling kernel.
 ///
 /// One thread per batch element evaluates the equilibrium metrics and the

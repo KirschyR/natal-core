@@ -831,6 +831,122 @@ impl GpuExecutor {
         Ok(())
     }
 
+    /// Run one stochastic CSR migration step across the batch (demes).
+    ///
+    /// Mirrors `kernels::spatial::migrate_csr_stochastic_rngs` for
+    /// `continuous_sampling == false`: pass 1 samples each source's outbound
+    /// and multinomial split into entry-indexed scratch, pass 2 gathers into
+    /// each destination. A two-pass gather keeps the result reproducible
+    /// (no atomics). Empty `migration_rate` is a no-op.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Frozen CSR.
+    /// - `ecology`: Per-deme ecology; `migration_rate` is `(B, 2, A)` or empty.
+    ///
+    /// ## Errors
+    /// Returns a description when the CSR or ecology lengths are inconsistent.
+    pub fn migrate_tick_stochastic(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+    ) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        if blueprint.migration_indptr.len() != n_batch + 1 {
+            return Err(format!(
+                "migrate_tick_stochastic needs {} CSR row pointers, got {}",
+                n_batch + 1,
+                blueprint.migration_indptr.len()
+            ));
+        }
+        if ecology.migration_rate.is_empty() {
+            return Ok(());
+        }
+        expect_len(
+            "migration_rate",
+            ecology.migration_rate.len(),
+            n_batch * 2 * n_ages,
+        )?;
+        let indptr: Vec<i32> = blueprint
+            .migration_indptr
+            .iter()
+            .map(|value| *value as i32)
+            .collect();
+        let dest: Vec<i32> = blueprint
+            .migration_dest_idx
+            .iter()
+            .map(|value| *value as i32)
+            .collect();
+        let weights: Vec<f32> = blueprint
+            .migration_weights
+            .iter()
+            .map(|value| *value as f32)
+            .collect();
+        let nnz = dest.len();
+        let mut rev_indptr = vec![0i32; n_batch + 1];
+        for &d in &dest {
+            if d < 0 || d as usize >= n_batch {
+                return Err(format!("migration destination {d} out of range"));
+            }
+            rev_indptr[d as usize + 1] += 1;
+        }
+        for i in 1..=n_batch {
+            rev_indptr[i] += rev_indptr[i - 1];
+        }
+        // Reverse CSR stores the CSR entry index so pass 2 can read `fwd_*`.
+        let mut rev_entry = vec![0i32; nnz];
+        let mut cursor = rev_indptr.clone();
+        for pair in indptr.windows(2) {
+            let start = pair[0] as usize;
+            let count = (pair[1] - pair[0]) as usize;
+            for (entry, &d) in dest.iter().enumerate().skip(start).take(count) {
+                let d = d as usize;
+                let position = cursor[d] as usize;
+                rev_entry[position] = entry as i32;
+                cursor[d] += 1;
+            }
+        }
+        let stream = self.context.stream();
+        let rate = upload_f64(&stream, &ecology.migration_rate)?;
+        let indptr_buf = DeviceBuffer::from_host(&stream, &indptr)?;
+        let dest_buf = DeviceBuffer::from_host(&stream, &dest)?;
+        let weights_buf = DeviceBuffer::from_host(&stream, &weights)?;
+        let rev_indptr_buf = DeviceBuffer::from_host(&stream, &rev_indptr)?;
+        let rev_entry_buf = DeviceBuffer::from_host(&stream, &rev_entry)?;
+        let mut fwd_f = DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes])?;
+        let mut fwd_s =
+            DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes * n_ztypes])?;
+        let mut fwd_m = DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes])?;
+        let (key0, key1) = self.rng_key();
+        let site = self.rng_site(3);
+        self.kernels.migration_stochastic(
+            &stream,
+            self.ind.slice(),
+            self.sperm.slice(),
+            self.ind_scratch.slice_mut(),
+            self.sperm_scratch.slice_mut(),
+            rate.slice(),
+            indptr_buf.slice(),
+            dest_buf.slice(),
+            weights_buf.slice(),
+            fwd_f.slice_mut(),
+            fwd_s.slice_mut(),
+            fwd_m.slice_mut(),
+            rev_indptr_buf.slice(),
+            rev_entry_buf.slice(),
+            n_batch,
+            n_ages,
+            n_ztypes,
+            key0,
+            key1,
+            site,
+        )?;
+        std::mem::swap(&mut self.ind, &mut self.ind_scratch);
+        std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
+        Ok(())
+    }
+
     /// Copy the individual state back in the batch-major CPU layout.
     ///
     /// ## Returns

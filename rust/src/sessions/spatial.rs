@@ -354,9 +354,9 @@ impl SpatialSession {
                 "GPU path currently supports age-structured spatial models only",
             ));
         }
-        if self.blueprint.stochastic {
+        if self.blueprint.continuous_sampling {
             return Err(PyValueError::new_err(
-                "GPU path requires a deterministic model (stochastic=false)",
+                "GPU path requires continuous_sampling=false",
             ));
         }
         if self.hooks.n_hooks != 0
@@ -388,7 +388,7 @@ impl SpatialSession {
         let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let ind_host: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
         let sperm_host: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
-        let executor = crate::gpu::executor::GpuExecutor::new(
+        let mut executor = crate::gpu::executor::GpuExecutor::new(
             context,
             self.deme_variants.len(),
             self.blueprint.n_ages,
@@ -397,6 +397,7 @@ impl SpatialSession {
             &sperm_host,
         )
         .map_err(map_lifecycle_error)?;
+        executor.set_seed(self.seed);
         self.gpu = Some(executor);
         Ok(())
     }
@@ -1238,7 +1239,11 @@ impl SpatialSession {
         gpu.tick(blueprint, ecology, variants, deme_variants)?;
         let all_zero = ecology.migration_rate.iter().all(|&rate| rate <= 0.0);
         if !all_zero {
-            gpu.migrate_tick(blueprint, ecology, stay_after_send)?;
+            if blueprint.stochastic {
+                gpu.migrate_tick_stochastic(blueprint, ecology)?;
+            } else {
+                gpu.migrate_tick(blueprint, ecology, stay_after_send)?;
+            }
         }
         *state_ind = gpu.download_ind()?.into_iter().map(f64::from).collect();
         *state_sperm = gpu.download_sperm()?.into_iter().map(f64::from).collect();

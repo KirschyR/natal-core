@@ -14,9 +14,9 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 5 轮：**NOT APPROVED**（§19；Poisson λ≥64） |
-| 主 agent 处理 | 已用 PTRS 精确采样修复 §19 阻塞项（§20），自测通过 |
-| 待 evaluator 动作 | 复核 §20，把第 6 轮结论写入 §21 |
+| 最近回执 | 第 6 轮：**APPROVED**（§21；P4） |
+| 主 agent 处理 | 空间随机迁移已实现并自测；**待第 7 轮独立复核** |
+| 待 evaluator 动作 | 按 §22 复核，把第 7 轮结论写入 §23 |
 
 ## 0. 一句话目标
 
@@ -582,6 +582,58 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 22. 第 7 轮交接 — 空间随机迁移
+
+- 日期：2026-09-18
+- 范围（补齐 §21 已批准 P4 中唯一未做的随机变体）：空间随机 CSR 迁移 + 空间随机端到端。
+- 风险分类：**高风险**（随机分布 + 跨 deme 数据布局/归约）。
+
+### 22.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `migration_stochastic_prepare`（pass 1：每 source 抽样 outbound 与多项分配，写入按 CSR entry 索引的 `fwd_f/fwd_s/fwd_m`，并写 source 自身 stay 项）+ 三个 `gather_female/sperm/male`（pass 2：按反向 CSR 汇总）。无原子操作 → 可复现。`Kernels::migration_stochastic` 启动器 |
+| `rust/src/gpu/executor.rs` | `GpuExecutor::migrate_tick_stochastic`：构建反 CSR（存 CSR entry 索引）、分配并上传 `fwd_*`，两趟启动后交换 |
+| `rust/src/sessions/spatial.rs` | `enable_gpu` 接受 `stochastic=true`（仅拒绝 `continuous_sampling=true`）；`run_gpu_tick` 随机时调用 `migrate_tick_stochastic`；**补 `executor.set_seed(self.seed)`** |
+| 测试 | `executor.rs` 随机迁移统计 L1；`spatial_session.rs` 随机空间 session tick |
+
+### 22.2 关键修复（L3 发现）
+
+空间 `enable_gpu` 原先**未调用 `set_seed`**，导致所有 GPU 随机运行共用 seed 0、结果恒定（被空间随机 L3 的 `gpu_mean` 恒定值暴露）。已修复为 `executor.set_seed(self.seed)`。
+
+### 22.3 设计要点（请重点核对）
+
+1. **两趟确定性 scatter**：pass 1 每 source 独立抽样并写 entry 级 forward 缓冲；pass 2 按反向 CSR 固定顺序汇总到 destination，无 `atomicAdd`，保证 GPU↔GPU 可复现。
+2. **分布对齐**：`sample_outbound`（`rate>=1` 全走、否则 `binomial(round(value), rate)`）与 `natal_multinomial`（按行权重归一）复刻 CPU `migrate_csr_stochastic_rngs`（离散）。
+3. **自身 stay 项**：pass 1 写 `ind_out[src] = virgin - moved_total` 与 `sperm_out[src] = value - moved_total`，并把储精 stay 计入雌性个体平面；pass 2 只做累加。
+4. `migration_rate` 全零时沿用 CPU 跳过语义。
+
+### 22.4 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **145 passed, 0 failed** |
+| `cargo test` | 67 passed |
+| `clippy -D warnings` / `fmt` / `check_rust` / `phase0` | 通过 / 通过 / EXIT=0 / bit-identical |
+| `ruff` / `pyright` / `pytest` | 通过 / 0 errors / 3606 passed |
+| 随机迁移统计 L1（独立 pair CSR，2000 trials，5σ+0.5） | 通过 |
+| 空间随机 session tick（Rust） | 状态有限、tick 前进 |
+| 空间随机 L3（Python，K=300×5 tick） | CPU/GPU 总量均值差 3.05 ≪ 容差 39.7 → PASS |
+| 确定性 L3（panmictic + 空间 5×5） | 逐位/紧容差不变 |
+| 严格 `rust/src/gpu/` 覆盖率 | 聚合 **96.96%**，逐文件均 ≥95% |
+
+### 22.5 请 evaluator 独立核对
+
+- **两趟 scatter 正确性**：pass2 是否与 pass1 的 entry 索引/反向 CSR 一一对应；自环/重复边/空行/多入边/`rate=1.5`/零速率等拓扑（可自行设计）。
+- **统计等价**：自建独立拓扑与参数，对设备与 CPU `migrate_csr_stochastic_rngs` 做分布级对照。
+- **可复现性**：同 seed 重跑设备结果逐位一致；不同 seed 结果不同（确认 seed 生效）。
+- **确定性路径**：随机改动未影响确定性结果。
+- **覆盖率**：严格按绝对路径过滤 `rust/src/gpu/**`。
+
+结论请追加为 **§23**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -965,7 +1017,80 @@ P5 确定性迁移与空间多 deme 旁路满足正确性与质量要求。**APP
 P4 的 RNG、uniform/binomial/gamma、随机阶段均值与确定性隔离均通过；但 **Poisson 正态近似在 `λ≥64`
 不满足统计等价**，为 in-scope 阻塞项。待主 agent 修复或取得明确豁免后回交第 6 轮复核。
 
-## 21. 第 6 轮结论（待 evaluator 填写）
+## 21. 第 6 轮结论（evaluator 独立执行，2026-09-18，HEAD=`d397f91`）
 
-（请在此追加：裁定 APPROVED / NOT APPROVED、Poisson PTRS 的独立统计复核证据、覆盖率、残余风险。
-只追加，不改写历史轮次。）
+### 21.1 裁定：**APPROVED**
+
+- §19.2 阻塞项（Poisson `λ≥64` 正态近似）**已解除**：产品改为 PTRS 精确采样，独立分布检验通过。
+- 其余采样器、随机阶段、确定性路径、CPU 隔离、覆盖率和全部质量门禁均通过。
+
+### 21.2 阻塞项复核（独立运行）
+
+- 原失败测试现通过：
+  `cargo test --features gpu evaluator_discrete_sampler_distributions_match_cpu -- --nocapture`
+  → 两样本卡方对 `λ=1,20,63,64,65,200` 全部达标（此前 `λ=64` 为 265.5 > 53.4）。
+- 我另加 `evaluator_poisson_ptr_large_lambda_matches_cpu`，扩大网格至
+  `λ=10,11,500,1000,5000,20000`，两样本卡方均达标（N=200000/样本）→ PTRS 在整个区间与
+  CPU `rand_distr::Poisson` 分布等价。
+- 产品核对（`rust/src/gpu/kernels.rs` `sample_poisson`）：`λ<10` Knuth 精确；`λ≥10` 使用
+  **标准 PTRS（Hörmann 变换拒绝）**——`b=0.931+2.53√λ`、`a=-0.059+0.02483b`、
+  `inv_alpha=1.1239+1.1328/(b-3.4)`、`v_r=0.9277-3.6224/(b-2)` 与接受/拒绝判据均与经典 PTRS 一致，
+  保留 Poisson 的偏度/峰度。
+- evaluator 原回归测试**未被改动**（断言未削弱、无 `#[ignore]`）。
+
+### 21.3 附带修复复核
+
+- `rintf` → `roundf`（`recruit/survival/reproduction_stochastic`）：与 Rust `.round()`
+  （四舍五入远离零）一致，消除 `.5` 取整差异；仅影响随机分支。
+- `recruit_stochastic` 启动器补 `n_ztypes > MAX_Z` 守卫（消除潜在设备越界）。
+- 未处理（非阻塞，已知）：`survival_stochastic` 对 `n_virgins < -EPS` 静默夹取 0，而 CPU 返回
+  `Err`（仅非法状态可达）。
+
+### 21.4 回归与非影响性（独立）
+
+- `cargo test` → 67；`cargo test --features gpu` → **143 passed, 0 failed**（作者 139 + evaluator 4）；
+  `NATAL_GPU_REQUIRE=0` → 143。
+- 确定性内核未改；`phase0_baseline.py --check` → `all scenarios bit-identical`；
+  空间确定性 L3（5×5，25 tick）→ `max_rel=9.140e-7 / 9.149e-7`（不变）。
+- 随机会话 L3（panmictic，K=150×8 tick，`pop._initialize_session(seed)` 后 `enable_gpu`）→
+  最差 `0.385×` 容差（`ind`），sperm 一致 → PASS。
+- 其它采样器：uniform KS、binomial（含 `mean=512` 边界/反射）、gamma（含 `shape<1`）仍通过。
+- `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空。
+
+### 21.5 覆盖率（独立复测，严格过滤 `rust/src/gpu/**`）
+
+| 文件 | 行覆盖 |
+|---|---|
+| buffers/context/cuda/layout/mod | 均 **100%** |
+| kernels.rs | 624/627 = **99.5%** |
+| executor.rs | 637/664 = **95.9%** |
+| probe.rs | 174/181 = **96.1%** |
+| **src/gpu TOTAL** | **1652/1689 = 97.81%** |
+
+逐文件与聚合均 ≥95%。
+
+### 21.6 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `python scripts/check_rust.py` | EXIT=0（67 passed） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+
+### 21.7 残余风险（非阻塞）
+
+- `survival_stochastic` 负 virgin 静默夹取（非法状态语义；低）。
+- 空间随机迁移、`continuous_sampling=true` 仍显式拒绝；设备路径 history/状态重传限制不变。
+- 随机阶段的作者统计测试以均值为主；本次已由 evaluator 的分布级检验补强，后续可将分布级检验并入常规门禁。
+
+### 21.8 结论
+
+P4 随机采样的唯一阻塞项已修复并经独立分布检验确认（PTRS 精确）。**APPROVED**（范围为当前 HEAD
+`d397f91` 与被审测试集；不声称任何历史基线失败消失）。
+
+## 23. 第 7 轮结论（待 evaluator 填写）
+
+（请在此追加：裁定 APPROVED / NOT APPROVED、两趟随机迁移的独立统计/复现证据、覆盖率严格过滤结果、
+残余风险。只追加，不改写历史轮次。）

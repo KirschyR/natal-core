@@ -254,8 +254,8 @@ fn spatial_enable_gpu_rejects_ineligible_models() {
     assert!(discrete.enable_gpu().is_err(), "discrete must reject");
 
     let (mut blueprint, ecology, genetics) = fixture();
-    blueprint.stochastic = true;
-    let mut stochastic = make_session(
+    blueprint.continuous_sampling = true;
+    let mut continuous = make_session(
         blueprint,
         ecology,
         vec![genetics.clone()],
@@ -263,7 +263,10 @@ fn spatial_enable_gpu_rejects_ineligible_models() {
         false,
         false,
     );
-    assert!(stochastic.enable_gpu().is_err(), "stochastic must reject");
+    assert!(
+        continuous.enable_gpu().is_err(),
+        "continuous sampling must reject"
+    );
 
     let (blueprint, mut ecology, genetics) = fixture();
     ecology.growth_mode[0] = 5;
@@ -303,4 +306,28 @@ fn spatial_enable_gpu_rejects_ineligible_models() {
         mismatch.enable_gpu().is_err(),
         "deme/variant mismatch must reject"
     );
+}
+
+#[test]
+fn spatial_stochastic_session_device_tick_runs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (mut blueprint, ecology, genetics) = fixture();
+    blueprint.stochastic = true;
+    let mut session = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    session.enable_gpu().expect("enable stochastic spatial gpu");
+    assert_eq!(session.gpu_status(), "enabled");
+    session.run_inner().expect("device stochastic spatial tick");
+    assert_eq!(session.state_tick, 1);
+    assert!(session.state_ind.iter().all(|value| value.is_finite()));
+    assert!(session.state_sperm.iter().all(|value| value.is_finite()));
 }

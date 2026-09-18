@@ -1400,6 +1400,249 @@ extern "C" __global__ void reproduction_stochastic(
         ind[((1 * A + 0) * Z + go) * n_batch + b] = mv;
     }
 }
+
+// Discrete outbound sampling: mirrors `sample_outbound` with
+// continuous_sampling=false. `rate >= 1` moves everything, otherwise a
+// binomial draw on the rounded count.
+__device__ __forceinline__ float sample_outbound_device(
+    RngState* state, float value, float rate)
+{
+    if (value <= 0.0f || rate <= 0.0f) {
+        return 0.0f;
+    }
+    if (rate >= 1.0f) {
+        return value;
+    }
+    return sample_binomial(state, roundf(value), rate);
+}
+
+// Pass 1 of stochastic CSR migration: one thread per source deme computes the
+// outbound draws and their multinomial split across the source's CSR row,
+// storing per-entry forward amounts. Writing the source's own "stay" mass
+// here keeps pass 2 a pure, order-fixed gather (no atomics, reproducible).
+extern "C" __global__ void migration_stochastic_prepare(
+    const float* ind_in,
+    const float* sperm_in,
+    float* ind_out,
+    float* sperm_out,
+    const float* rate,
+    const int* indptr,
+    const int* dest,
+    const float* weights,
+    float* fwd_f,
+    float* fwd_s,
+    float* fwd_m,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    int src = blockIdx.x * blockDim.x + threadIdx.x;
+    if (src >= n_batch) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int row_start = indptr[src];
+    int row_end = indptr[src + 1];
+    int row_len = row_end - row_start;
+    float total_w = 0.0f;
+    for (int e = row_start; e < row_end; ++e) {
+        total_w += weights[e];
+    }
+
+    RngState state;
+    rng_init(&state, (unsigned long long)src, key0, key1, site);
+
+    float probs[NATAL_MAX_Z];
+    float drawn[NATAL_MAX_Z];
+
+    for (int age = 0; age < A; ++age) {
+        float female_rate = rate[src * 2 * A + age];
+        for (int gf = 0; gf < Z; ++gf) {
+            float stored = 0.0f;
+            for (int gm = 0; gm < Z; ++gm) {
+                stored += sperm_in[((age * Z + gf) * Z + gm) * n_batch + src];
+            }
+            float female_total = ind_in[((0 * A + age) * Z + gf) * n_batch + src];
+            float virgin = female_total - stored;
+            if (virgin < 0.0f && fabsf(virgin) < MIG_EPS) {
+                virgin = 0.0f;
+            }
+            float outbound = sample_outbound_device(&state, virgin, female_rate);
+            float moved_total = 0.0f;
+            if (outbound > 0.0f && row_len > 0 && total_w > 0.0f) {
+                float n_int = roundf(outbound);
+                if (n_int > 0.0f) {
+                    for (int pos = 0; pos < row_len; ++pos) {
+                        probs[pos] = weights[row_start + pos] / total_w;
+                    }
+                    natal_multinomial(&state, n_int, probs, row_len, drawn);
+                    for (int pos = 0; pos < row_len; ++pos) {
+                        int e = row_start + pos;
+                        fwd_f[(long long)e * A * Z + age * Z + gf] = drawn[pos];
+                        moved_total += drawn[pos];
+                    }
+                }
+            } else {
+                for (int pos = 0; pos < row_len; ++pos) {
+                    fwd_f[(long long)(row_start + pos) * A * Z + age * Z + gf] = 0.0f;
+                }
+            }
+            float female_stay = virgin - moved_total;
+            int female_index = ((0 * A + age) * Z + gf) * n_batch + src;
+            ind_out[female_index] = female_stay;
+            for (int gm = 0; gm < Z; ++gm) {
+                float value = sperm_in[((age * Z + gf) * Z + gm) * n_batch + src];
+                float outbound_sperm = sample_outbound_device(&state, value, female_rate);
+                float moved_sperm = 0.0f;
+                if (outbound_sperm > 0.0f && row_len > 0 && total_w > 0.0f) {
+                    float n_int = roundf(outbound_sperm);
+                    if (n_int > 0.0f) {
+                        for (int pos = 0; pos < row_len; ++pos) {
+                            probs[pos] = weights[row_start + pos] / total_w;
+                        }
+                        natal_multinomial(&state, n_int, probs, row_len, drawn);
+                        for (int pos = 0; pos < row_len; ++pos) {
+                            int e = row_start + pos;
+                            fwd_s[((long long)e * A + age) * Z * Z + gf * Z + gm] = drawn[pos];
+                            moved_sperm += drawn[pos];
+                        }
+                    }
+                } else {
+                    for (int pos = 0; pos < row_len; ++pos) {
+                        fwd_s[((long long)(row_start + pos) * A + age) * Z * Z + gf * Z + gm] = 0.0f;
+                    }
+                }
+                float sperm_stay = value - moved_sperm;
+                sperm_out[((age * Z + gf) * Z + gm) * n_batch + src] = sperm_stay;
+                ind_out[female_index] += sperm_stay;
+            }
+        }
+    }
+
+    for (int age = 0; age < A; ++age) {
+        float male_rate = rate[src * 2 * A + A + age];
+        for (int z = 0; z < Z; ++z) {
+            float value = ind_in[((1 * A + age) * Z + z) * n_batch + src];
+            float outbound = sample_outbound_device(&state, value, male_rate);
+            float moved_total = 0.0f;
+            if (outbound > 0.0f && row_len > 0 && total_w > 0.0f) {
+                float n_int = roundf(outbound);
+                if (n_int > 0.0f) {
+                    for (int pos = 0; pos < row_len; ++pos) {
+                        probs[pos] = weights[row_start + pos] / total_w;
+                    }
+                    natal_multinomial(&state, n_int, probs, row_len, drawn);
+                    for (int pos = 0; pos < row_len; ++pos) {
+                        int e = row_start + pos;
+                        fwd_m[(long long)e * A * Z + age * Z + z] = drawn[pos];
+                        moved_total += drawn[pos];
+                    }
+                }
+            } else {
+                for (int pos = 0; pos < row_len; ++pos) {
+                    fwd_m[(long long)(row_start + pos) * A * Z + age * Z + z] = 0.0f;
+                }
+            }
+            ind_out[((1 * A + age) * Z + z) * n_batch + src] = value - moved_total;
+        }
+    }
+}
+
+// Pass 2 gather kernels: sum the stored per-entry forward amounts into each
+// destination. `rev_entry[e]` is the CSR entry index of the e-th incoming edge.
+extern "C" __global__ void migration_stochastic_gather_female(
+    float* ind_out,
+    const int* rev_indptr,
+    const int* rev_entry,
+    const float* fwd_f,
+    const float* fwd_s,
+    int n_batch,
+    int n_ages,
+    int n_ztypes)
+{
+    int cells = n_batch * n_ages * n_ztypes;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= cells) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int fz = i % Z;
+    int t = i / Z;
+    int age = t % A;
+    int dst = t / A;
+    float total = 0.0f;
+    for (int e = rev_indptr[dst]; e < rev_indptr[dst + 1]; ++e) {
+        long long entry = rev_entry[e];
+        total += fwd_f[entry * A * Z + age * Z + fz];
+        for (int mz = 0; mz < Z; ++mz) {
+            total += fwd_s[(entry * A + age) * Z * Z + fz * Z + mz];
+        }
+    }
+    ind_out[((0 * A + age) * Z + fz) * n_batch + dst] += total;
+}
+
+extern "C" __global__ void migration_stochastic_gather_sperm(
+    float* sperm_out,
+    const int* rev_indptr,
+    const int* rev_entry,
+    const float* fwd_s,
+    int n_batch,
+    int n_ages,
+    int n_ztypes)
+{
+    int cells = n_batch * n_ages * n_ztypes * n_ztypes;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= cells) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int mz = i % Z;
+    int t = i / Z;
+    int fz = t % Z;
+    t /= Z;
+    int age = t % A;
+    int dst = t / A;
+    float total = 0.0f;
+    for (int e = rev_indptr[dst]; e < rev_indptr[dst + 1]; ++e) {
+        long long entry = rev_entry[e];
+        total += fwd_s[(entry * A + age) * Z * Z + fz * Z + mz];
+    }
+    sperm_out[((age * Z + fz) * Z + mz) * n_batch + dst] += total;
+}
+
+extern "C" __global__ void migration_stochastic_gather_male(
+    float* ind_out,
+    const int* rev_indptr,
+    const int* rev_entry,
+    const float* fwd_m,
+    int n_batch,
+    int n_ages,
+    int n_ztypes)
+{
+    int cells = n_batch * n_ages * n_ztypes;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= cells) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int z = i % Z;
+    int t = i / Z;
+    int age = t % A;
+    int dst = t / A;
+    float total = 0.0f;
+    for (int e = rev_indptr[dst]; e < rev_indptr[dst + 1]; ++e) {
+        long long entry = rev_entry[e];
+        total += fwd_m[entry * A * Z + age * Z + z];
+    }
+    ind_out[((1 * A + age) * Z + z) * n_batch + dst] += total;
+}
 "#;
 
 /// Device arguments for [`Kernels::density_scaling`].
@@ -1505,6 +1748,14 @@ pub struct Kernels {
     survival_stochastic: CudaFunction,
     /// `reproduction_stochastic(...)`.
     reproduction_stochastic: CudaFunction,
+    /// `migration_stochastic_prepare(...)`.
+    migration_stochastic_prepare: CudaFunction,
+    /// `migration_stochastic_gather_female(...)`.
+    migration_stochastic_gather_female: CudaFunction,
+    /// `migration_stochastic_gather_sperm(...)`.
+    migration_stochastic_gather_sperm: CudaFunction,
+    /// `migration_stochastic_gather_male(...)`.
+    migration_stochastic_gather_male: CudaFunction,
 }
 
 impl Kernels {
@@ -1580,6 +1831,26 @@ impl Kernels {
         let reproduction_stochastic = module
             .load_function("reproduction_stochastic")
             .map_err(|err| format!("loading kernel `reproduction_stochastic` failed: {err}"))?;
+        let migration_stochastic_prepare = module
+            .load_function("migration_stochastic_prepare")
+            .map_err(|err| {
+                format!("loading kernel `migration_stochastic_prepare` failed: {err}")
+            })?;
+        let migration_stochastic_gather_female = module
+            .load_function("migration_stochastic_gather_female")
+            .map_err(|err| {
+                format!("loading kernel `migration_stochastic_gather_female` failed: {err}")
+            })?;
+        let migration_stochastic_gather_sperm = module
+            .load_function("migration_stochastic_gather_sperm")
+            .map_err(|err| {
+                format!("loading kernel `migration_stochastic_gather_sperm` failed: {err}")
+            })?;
+        let migration_stochastic_gather_male = module
+            .load_function("migration_stochastic_gather_male")
+            .map_err(|err| {
+                format!("loading kernel `migration_stochastic_gather_male` failed: {err}")
+            })?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -1596,6 +1867,10 @@ impl Kernels {
             recruit_stochastic,
             survival_stochastic,
             reproduction_stochastic,
+            migration_stochastic_prepare,
+            migration_stochastic_gather_female,
+            migration_stochastic_gather_sperm,
+            migration_stochastic_gather_male,
         })
     }
 
@@ -2326,6 +2601,127 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("reproduction_stochastic launch failed: {err}"))
+    }
+
+    /// Run one deterministic-scatter stochastic CSR migration across the batch.
+    ///
+    /// Pass 1 samples each source's outbound and multinomial split into
+    /// `fwd_*` (indexed by CSR entry) and writes the source's stay mass into
+    /// `ind_out`/`sperm_out`; pass 2 gathers the forward amounts per
+    /// destination. No atomics, so the result is reproducible run to run.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launches are ordered on.
+    /// - `ind_in`, `sperm_in`: Batch-minor source state.
+    /// - `ind_out`, `sperm_out`: Batch-minor destination state.
+    /// - `rate`: `(B, 2, A)` migration rates.
+    /// - `indptr`, `dest`, `weights`: CSR (destination and weight arrays are
+    ///   only read by pass 1).
+    /// - `fwd_f`, `fwd_s`, `fwd_m`: Entry-indexed forward scratch.
+    /// - `rev_indptr`, `rev_entry`: Reverse CSR storing CSR entry indices.
+    /// - `n_batch`, `n_ages`, `n_ztypes`: Model dimensions.
+    /// - `key0`, `key1`, `site`: Philox key and draw-site.
+    ///
+    /// ## Errors
+    /// Returns a description when a launch fails.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signatures.
+    pub fn migration_stochastic(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind_in: &CudaSlice<f32>,
+        sperm_in: &CudaSlice<f32>,
+        ind_out: &mut CudaSlice<f32>,
+        sperm_out: &mut CudaSlice<f32>,
+        rate: &CudaSlice<f32>,
+        indptr: &CudaSlice<i32>,
+        dest: &CudaSlice<i32>,
+        weights: &CudaSlice<f32>,
+        fwd_f: &mut CudaSlice<f32>,
+        fwd_s: &mut CudaSlice<f32>,
+        fwd_m: &mut CudaSlice<f32>,
+        rev_indptr: &CudaSlice<i32>,
+        rev_entry: &CudaSlice<i32>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        if n_batch == 0 || n_ages == 0 || n_ztypes == 0 {
+            return Ok(());
+        }
+        if n_ztypes > MAX_Z {
+            return Err(format!(
+                "migration_stochastic supports at most {MAX_Z} zygote types, got {n_ztypes}"
+            ));
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let cells = n_batch * n_ages * n_ztypes;
+        let grid_batch = LaunchConfig::for_num_elems(n_batch as u32);
+        let grid_cells = LaunchConfig::for_num_elems(cells as u32);
+        let grid_sperm = LaunchConfig::for_num_elems((cells * n_ztypes) as u32);
+
+        let mut prepare = stream.launch_builder(&self.migration_stochastic_prepare);
+        prepare.arg(ind_in);
+        prepare.arg(sperm_in);
+        prepare.arg(&mut *ind_out);
+        prepare.arg(&mut *sperm_out);
+        prepare.arg(rate);
+        prepare.arg(indptr);
+        prepare.arg(dest);
+        prepare.arg(weights);
+        prepare.arg(&mut *fwd_f);
+        prepare.arg(&mut *fwd_s);
+        prepare.arg(&mut *fwd_m);
+        prepare.arg(&n_batch_i);
+        prepare.arg(&n_ages_i);
+        prepare.arg(&n_ztypes_i);
+        prepare.arg(&key0);
+        prepare.arg(&key1);
+        prepare.arg(&site);
+        unsafe { prepare.launch(grid_batch) }
+            .map(|_| ())
+            .map_err(|err| format!("migration_stochastic_prepare launch failed: {err}"))?;
+
+        let mut female = stream.launch_builder(&self.migration_stochastic_gather_female);
+        female.arg(&mut *ind_out);
+        female.arg(rev_indptr);
+        female.arg(rev_entry);
+        female.arg(&*fwd_f);
+        female.arg(&*fwd_s);
+        female.arg(&n_batch_i);
+        female.arg(&n_ages_i);
+        female.arg(&n_ztypes_i);
+        unsafe { female.launch(grid_cells) }
+            .map(|_| ())
+            .map_err(|err| format!("migration_stochastic_gather_female launch failed: {err}"))?;
+
+        let mut sperm = stream.launch_builder(&self.migration_stochastic_gather_sperm);
+        sperm.arg(&mut *sperm_out);
+        sperm.arg(rev_indptr);
+        sperm.arg(rev_entry);
+        sperm.arg(&*fwd_s);
+        sperm.arg(&n_batch_i);
+        sperm.arg(&n_ages_i);
+        sperm.arg(&n_ztypes_i);
+        unsafe { sperm.launch(grid_sperm) }
+            .map(|_| ())
+            .map_err(|err| format!("migration_stochastic_gather_sperm launch failed: {err}"))?;
+
+        let mut male = stream.launch_builder(&self.migration_stochastic_gather_male);
+        male.arg(&mut *ind_out);
+        male.arg(rev_indptr);
+        male.arg(rev_entry);
+        male.arg(&*fwd_m);
+        male.arg(&n_batch_i);
+        male.arg(&n_ages_i);
+        male.arg(&n_ztypes_i);
+        unsafe { male.launch(grid_cells) }
+            .map(|_| ())
+            .map_err(|err| format!("migration_stochastic_gather_male launch failed: {err}"))
     }
 }
 

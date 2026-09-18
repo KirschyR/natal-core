@@ -1844,3 +1844,156 @@ fn device_stochastic_reproduction_matches_host_distribution() {
         );
     }
 }
+
+#[test]
+fn device_stochastic_migration_matches_host_distribution() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // Independent pairs: even deme -> its odd partner (out-degree 1, empty
+    // partner row), so pairs do not interact and can be pooled statistically.
+    let n_batch = 2000usize;
+    let pairs = n_batch / 2;
+    let n_ages = 4usize;
+    let z = 2usize;
+
+    let mut blueprint = dimension_blueprint(n_ages, z);
+    blueprint.stochastic = true;
+    blueprint.n_demes = n_batch;
+    let mut indptr = vec![0i64; n_batch + 1];
+    let mut dest = Vec::new();
+    for deme in 0..n_batch {
+        let entries = if deme % 2 == 0 { 1 } else { 0 };
+        indptr[deme + 1] = indptr[deme] + entries;
+        if entries == 1 {
+            dest.push(((deme + 1) % n_batch) as i64);
+        }
+    }
+    blueprint.migration_indptr = indptr;
+    blueprint.migration_dest_idx = dest;
+    blueprint.migration_weights = vec![1.0f64; pairs];
+
+    let tile = |values: &[f64]| -> Vec<f64> {
+        (0..n_batch).flat_map(|_| values.iter().copied()).collect()
+    };
+    let rate_values: Vec<f64> = (0..n_batch * 2 * n_ages)
+        .map(|i| 0.1 + 0.02 * (i % 5) as f64)
+        .collect();
+    let ecology = EcologyParams {
+        n_demes: n_batch,
+        carrying_capacity: vec![1.0e9; n_batch],
+        eggs_per_female: vec![1.0; n_batch],
+        sex_ratio: vec![0.5; n_batch],
+        sperm_displacement_rate: vec![0.1; n_batch],
+        low_density_growth_rate: vec![1.0; n_batch],
+        growth_mode: vec![0; n_batch],
+        external_expected_eggs: vec![-1.0; n_batch],
+        survival_rates: tile(&[1.0; 8]),
+        mating_rates: tile(&[0.0; 8]),
+        reproduction_rates: tile(&[0.0; 4]),
+        fertility: tile(&[0.0; 4]),
+        competition_weights: tile(&[1.0; 4]),
+        equilibrium_distribution: vec![],
+        equilibrium_declared: vec![false; n_batch],
+        migration_rate: rate_values.clone(),
+        custom_slots: vec![HashMap::new(); n_batch],
+    };
+
+    let ind_stride = 2 * n_ages * z;
+    let sperm_stride = n_ages * z * z;
+    let one_ind: Vec<f64> = vec![100.0; ind_stride];
+    let mut one_sperm = vec![0.0f64; sperm_stride];
+    for age in 1..n_ages {
+        for gf in 0..z {
+            for gm in 0..z {
+                one_sperm[(age * z + gf) * z + gm] = 3.0;
+            }
+        }
+    }
+    let ind_all: Vec<f64> = (0..n_batch).flat_map(|_| one_ind.iter().copied()).collect();
+    let sperm_all: Vec<f64> = (0..n_batch)
+        .flat_map(|_| one_sperm.iter().copied())
+        .collect();
+    let ind_host: Vec<f32> = ind_all.iter().map(|v| *v as f32).collect();
+    let sperm_host: Vec<f32> = sperm_all.iter().map(|v| *v as f32).collect();
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, n_batch, n_ages, z, &ind_host, &sperm_host).expect("executor");
+    executor.set_seed(0x0BAD_F00D_1234_5678);
+    executor
+        .migrate_tick_stochastic(&blueprint, &ecology)
+        .expect("device stochastic migration");
+    let device_ind = executor.download_ind().expect("download");
+    let device_sperm = executor.download_sperm().expect("download");
+
+    let trials = 2000usize;
+    let mut cpu_sum = [vec![0.0f64; ind_stride], vec![0.0f64; ind_stride]];
+    let mut cpu_sq = [vec![0.0f64; ind_stride], vec![0.0f64; ind_stride]];
+    let mut cpu_sum_sperm = [vec![0.0f64; sperm_stride], vec![0.0f64; sperm_stride]];
+    let mut cpu_sq_sperm = [vec![0.0f64; sperm_stride], vec![0.0f64; sperm_stride]];
+    for trial in 0..trials {
+        let mut rngs: Vec<_> = (0..n_batch)
+            .map(|src| new_rng(50_000 + (trial as u64) * 7919 + src as u64))
+            .collect();
+        let (ind, sperm) = crate::kernels::spatial::migrate_csr_stochastic_rngs(
+            &mut rngs,
+            &ind_all,
+            &sperm_all,
+            &blueprint.migration_indptr,
+            &blueprint.migration_dest_idx,
+            &blueprint.migration_weights,
+            &rate_values,
+            false,
+            n_batch,
+            n_ages,
+            z,
+        )
+        .expect("host stochastic migration");
+        for pair in 0..pairs {
+            for parity in 0..2 {
+                let deme = 2 * pair + parity;
+                for slot in 0..ind_stride {
+                    let value = ind[deme * ind_stride + slot];
+                    cpu_sum[parity][slot] += value;
+                    cpu_sq[parity][slot] += value * value;
+                }
+                for slot in 0..sperm_stride {
+                    let value = sperm[deme * sperm_stride + slot];
+                    cpu_sum_sperm[parity][slot] += value;
+                    cpu_sq_sperm[parity][slot] += value * value;
+                }
+            }
+        }
+    }
+    let samples = (pairs * trials) as f64;
+    for parity in 0..2 {
+        for slot in 0..ind_stride {
+            let cpu_mean = cpu_sum[parity][slot] / samples;
+            let cpu_var = (cpu_sq[parity][slot] / samples - cpu_mean * cpu_mean).max(0.0);
+            let device_mean = (0..pairs)
+                .map(|pair| device_ind[(2 * pair + parity) * ind_stride + slot] as f64)
+                .sum::<f64>()
+                / pairs as f64;
+            let tolerance = 5.0 * (cpu_var / pairs as f64).sqrt() + 0.5;
+            assert!(
+                (device_mean - cpu_mean).abs() <= tolerance,
+                "parity {parity} ind[{slot}]: device {device_mean} vs host {cpu_mean} (tol {tolerance})"
+            );
+        }
+        for slot in 0..sperm_stride {
+            let cpu_mean = cpu_sum_sperm[parity][slot] / samples;
+            let cpu_var = (cpu_sq_sperm[parity][slot] / samples - cpu_mean * cpu_mean).max(0.0);
+            let device_mean = (0..pairs)
+                .map(|pair| device_sperm[(2 * pair + parity) * sperm_stride + slot] as f64)
+                .sum::<f64>()
+                / pairs as f64;
+            let tolerance = 5.0 * (cpu_var / pairs as f64).sqrt() + 0.5;
+            assert!(
+                (device_mean - cpu_mean).abs() <= tolerance,
+                "parity {parity} sperm[{slot}]: device {device_mean} vs host {cpu_mean} (tol {tolerance})"
+            );
+        }
+    }
+}

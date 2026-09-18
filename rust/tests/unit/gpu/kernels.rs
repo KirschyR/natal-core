@@ -732,3 +732,24 @@ fn evaluator_gamma_including_shape_below_one_matches_cpu() {
         );
     }
 }
+
+#[test]
+fn evaluator_poisson_ptr_large_lambda_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let n_dev = 200_000usize;
+    let n_cpu = 200_000usize;
+    for lambda in [10.0f64, 11.0, 500.0, 1000.0, 5000.0, 20_000.0] {
+        let gpu = evaluator_draw(&kernels, &stream, 2, lambda as f32, 0.0, n_dev, 81);
+        let mut rng = new_rng(0xF00D);
+        let cpu: Vec<f64> = (0..n_cpu).map(|_| poisson(&mut rng, lambda)).collect();
+        let hi = lambda + 8.0 * lambda.sqrt() + 4.0;
+        let label = format!("poisson(PTRS) lambda={lambda}");
+        assert_same_distribution(&label, &gpu, &cpu, 0.0, hi, 40);
+    }
+}

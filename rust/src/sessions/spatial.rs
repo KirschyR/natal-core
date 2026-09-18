@@ -85,6 +85,10 @@ pub struct SpatialSession {
     /// Audited per-deme set_param transitions accumulated across run
     /// calls; drained by the Python adapter after each run.
     eco_journal: Vec<crate::kernels::spatial::SpatialEcoJournalRow>,
+    /// Optional CUDA device executor for deterministic age-structured spatial
+    /// models. `None` keeps the CPU path authoritative.
+    #[cfg(feature = "gpu")]
+    gpu: Option<crate::gpu::executor::GpuExecutor>,
 }
 
 #[pymethods]
@@ -329,7 +333,85 @@ impl SpatialSession {
             eco_journal: Vec::new(),
             checkpoints: Vec::new(),
             history_store: None,
+            #[cfg(feature = "gpu")]
+            gpu: None,
         })
+    }
+
+    /// Enable the optional CUDA bypass for this spatial session.
+    ///
+    /// Supported: hook-free, deterministic age-structured spatial models with
+    /// any number of demes. Discrete-generation and stochastic models are
+    /// rejected explicitly; the CPU path is never silently substituted.
+    ///
+    /// ## Errors
+    /// Returns ``PyValueError`` when the model is ineligible, or a runtime
+    /// error when the device is unavailable.
+    #[cfg(feature = "gpu")]
+    fn enable_gpu(&mut self) -> PyResult<()> {
+        if self.discrete {
+            return Err(PyValueError::new_err(
+                "GPU path currently supports age-structured spatial models only",
+            ));
+        }
+        if self.blueprint.stochastic {
+            return Err(PyValueError::new_err(
+                "GPU path requires a deterministic model (stochastic=false)",
+            ));
+        }
+        if self.hooks.n_hooks != 0
+            || self
+                .hooks
+                .python_callbacks
+                .iter()
+                .any(|callbacks| !callbacks.is_empty())
+        {
+            return Err(PyValueError::new_err("GPU path requires a hook-free model"));
+        }
+        if self
+            .ecology
+            .growth_mode
+            .iter()
+            .any(|mode| !(0..=4).contains(mode))
+        {
+            return Err(PyValueError::new_err(
+                "GPU path does not support custom growth curves",
+            ));
+        }
+        if self.blueprint.n_demes != self.deme_variants.len()
+            || self.ecology.n_demes != self.deme_variants.len()
+        {
+            return Err(PyValueError::new_err(
+                "spatial GPU path needs one ecology column and variant id per deme",
+            ));
+        }
+        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
+        let ind_host: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
+        let sperm_host: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
+        let executor = crate::gpu::executor::GpuExecutor::new(
+            context,
+            self.deme_variants.len(),
+            self.blueprint.n_ages,
+            self.blueprint.n_ztypes,
+            &ind_host,
+            &sperm_host,
+        )
+        .map_err(map_lifecycle_error)?;
+        self.gpu = Some(executor);
+        Ok(())
+    }
+
+    /// Whether the CUDA bypass is active for this spatial session.
+    ///
+    /// ## Returns
+    /// ``"enabled"`` or ``"disabled"``.
+    #[cfg(feature = "gpu")]
+    fn gpu_status(&self) -> String {
+        if self.gpu.is_some() {
+            "enabled".to_owned()
+        } else {
+            "disabled".to_owned()
+        }
     }
 
     /// Pull exactly the named ecology fields for one deme.
@@ -1126,7 +1208,63 @@ fn validate_stacked_sperm(
 }
 
 impl SpatialSession {
+    /// Run one deterministic spatial tick on the device (lifecycle then
+    /// migration) and copy the state back into the f64 session state.
+    ///
+    /// ## Parameters
+    /// - `gpu`: Uploaded device executor.
+    /// - `blueprint`, `ecology`, `variants`, `deme_variants`: Live contracts.
+    /// - `stay_after_send`: Deterministic migration bookkeeping mode.
+    /// - `state_ind`, `state_sperm`, `state_tick`: Session state, updated in place.
+    ///
+    /// ## Returns
+    /// `Ok(())` once the tick is complete and downloaded.
+    ///
+    /// ## Errors
+    /// Returns the first device-stage error.
+    #[cfg(feature = "gpu")]
+    #[allow(clippy::too_many_arguments)] // Mirrors the session state fields it updates.
+    fn run_gpu_tick(
+        gpu: &mut crate::gpu::executor::GpuExecutor,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+        stay_after_send: bool,
+        state_ind: &mut Vec<f64>,
+        state_sperm: &mut Vec<f64>,
+        state_tick: &mut i64,
+    ) -> Result<(), String> {
+        gpu.tick(blueprint, ecology, variants, deme_variants)?;
+        let all_zero = ecology.migration_rate.iter().all(|&rate| rate <= 0.0);
+        if !all_zero {
+            gpu.migrate_tick(blueprint, ecology, stay_after_send)?;
+        }
+        *state_ind = gpu.download_ind()?.into_iter().map(f64::from).collect();
+        *state_sperm = gpu.download_sperm()?.into_iter().map(f64::from).collect();
+        *state_tick += 1;
+        Ok(())
+    }
+
     fn run_inner(&mut self) -> PyResult<i64> {
+        // Device branch: an early return; the CPU path below is unchanged.
+        #[cfg(feature = "gpu")]
+        if let Some(mut gpu) = self.gpu.take() {
+            let outcome = Self::run_gpu_tick(
+                &mut gpu,
+                &self.blueprint,
+                &self.ecology,
+                &self.variants,
+                &self.deme_variants,
+                self.stay_after_send,
+                &mut self.state_ind,
+                &mut self.state_sperm,
+                &mut self.state_tick,
+            );
+            self.gpu = Some(gpu);
+            outcome.map_err(map_lifecycle_error)?;
+            return Ok(self.state_tick);
+        }
         let n_demes = self.deme_variants.len();
         // Per-deme ECO scratch rows for OP_SET_PARAM; written back into
         // the ecology columns after all demes ticked.
@@ -1256,3 +1394,7 @@ impl SpatialSession {
         Ok(self.state_tick)
     }
 }
+
+#[cfg(all(test, feature = "gpu"))]
+#[path = "../../tests/unit/gpu/spatial_session.rs"]
+mod gpu_spatial_tests;

@@ -115,3 +115,39 @@ fn kernel_launchers_reject_invalid_shapes() {
         )
         .is_ok());
 }
+
+#[test]
+fn migration_kernel_short_circuits_empty_batch() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let zero_f = stream.alloc_zeros::<f32>(0).expect("alloc");
+    let zero_i = stream.alloc_zeros::<i32>(0).expect("alloc");
+    let ind_in = stream.alloc_zeros::<f32>(0).expect("alloc");
+    let sperm_in = stream.alloc_zeros::<f32>(0).expect("alloc");
+    let mut ind_out = stream.alloc_zeros::<f32>(0).expect("alloc");
+    let mut sperm_out = stream.alloc_zeros::<f32>(0).expect("alloc");
+    assert!(kernels
+        .migration(
+            &stream,
+            &ind_in,
+            &sperm_in,
+            &mut ind_out,
+            &mut sperm_out,
+            &zero_f,
+            &zero_i,
+            &zero_i,
+            &zero_i,
+            &zero_f,
+            &zero_f,
+            false,
+            0,
+            4,
+            2,
+        )
+        .is_ok());
+}

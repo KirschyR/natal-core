@@ -1283,3 +1283,36 @@ fn device_migration_matches_the_host_reference() {
         }
     }
 }
+
+#[test]
+fn migration_tick_validates_inputs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (_, mut ecology) = density_fixture();
+    ecology.migration_rate = vec![0.1f64; 4 * 2 * 4];
+    let (ind, sperm) = populated_state(4, 4, 2);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, 4, 4, 2, &ind, &sperm).expect("executor uploads and compiles");
+
+    // Wrong CSR row-pointer count.
+    let mut bad_indptr = migration_blueprint();
+    bad_indptr.migration_indptr = vec![0, 2];
+    assert!(executor.migrate_tick(&bad_indptr, &ecology, false).is_err());
+
+    // An empty migration column is a no-op.
+    let mut empty = ecology.clone();
+    empty.migration_rate = vec![];
+    assert!(executor
+        .migrate_tick(&migration_blueprint(), &empty, false)
+        .is_ok());
+
+    // A destination outside the batch is rejected.
+    let mut out_of_range = migration_blueprint();
+    out_of_range.migration_dest_idx = vec![1, 9, 0, 2];
+    assert!(executor
+        .migrate_tick(&out_of_range, &ecology, false)
+        .is_err());
+}

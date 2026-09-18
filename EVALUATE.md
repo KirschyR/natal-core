@@ -14,9 +14,9 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 3 轮：**APPROVED**（§14；§12.4 覆盖率阻塞已解除） |
-| 主 agent 处理 | 已完成；无待办 |
-| 待 evaluator 动作 | —（若后续有实质改动，重跑受影响门禁并追加回执） |
+| 最近回执 | 第 3 轮：**APPROVED**（P0–P3） |
+| 主 agent 处理 | P5（确定性迁移 + 空间接线 + 空间 L3）已实现并自测；**待第 4 轮独立复核** |
+| 待 evaluator 动作 | 按 §16 复核，把第 4 轮结论写入 §17 |
 
 ## 0. 一句话目标
 
@@ -442,6 +442,58 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 16. 第 4 轮交接 — P5 确定性迁移 + 空间多 deme
+
+- 日期：2026-09-18
+- 范围（相对 §14 已批准的 P0–P3）：新增确定性 CSR 迁移与空间会话接线。
+- 风险分类：**高风险**（科学公式 + 跨 deme 数据布局 + 归约顺序）。
+
+### 16.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `MIGRATION_SOURCE`：`migration_female` / `migration_sperm` / `migration_male`；`Kernels::migration` 启动器 |
+| `rust/src/gpu/executor.rs` | `GpuExecutor::migrate_tick(bp, eco, stay_after)`：主机侧构建反 CSR + `row_sum_w`，上传后用 scratch 输出并交换 |
+| `rust/src/sessions/spatial.rs` | `gpu` 字段；`enable_gpu()`/`gpu_status()`；`run_gpu_tick` + `run_inner` 提前返回分支（CPU 路径未改） |
+| `src/natal/backends/rust/rust_backend.py` | 空间后端 `enable_gpu()`/`gpu_status()` 透传 |
+| `rust/tests/unit/gpu/*` | 迁移 L1、空间会话设备路径（含拒绝分支）、迁移空批守卫 |
+
+### 16.2 设计要点（请重点核对）
+
+1. **确定性 gather**：迁移按**反向 CSR** 在目标格点上按固定顺序累加入边（无 `atomicAdd`），保证 GPU↔GPU 可复现；复刻 `migrate_csr_deterministic` 的 `stay_after`/空行/`virgin=雌−储精`（`|neg|<1e-9` 归零）语义，且储精质量同时计入雌性个体平面。
+2. **同 tick 顺序**：设备空间 tick = 生命周期（reproduction→survival→aging，批量 deme）→ 迁移；与 CPU `run_inner` 一致。
+3. **零速率跳过**：所有 `migration_rate <= 0` 时跳过迁移，匹配 CPU 的 bitwise skip。
+4. **每 tick 回传**：设备分支在 `run_inner` 内逐 tick 下载状态（因此 `run_steps` 的历史记录对设备路径同样生效）；这是当前取舍，非零回传优化留待后续。
+5. **eligibility**：仅 `!discrete`、`stochastic=false`、无钩子、`growth_mode∈0..=4`、每 deme 一列生态与一个 variant id；否则显式报错。
+
+### 16.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **129 passed, 0 failed** |
+| `cargo test` | 67 passed |
+| `clippy --features gpu -D warnings` / `fmt --check` | 通过 |
+| `check_rust.py` / `phase0` | EXIT=0 / all scenarios bit-identical |
+| `ruff` / `pyright` / `pytest` | 通过 / 0 errors / 3606 passed |
+| 覆盖率 `src/gpu` | **行 95.18%（69 missed / 1432）** |
+| 覆盖率 `sessions/spatial.rs` 新增行 | 88/91 ≈ 96.7%（残余 3 行为 `#[cfg]`、`from_parts` 的 `gpu: None`、一个 `}`，与 §14.3 接受的同类残余一致） |
+| 空间 L3（`demos/gpu_spatial/age_structured` 5×5 参考模型，25 tick） | tick 一致；ind/sperm `max_rel ≈ 9.15e-7` |
+| 拒绝路径 | discrete / stochastic / hooks / custom growth / deme-variant mismatch 均显式报错 |
+
+复现 L3 的脚本见 `/tmp/l3_spatial.py`（临时），核心为：同一确定性空间群体各建一次，`backend.enable_gpu()` 后 `pop.run(N)`，比较 `state_snapshot()`。
+
+### 16.4 请 evaluator 独立核对
+
+- 反向 CSR gather 是否与 `migrate_csr_deterministic` 逐分支等价（`stay_after` 真/假、空行、自环、多入边累加顺序）。
+- f32 误差是否在 ~1.2e-6（含算术）与逐位（纯搬运）分档内；自行设计更多 CSR 拓扑与边界输入证伪。
+- 空间 tick 顺序与 CPU 一致；`all_zero` 跳过条件一致。
+- CPU golden reference 零改动；默认 feature 仍 67 测试。
+- 覆盖率口径沿用 §14.3（聚合 + 逐新模块）。
+
+结论请追加为 **§17**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -647,3 +699,8 @@ LLVM_BIN="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin"
 `feat/gpu-merge-test` 的 CUDA 旁路 P0–P3 在正确性、CPU golden reference 隔离、默认关闭、
 精度分档、显式失败、会话接线与测试覆盖上均满足要求。**APPROVED**（范围为当前 HEAD `34f8cc2`
 与被审测试集；不声称任何历史基线失败消失）。
+
+## 17. 第 4 轮结论（待 evaluator 填写）
+
+（请在此追加：裁定 APPROVED / NOT APPROVED、独立复现的迁移 L1/空间 L3 证据、覆盖率口径与逐文件结果、
+残余风险。只追加，不改写历史轮次。）

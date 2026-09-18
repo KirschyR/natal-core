@@ -1043,6 +1043,36 @@ class RustHeterogeneousSpatialLifecycleBackend:
         """Install a spatial program without replacing states, checkpoints or RNG."""
         self._session.set_hook_program(program)
 
+    def enable_gpu(self) -> None:
+        """Enable the optional CUDA device path for this spatial session.
+
+        Supported: hook-free, deterministic age-structured spatial models with
+        any number of demes. Raises when the extension lacks GPU support or the
+        model is ineligible; it never silently falls back to the CPU.
+
+        Raises:
+            RuntimeError: The installed extension has no GPU support.
+        """
+        enable = getattr(self._session, "enable_gpu", None)
+        if enable is None:
+            raise RuntimeError(
+                "this _engine_rs build has no GPU support; rebuild with "
+                "`maturin develop --features gpu`"
+            )
+        enable()
+
+    def gpu_status(self) -> str:
+        """Return the spatial device-path status.
+
+        Returns:
+            ``"enabled"``, ``"disabled"``, or ``"unavailable"`` when the
+            extension was built without the ``gpu`` feature.
+        """
+        status = getattr(self._session, "gpu_status", None)
+        if status is None:
+            return "unavailable"
+        return str(status())
+
     def run_tick(self) -> int:
         """Run one complete spatial tick inside Rust (control only).
 

@@ -728,6 +728,248 @@ extern "C" __global__ void fill_uniform(
 }
 "#;
 
+/// CUDA C for the device sampling library (§P4).
+///
+/// A per-thread `RngState` drives every sampler; each draw is a pure function
+/// of `(key, counter, site)`, so a thread's stream is reproducible and has no
+/// cross-thread dependency. Binomial and Poisson use exact methods in the
+/// small-parameter regime (geometric skipping / Knuth product) and a normal
+/// approximation with a continuity correction once the distribution is close
+/// to symmetric; gamma uses Marsaglia-Tsang. Multinomial lifts the sequential
+/// conditional-binomial loop to the outer axis all threads advance together
+/// (§4.2 plan C).
+const SAMPLING_SOURCE: &str = r#"
+struct RngState {
+    unsigned long long counter;
+    unsigned int key0;
+    unsigned int key1;
+    unsigned int site;
+    unsigned int buffer[4];
+    int index;
+};
+
+__device__ __forceinline__ void rng_init(
+    RngState* state, unsigned long long cell, unsigned int key0, unsigned int key1, unsigned int site)
+{
+    // High counter word identifies the cell, low word counts that cell's
+    // draws, so no two cells ever share a Philox counter (which would make
+    // their streams overlap).
+    state->counter = (cell & 0xFFFFFFFFull) << 32;
+    state->key0 = key0;
+    state->key1 = key1;
+    state->site = site;
+    state->index = 4;
+}
+
+__device__ __forceinline__ unsigned int rng_next(RngState* state) {
+    if (state->index >= 4) {
+        unsigned int o0, o1, o2, o3;
+        philox4x32_10(
+            (unsigned int)(state->counter & 0xFFFFFFFFu),
+            (unsigned int)(state->counter >> 32),
+            state->site,
+            0u,
+            state->key0,
+            state->key1,
+            &o0, &o1, &o2, &o3);
+        state->buffer[0] = o0;
+        state->buffer[1] = o1;
+        state->buffer[2] = o2;
+        state->buffer[3] = o3;
+        state->counter += 1ULL;
+        state->index = 0;
+    }
+    return state->buffer[state->index++];
+}
+
+__device__ __forceinline__ float rng_uniform(RngState* state) {
+    return uniform_from_u32(rng_next(state));
+}
+
+__device__ __forceinline__ float rng_normal(RngState* state) {
+    float u1 = rng_uniform(state);
+    if (u1 < 1e-7f) {
+        u1 = 1e-7f;
+    }
+    float u2 = rng_uniform(state);
+    return sqrtf(-2.0f * logf(u1)) * cosf(6.283185307179586f * u2);
+}
+
+// Exact binomial by geometric skipping below the threshold; normal
+// approximation (mean-preserving, continuity-corrected) above it.
+__device__ __forceinline__ float sample_binomial(RngState* state, float n, float p) {
+    if (n <= 0.0f || p <= 0.0f) {
+        return 0.0f;
+    }
+    if (p >= 1.0f) {
+        return n;
+    }
+    int reflect = p > 0.5f;
+    float pp = reflect ? (1.0f - p) : p;
+    float mean = n * pp;
+    float result;
+    if (mean <= 512.0f) {
+        float log1mp = logf(1.0f - pp);
+        float successes = 0.0f;
+        float remaining = n;
+        while (remaining > 0.0f) {
+            float u = rng_uniform(state);
+            if (u <= 0.0f) {
+                u = 1e-7f;
+            }
+            float failures = floorf(logf(u) / log1mp);
+            if (failures >= remaining) {
+                break;
+            }
+            successes += 1.0f;
+            remaining -= (failures + 1.0f);
+        }
+        result = successes;
+    } else {
+        float sd = sqrtf(mean * (1.0f - pp));
+        float z = rng_normal(state);
+        result = floorf(mean + sd * z + 0.5f);
+        if (result < 0.0f) {
+            result = 0.0f;
+        }
+        if (result > n) {
+            result = n;
+        }
+    }
+    return reflect ? (n - result) : result;
+}
+
+// Exact Poisson (Knuth product) for small mean; normal approximation above.
+__device__ __forceinline__ float sample_poisson(RngState* state, float lambda) {
+    if (lambda <= 0.0f) {
+        return 0.0f;
+    }
+    if (lambda < 64.0f) {
+        float limit = expf(-lambda);
+        float count = 0.0f;
+        float product = 1.0f;
+        do {
+            count += 1.0f;
+            product *= rng_uniform(state);
+        } while (product > limit);
+        return count - 1.0f;
+    }
+    float z = rng_normal(state);
+    float result = floorf(lambda + sqrtf(lambda) * z + 0.5f);
+    return result < 0.0f ? 0.0f : result;
+}
+
+// Marsaglia-Tsang gamma sampler.
+__device__ float sample_gamma(RngState* state, float shape, float scale) {
+    if (shape < 1.0f) {
+        float u = rng_uniform(state);
+        if (u <= 0.0f) {
+            u = 1e-7f;
+        }
+        return sample_gamma(state, shape + 1.0f, scale) * powf(u, 1.0f / shape);
+    }
+    float d = shape - 1.0f / 3.0f;
+    float c = 1.0f / sqrtf(9.0f * d);
+    for (;;) {
+        float x = rng_normal(state);
+        float v = 1.0f + c * x;
+        if (v <= 0.0f) {
+            continue;
+        }
+        v = v * v * v;
+        float u = rng_uniform(state);
+        if (u < 1.0f - 0.0331f * x * x * x * x) {
+            return d * v * scale;
+        }
+        if (logf(u) < 0.5f * x * x + d * (1.0f - v + logf(v))) {
+            return d * v * scale;
+        }
+    }
+}
+
+extern "C" __global__ void sample_into(
+    float* out,
+    unsigned long long n,
+    unsigned int kind,
+    float a,
+    float b,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= n) {
+        return;
+    }
+    RngState state;
+    rng_init(&state, i, key0, key1, site);
+    float value;
+    if (kind == 0u) {
+        value = rng_uniform(&state);
+    } else if (kind == 1u) {
+        value = sample_binomial(&state, a, b);
+    } else if (kind == 2u) {
+        value = sample_poisson(&state, a);
+    } else if (kind == 3u) {
+        value = sample_gamma(&state, a, b);
+    } else {
+        value = rng_normal(&state);
+    }
+    out[i] = value;
+}
+
+// Multinomial: the sequential conditional-binomial loop is the outer axis all
+// threads advance together; each thread owns one row.
+extern "C" __global__ void multinomial_seq(
+    const float* probs,
+    const float* totals,
+    float* counts,
+    int n_rows,
+    int n_categories,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n_rows) {
+        return;
+    }
+    int K = n_categories;
+    RngState state;
+    rng_init(&state, (unsigned long long)row, key0, key1, site);
+    const float* p = probs + (long long)row * K;
+    float* out = counts + (long long)row * K;
+    float tail = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        tail += p[k];
+    }
+    float remaining = totals[row];
+    for (int k = 0; k < K - 1; ++k) {
+        float draw = 0.0f;
+        if (remaining > 0.0f && tail > 0.0f) {
+            float conditional = p[k] / tail;
+            if (conditional > 1.0f) {
+                conditional = 1.0f;
+            }
+            draw = sample_binomial(&state, remaining, conditional);
+            if (draw > remaining) {
+                draw = remaining;
+            }
+        }
+        out[k] = draw;
+        remaining -= draw;
+        tail -= p[k];
+        if (remaining < 0.0f) {
+            remaining = 0.0f;
+        }
+        if (tail < 0.0f) {
+            tail = 0.0f;
+        }
+    }
+    out[K - 1] = remaining;
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -821,6 +1063,10 @@ pub struct Kernels {
     migration_male: CudaFunction,
     /// `fill_uniform(...)`.
     fill_uniform: CudaFunction,
+    /// `sample_into(...)`.
+    sample_into: CudaFunction,
+    /// `multinomial_seq(...)`.
+    multinomial_seq: CudaFunction,
 }
 
 impl Kernels {
@@ -844,7 +1090,7 @@ impl Kernels {
             ..Default::default()
         };
         let source = format!(
-            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}"
+            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}\n{SAMPLING_SOURCE}"
         );
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
@@ -881,6 +1127,12 @@ impl Kernels {
         let fill_uniform = module
             .load_function("fill_uniform")
             .map_err(|err| format!("loading kernel `fill_uniform` failed: {err}"))?;
+        let sample_into = module
+            .load_function("sample_into")
+            .map_err(|err| format!("loading kernel `sample_into` failed: {err}"))?;
+        let multinomial_seq = module
+            .load_function("multinomial_seq")
+            .map_err(|err| format!("loading kernel `multinomial_seq` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -892,6 +1144,8 @@ impl Kernels {
             migration_sperm,
             migration_male,
             fill_uniform,
+            sample_into,
+            multinomial_seq,
         })
     }
 
@@ -1378,6 +1632,90 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("fill_uniform launch failed: {err}"))
+    }
+
+    /// Fill `out` by drawing one sample per element from a selected sampler.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `out`: Destination samples.
+    /// - `kind`: `0` uniform, `1` binomial(`a`,`b`), `2` Poisson(`a`),
+    ///   `3` gamma(`a` shape, `b` scale), other normal.
+    /// - `a`, `b`: Distribution parameters.
+    /// - `key0`, `key1`, `site`: Philox key and draw-site.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn sample_into(
+        &self,
+        stream: &Arc<CudaStream>,
+        out: &mut CudaSlice<f32>,
+        kind: u32,
+        a: f32,
+        b: f32,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        let n = out.len() as u64;
+        if n == 0 {
+            return Ok(());
+        }
+        let config = LaunchConfig::for_num_elems(n as u32);
+        let mut launch = stream.launch_builder(&self.sample_into);
+        launch.arg(&mut *out);
+        launch.arg(&n);
+        launch.arg(&kind);
+        launch.arg(&a);
+        launch.arg(&b);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("sample_into launch failed: {err}"))
+    }
+
+    /// Draw one multinomial row per batch element.
+    ///
+    /// `probs`/`counts` are `(n_rows, n_categories)` row-major and `totals` is
+    /// `(n_rows,)`. The sequential conditional-binomial loop is the outer axis
+    /// shared by all threads.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn multinomial_seq(
+        &self,
+        stream: &Arc<CudaStream>,
+        probs: &CudaSlice<f32>,
+        totals: &CudaSlice<f32>,
+        counts: &mut CudaSlice<f32>,
+        n_rows: usize,
+        n_categories: usize,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        if n_rows == 0 || n_categories == 0 {
+            return Err("multinomial_seq requires non-zero rows and categories".to_owned());
+        }
+        let n_rows_i = n_rows as i32;
+        let n_categories_i = n_categories as i32;
+        let config = LaunchConfig::for_num_elems(n_rows as u32);
+        let mut launch = stream.launch_builder(&self.multinomial_seq);
+        launch.arg(probs);
+        launch.arg(totals);
+        launch.arg(&mut *counts);
+        launch.arg(&n_rows_i);
+        launch.arg(&n_categories_i);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("multinomial_seq launch failed: {err}"))
     }
 }
 

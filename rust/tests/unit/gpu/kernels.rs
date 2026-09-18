@@ -5,6 +5,8 @@
 
 use crate::gpu::context::GpuContext;
 use crate::gpu::hardware_required;
+use cudarc::driver::CudaStream;
+use std::sync::Arc;
 
 use super::Kernels;
 
@@ -253,4 +255,141 @@ fn fill_uniform_matches_host_philox_and_reproduces() {
         (variance - 1.0 / 12.0).abs() < 0.005,
         "uniform variance {variance}"
     );
+}
+
+/// Draw `n` samples from one sampler and copy them back to the host.
+///
+/// ## Parameters
+/// - `kernels`: Loaded kernels.
+/// - `stream`: Stream to launch on.
+/// - `kind`, `a`, `b`: Sampler selector and parameters.
+/// - `n`: Number of samples.
+///
+/// ## Returns
+/// The host samples.
+fn draw(
+    kernels: &Kernels,
+    stream: &Arc<CudaStream>,
+    kind: u32,
+    a: f32,
+    b: f32,
+    n: usize,
+) -> Vec<f32> {
+    let mut out = stream.alloc_zeros::<f32>(n).expect("alloc");
+    kernels
+        .sample_into(stream, &mut out, kind, a, b, 0x1234_5678, 0x9ABC_DEF0, 3)
+        .expect("sample");
+    stream.clone_dtoh(&out).expect("download")
+}
+
+#[test]
+fn samplers_match_theoretical_moments() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let n = 1_000_000usize;
+    let cases: [(&str, u32, f32, f32, f64, f64); 6] = [
+        ("binomial n=10 p=0.5", 1, 10.0, 0.5, 5.0, 2.5),
+        ("binomial n=100 p=0.3", 1, 100.0, 0.3, 30.0, 21.0),
+        ("binomial n=10000 p=0.3", 1, 10_000.0, 0.3, 3000.0, 2100.0),
+        ("poisson lambda=20", 2, 20.0, 0.0, 20.0, 20.0),
+        ("poisson lambda=200", 2, 200.0, 0.0, 200.0, 200.0),
+        ("gamma shape=2 scale=3", 3, 2.0, 3.0, 6.0, 18.0),
+    ];
+    for (label, kind, a, b, mean, variance) in cases {
+        let values = draw(&kernels, &stream, kind, a, b, n);
+        let got_mean = values.iter().map(|x| *x as f64).sum::<f64>() / n as f64;
+        let got_var = values
+            .iter()
+            .map(|x| {
+                let d = *x as f64 - got_mean;
+                d * d
+            })
+            .sum::<f64>()
+            / n as f64;
+        let mean_tol = 4.0 * (variance / n as f64).sqrt();
+        assert!(
+            (got_mean - mean).abs() <= mean_tol,
+            "{label}: mean {got_mean} vs {mean}"
+        );
+        let var_tol = 6.0 * variance * (2.0 / n as f64).sqrt();
+        assert!(
+            (got_var - variance).abs() <= var_tol,
+            "{label}: var {got_var} vs {variance}"
+        );
+    }
+
+    let normal = draw(&kernels, &stream, 4, 0.0, 0.0, n);
+    let mean = normal.iter().map(|x| *x as f64).sum::<f64>() / n as f64;
+    let variance = normal
+        .iter()
+        .map(|x| {
+            let d = *x as f64 - mean;
+            d * d
+        })
+        .sum::<f64>()
+        / n as f64;
+    assert!(mean.abs() < 0.03, "normal mean {mean}");
+    assert!((variance - 1.0).abs() < 0.05, "normal variance {variance}");
+}
+
+#[test]
+fn samplers_reproduce_for_the_same_key() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let first = draw(&kernels, &stream, 1, 100.0, 0.3, 4096);
+    let second = draw(&kernels, &stream, 1, 100.0, 0.3, 4096);
+    assert_eq!(
+        first.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        second.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn multinomial_conserves_totals_and_proportions() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let rows = 50_000usize;
+    let k = 4usize;
+    let total = 100.0f32;
+    let weights = [0.1f32, 0.2, 0.3, 0.4];
+    let probs_host: Vec<f32> = (0..rows * k).map(|i| weights[i % k]).collect();
+    let totals_host = vec![total; rows];
+    let probs = stream.clone_htod(&probs_host).expect("upload");
+    let totals = stream.clone_htod(&totals_host).expect("upload");
+    let mut counts = stream.alloc_zeros::<f32>(rows * k).expect("alloc");
+    kernels
+        .multinomial_seq(&stream, &probs, &totals, &mut counts, rows, k, 11, 22, 33)
+        .expect("multinomial");
+    let host = stream.clone_dtoh(&counts).expect("download");
+    for row in 0..rows {
+        let sum: f32 = (0..k).map(|j| host[row * k + j]).sum();
+        assert!(
+            (sum - total).abs() < 1e-3,
+            "row {row} total {sum} vs {total}"
+        );
+    }
+    for (j, &p) in weights.iter().enumerate() {
+        let got = (0..rows).map(|r| host[r * k + j] as f64).sum::<f64>() / rows as f64;
+        let want = total as f64 * p as f64;
+        let tolerance = 4.0 * (total as f64 * p as f64 * (1.0 - p as f64) / rows as f64).sqrt();
+        assert!(
+            (got - want).abs() <= tolerance.max(0.2),
+            "category {j}: mean {got} vs {want}"
+        );
+    }
 }

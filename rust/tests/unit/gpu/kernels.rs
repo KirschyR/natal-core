@@ -394,3 +394,98 @@ fn multinomial_conserves_totals_and_proportions() {
         );
     }
 }
+
+#[test]
+fn stochastic_launchers_short_circuit_or_reject() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let kernels = Kernels::load(&context.context()).expect("kernels load");
+    let stream = context.stream();
+    let zero_f = stream.alloc_zeros::<f32>(0).expect("alloc");
+    let zero_i = stream.alloc_zeros::<i32>(0).expect("alloc");
+    let mut scratch_ind = stream.alloc_zeros::<f32>(0).expect("alloc");
+    let mut scratch_sperm = stream.alloc_zeros::<f32>(0).expect("alloc");
+
+    assert!(kernels
+        .recruit_stochastic(&stream, &mut scratch_ind, &zero_f, 0, 4, 2, 1, 2, 3)
+        .is_ok());
+    assert!(kernels
+        .survival_stochastic(
+            &stream,
+            &mut scratch_ind,
+            &mut scratch_sperm,
+            &zero_f,
+            &zero_f,
+            0,
+            4,
+            2,
+            1,
+            1,
+            2,
+            3,
+        )
+        .is_ok());
+    assert!(kernels
+        .sample_into(&stream, &mut scratch_ind, 0, 0.0, 0.0, 1, 2, 3)
+        .is_ok());
+    assert!(kernels
+        .fill_uniform(&stream, &mut scratch_ind, 1, 2, 3)
+        .is_ok());
+    assert!(kernels
+        .multinomial_seq(&stream, &zero_f, &zero_f, &mut scratch_ind, 0, 4, 1, 2, 3)
+        .is_err());
+
+    let buffers = super::ReproductionBuffers {
+        mating_rates: &zero_f,
+        sperm_displacement_rate: &zero_f,
+        reproduction_rates: &zero_f,
+        fertility: &zero_f,
+        eggs_per_female: &zero_f,
+        sex_ratio: &zero_f,
+        female_only: &zero_i,
+        male_only: &zero_i,
+        fecundity: &zero_f,
+        sexual_selection: &zero_f,
+        offspring: &zero_f,
+        zygote_viability: &zero_f,
+        female_compat: &zero_f,
+        male_compat: &zero_f,
+    };
+    assert!(kernels
+        .reproduction_stochastic(
+            &stream,
+            &mut scratch_ind,
+            &mut scratch_sperm,
+            &buffers,
+            0,
+            4,
+            2,
+            1,
+            false,
+            false,
+            1,
+            2,
+            3,
+        )
+        .is_ok());
+    assert!(kernels
+        .reproduction_stochastic(
+            &stream,
+            &mut scratch_ind,
+            &mut scratch_sperm,
+            &buffers,
+            1,
+            4,
+            33,
+            1,
+            false,
+            false,
+            1,
+            2,
+            3,
+        )
+        .is_err());
+}

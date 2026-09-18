@@ -209,9 +209,12 @@ fn session_enable_gpu_rejects_ineligible_models() {
         let (ind, sperm) = initial_state();
 
         let (mut blueprint, params, genetics) = fixture();
-        blueprint.stochastic = true;
-        let mut stochastic = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
-        assert!(stochastic.enable_gpu().is_err(), "stochastic must reject");
+        blueprint.continuous_sampling = true;
+        let mut continuous = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+        assert!(
+            continuous.enable_gpu().is_err(),
+            "continuous sampling must reject"
+        );
 
         let (mut blueprint, params, genetics) = fixture();
         blueprint.n_demes = 2;

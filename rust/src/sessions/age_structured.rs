@@ -82,9 +82,12 @@ pub struct AgeStructuredSession {
     state_tick: i64,
     execution: crate::sessions::status::ExecutionStatus,
     phase: usize,
-    /// Optional CUDA device executor for hook-free deterministic models. Off
-    /// unless Python explicitly calls ``enable_gpu``; the CPU path stays the
-    /// authority whenever it is `None`.
+    /// Session seed retained as the device sampler's Philox key.
+    #[cfg(feature = "gpu")]
+    seed: u64,
+    /// Optional CUDA device executor for hook-free models. Off unless Python
+    /// explicitly calls ``enable_gpu``; the CPU path stays the authority
+    /// whenever it is `None`.
     #[cfg(feature = "gpu")]
     gpu: Option<crate::gpu::executor::GpuExecutor>,
 }
@@ -238,9 +241,9 @@ impl AgeStructuredSession {
     /// error when the device is unavailable.
     #[cfg(feature = "gpu")]
     fn enable_gpu(&mut self) -> PyResult<()> {
-        if self.blueprint.stochastic {
+        if self.blueprint.continuous_sampling {
             return Err(PyValueError::new_err(
-                "GPU path requires a deterministic model (stochastic=false)",
+                "GPU path requires continuous_sampling=false",
             ));
         }
         if self.blueprint.n_demes != 1 || self.params.n_demes != 1 {
@@ -270,7 +273,7 @@ impl AgeStructuredSession {
         let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let ind_host: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
         let sperm_host: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
-        let executor = crate::gpu::executor::GpuExecutor::new(
+        let mut executor = crate::gpu::executor::GpuExecutor::new(
             context,
             1,
             self.blueprint.n_ages,
@@ -279,6 +282,7 @@ impl AgeStructuredSession {
             &sperm_host,
         )
         .map_err(map_lifecycle_error)?;
+        executor.set_seed(self.seed);
         self.gpu = Some(executor);
         Ok(())
     }
@@ -1192,6 +1196,8 @@ impl AgeStructuredSession {
             state_tick: 0,
             execution: crate::sessions::status::ExecutionStatus::Ready,
             phase: 0,
+            #[cfg(feature = "gpu")]
+            seed,
             #[cfg(feature = "gpu")]
             gpu: None,
         }

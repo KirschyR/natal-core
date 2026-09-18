@@ -15,8 +15,8 @@
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
 | 最近回执 | 第 4 轮：**APPROVED**（§17；P5 确定性迁移 + 空间多 deme） |
-| 主 agent 处理 | 已完成；无待办 |
-| 待 evaluator 动作 | —（若后续有实质改动，重跑受影响门禁并追加回执） |
+| 主 agent 处理 | P4（设备 RNG + 分布采样 + 随机生存/繁殖 + 随机统计 L3）已实现并自测；**待第 5 轮独立复核** |
+| 待 evaluator 动作 | 按 §18 复核，把第 5 轮结论写入 §19 |
 
 ## 0. 一句话目标
 
@@ -494,6 +494,58 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 18. 第 5 轮交接 — P4 随机采样（RNG + 分布 + 随机生存/繁殖 + 统计 L3）
+
+- 日期：2026-09-18
+- 范围（在 §17 已批准的 P0–P5 确定性能力之上）：随机模式设备路径。
+- 风险分类：**高风险**（counter-based RNG、随机分布、统计验收）。
+
+### 18.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `RNG_SOURCE`（Philox4x32-10 + `fill_uniform`）；`SAMPLING_SOURCE`（`RngState`、`rng_uniform/rng_normal`、`sample_binomial/poisson/gamma`、`natal_multinomial`、`multinomial_seq`、`recruit_stochastic`、`survival_stochastic`、`reproduction_stochastic`）及各启动器 |
+| `rust/src/gpu/executor.rs` | `GpuExecutor` 增加 `seed`/`tick` 与 `set_seed`、`rng_key`/`rng_site`；`survival_tick`/`reproduction_tick` 按 `blueprint.stochastic` 分支（随机走对应 kernel）；`tick()` 递增 tick |
+| `rust/src/sessions/age_structured.rs` | 新增 `seed` 字段并传入 `set_seed`；`enable_gpu` 现接受 `stochastic=true`，仅拒绝 `continuous_sampling=true` |
+| `src/natal/backends/rust/rust_backend.py` | 既有 `enable_gpu` 透传不变 |
+| 测试 | `tests/unit/gpu/kernels.rs`（Philox 逐位 + 矩检验 + 多项 + 启动器守卫）、`executor.rs`（随机 survival/reproduction 统计 L1）、`session.rs`（拒绝分支改为 continuous） |
+
+### 18.2 设计要点（请重点核对）
+
+1. **counter-based RNG**：每线程 `RngState`，`counter = (cell << 32) | draw`，`site` 含 tick 与阶段常量；每 cell 独立计数器窗口，避免流重叠。`rng_normal` 用 Box-Muller。
+2. **采样器取舍**：binomial 在 `mean≤512` 用**精确几何跳跃**、否则正态近似（`p>0.5` 反射）；Poisson `λ<64` Knuth 精确、否则正态；gamma Marsaglia-Tsang；multinomial 用**序列条件二项 + 序列轴外提**。
+3. **随机阶段**：完全复刻 CPU `sample_survival_with_sperm`、`recruit_juveniles`（离散）、`sample_mating`/`fertilize`（离散）的分支与 `EPS=1e-10` 阈值；确定性路径未改。
+4. **本阶段未做（显式）**：`continuous_sampling=true` 被拒绝；**空间随机迁移未实现**（`SpatialSession::enable_gpu` 仍拒绝 `stochastic=true`）——随机能力目前限 panmictic、离散抽样。空间随机迁移留待后续阶段。
+
+### 18.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **139 passed, 0 failed** |
+| `cargo test` | 67 passed |
+| `clippy -D warnings` / `fmt` / `check_rust` / `phase0` | 通过 / 通过 / EXIT=0 / bit-identical |
+| `ruff` / `pyright` / `pytest` | 通过 / 0 errors / 3606 passed |
+| `fill_uniform_matches_host_philox_and_reproduces` | 设备 Philox 与主机逐位一致 + 同种子复现 |
+| `samplers_match_theoretical_moments` | 10⁶ 样本，binomial（含 p=0.8 反射）/poisson/gamma/normal 均值方差在 4–6σ |
+| `device_stochastic_{survival,reproduction}_matches_host_distribution` | 4000 同参 batch 的设备逐格点均值 vs 4000 次 CPU 试验（5σ+0.5） |
+| 随机 L3（Python，panmictic，K=150×8 tick） | CPU/GPU 最终 ind 逐格点均值在最差 0.41×容差内 |
+| 确定性 L3（panmictic + 空间 5×5） | 逐位/紧容差不变，`phase0` bit-identical |
+
+覆盖率（**严格**只统计 `rust/src/gpu/` 源文件；注意 `--sources src/gpu` 会把 `src/gpu/../../tests/...` 一并匹配，需按绝对路径过滤）：executor ~95.9%、probe ~96.1%、其余 100%，聚合 **~98%**。
+
+### 18.4 请 evaluator 独立核对
+
+- **RNG**：自行检查流不重叠（不同 cell/tick/site 无重合），并对 uniform 做工整性检验（KS/卡方，而非仅均值方差）。
+- **分布采样器**：独立设计参数网格，对 binomial/poisson/gamma 做分布检验与假设前提（近似分支的适用区间、反射、`mean` 阈值边界）；给出是否接受“精确/近似混合”的依据。
+- **随机阶段**：自行设计参数与拓扑（含空行、零总量、`fixed_egg_count` 真/假、sex-chromosome、多年龄段），与 CPU 多次试验做统计对照；用你自己发现的输入证伪。
+- **确定性路径**：确认随机改动未影响确定性结果（逐位/紧容差不变）。
+- **enable_gpu 语义**：`stochastic=true, continuous=false` 接受；`continuous=true` 显式拒绝；空间随机显式拒绝（不得静默 CPU）。
+- **覆盖率**：按严格路径过滤复核（聚合与逐文件）。
+
+结论请追加为 **§19**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -786,3 +838,8 @@ P5「确定性 CSR 迁移 + 空间多 deme 会话接线」在正确性（与 CPU
 
 P5 确定性迁移与空间多 deme 旁路满足正确性与质量要求。**APPROVED**（范围为当前 HEAD
 `ec1cf99` 与被审测试集；不声称任何历史基线失败消失）。
+
+## 19. 第 5 轮结论（待 evaluator 填写）
+
+（请在此追加：裁定 APPROVED / NOT APPROVED、独立复现的 RNG/分布/随机阶段统计证据、覆盖率严格过滤结果、
+残余风险与未覆盖项。只追加，不改写历史轮次。）

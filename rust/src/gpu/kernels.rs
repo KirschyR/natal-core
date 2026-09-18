@@ -968,6 +968,163 @@ extern "C" __global__ void multinomial_seq(
     }
     out[K - 1] = remaining;
 }
+
+#define NATAL_MAX_Z 32
+
+__device__ __forceinline__ float natal_clamp01(float x) {
+    if (x <= 0.0f) {
+        return 0.0f;
+    }
+    if (x >= 1.0f) {
+        return 1.0f;
+    }
+    return x;
+}
+
+// Stochastic recruit: resample the age-0 categories into `desired` draws with
+// the discrete multinomial, matching `recruit_juveniles` (stochastic,
+// continuous_sampling=false). One thread per batch element.
+extern "C" __global__ void recruit_stochastic(
+    float* ind,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    const float* scaling,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    float combined[2 * NATAL_MAX_Z];
+    float female_sum = 0.0f;
+    float male_sum = 0.0f;
+    int cursor = 0;
+    for (int sex = 0; sex < 2; ++sex) {
+        for (int z = 0; z < Z; ++z) {
+            float value = rintf(ind[((sex * A + 0) * Z + z) * n_batch + b]);
+            combined[cursor++] = value;
+            if (sex == 0) {
+                female_sum += value;
+            } else {
+                male_sum += value;
+            }
+        }
+    }
+    float total = female_sum + male_sum;
+    float total_counts = 0.0f;
+    for (int i = 0; i < 2 * Z; ++i) {
+        total_counts += combined[i];
+    }
+    float desired = total > 0.0f ? rintf(total * scaling[b]) : 0.0f;
+    if (total <= 0.0f || desired <= 0.0f) {
+        for (int sex = 0; sex < 2; ++sex) {
+            for (int z = 0; z < Z; ++z) {
+                ind[((sex * A + 0) * Z + z) * n_batch + b] = 0.0f;
+            }
+        }
+        return;
+    }
+    RngState state;
+    rng_init(&state, (unsigned long long)b, key0, key1, site);
+    float remaining = desired;
+    float tail = total_counts;
+    float draws[2 * NATAL_MAX_Z];
+    for (int k = 0; k < 2 * Z - 1; ++k) {
+        float draw = 0.0f;
+        if (remaining > 0.0f && tail > 0.0f) {
+            float conditional = natal_clamp01(combined[k] / tail);
+            draw = sample_binomial(&state, remaining, conditional);
+            if (draw > remaining) {
+                draw = remaining;
+            }
+        }
+        draws[k] = draw;
+        remaining -= draw;
+        tail -= combined[k];
+        if (remaining < 0.0f) {
+            remaining = 0.0f;
+        }
+        if (tail < 0.0f) {
+            tail = 0.0f;
+        }
+    }
+    draws[2 * Z - 1] = remaining;
+    cursor = 0;
+    for (int sex = 0; sex < 2; ++sex) {
+        for (int z = 0; z < Z; ++z) {
+            ind[((sex * A + 0) * Z + z) * n_batch + b] = draws[cursor++];
+        }
+    }
+}
+
+// Stochastic survival: `sample_survival_with_sperm` (continuous_sampling=false).
+// One thread per (batch, age, zygote-type) owns its female cell, sperm column,
+// and male cell, so there are no cross-thread races.
+extern "C" __global__ void survival_stochastic(
+    float* ind,
+    float* sperm,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    int new_adult_age,
+    const float* survival_rates,
+    const float* viability,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    int cells = n_batch * n_ages * n_ztypes;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= cells) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int g = i % Z;
+    int t = i / Z;
+    int age = t % A;
+    int b = t / A;
+    int target = new_adult_age - 1;
+    float age_f = survival_rates[b * 2 * A + age];
+    float age_m = survival_rates[b * 2 * A + A + age];
+    float viab_f = (age == target) ? viability[(b * 2 * A + age) * Z + g] : 1.0f;
+    float viab_m = (age == target) ? viability[(b * 2 * A + A + age) * Z + g] : 1.0f;
+    float p_f = natal_clamp01(age_f * viab_f);
+    float p_m = natal_clamp01(age_m * viab_m);
+
+    RngState state;
+    rng_init(&state, (unsigned long long)i, key0, key1, site);
+
+    float n_f_raw = ind[((0 * A + age) * Z + g) * n_batch + b];
+    float total_sperm = 0.0f;
+    for (int mz = 0; mz < Z; ++mz) {
+        total_sperm += sperm[((age * Z + g) * Z + mz) * n_batch + b];
+    }
+    float virgins = n_f_raw - total_sperm;
+    if (virgins < 0.0f) {
+        virgins = 0.0f;
+    }
+    float n_virgins = rintf(virgins);
+    float new_sperm_sum = 0.0f;
+    for (int mz = 0; mz < Z; ++mz) {
+        int index = ((age * Z + g) * Z + mz) * n_batch + b;
+        float count = rintf(sperm[index]);
+        float survived = (count > 1e-10f) ? sample_binomial(&state, count, p_f) : 0.0f;
+        sperm[index] = survived;
+        new_sperm_sum += survived;
+    }
+    float survived_virgins = (n_virgins > 1e-10f) ? sample_binomial(&state, n_virgins, p_f) : 0.0f;
+    ind[((0 * A + age) * Z + g) * n_batch + b] = new_sperm_sum + survived_virgins;
+
+    float n_m = rintf(ind[((1 * A + age) * Z + g) * n_batch + b]);
+    float survived_m = (n_m > 1e-10f) ? sample_binomial(&state, n_m, p_m) : 0.0f;
+    ind[((1 * A + age) * Z + g) * n_batch + b] = survived_m;
+}
 "#;
 
 /// Device arguments for [`Kernels::density_scaling`].
@@ -1067,6 +1224,10 @@ pub struct Kernels {
     sample_into: CudaFunction,
     /// `multinomial_seq(...)`.
     multinomial_seq: CudaFunction,
+    /// `recruit_stochastic(...)`.
+    recruit_stochastic: CudaFunction,
+    /// `survival_stochastic(...)`.
+    survival_stochastic: CudaFunction,
 }
 
 impl Kernels {
@@ -1133,6 +1294,12 @@ impl Kernels {
         let multinomial_seq = module
             .load_function("multinomial_seq")
             .map_err(|err| format!("loading kernel `multinomial_seq` failed: {err}"))?;
+        let recruit_stochastic = module
+            .load_function("recruit_stochastic")
+            .map_err(|err| format!("loading kernel `recruit_stochastic` failed: {err}"))?;
+        let survival_stochastic = module
+            .load_function("survival_stochastic")
+            .map_err(|err| format!("loading kernel `survival_stochastic` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -1146,6 +1313,8 @@ impl Kernels {
             fill_uniform,
             sample_into,
             multinomial_seq,
+            recruit_stochastic,
+            survival_stochastic,
         })
     }
 
@@ -1716,6 +1885,90 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("multinomial_seq launch failed: {err}"))
+    }
+
+    /// Resample the age-0 categories with the discrete multinomial.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn recruit_stochastic(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        scaling: &CudaSlice<f32>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let config = LaunchConfig::for_num_elems(n_batch as u32);
+        let mut launch = stream.launch_builder(&self.recruit_stochastic);
+        launch.arg(&mut *ind);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(scaling);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("recruit_stochastic launch failed: {err}"))
+    }
+
+    /// Sample stochastic survival on individuals and stored sperm in place.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn survival_stochastic(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        sperm: &mut CudaSlice<f32>,
+        survival_rates: &CudaSlice<f32>,
+        viability: &CudaSlice<f32>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        new_adult_age: usize,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        let cells = n_batch * n_ages * n_ztypes;
+        if cells == 0 {
+            return Ok(());
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let new_adult_i = new_adult_age as i32;
+        let config = LaunchConfig::for_num_elems(cells as u32);
+        let mut launch = stream.launch_builder(&self.survival_stochastic);
+        launch.arg(&mut *ind);
+        launch.arg(&mut *sperm);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&new_adult_i);
+        launch.arg(survival_rates);
+        launch.arg(viability);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("survival_stochastic launch failed: {err}"))
     }
 }
 

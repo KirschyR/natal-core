@@ -1546,3 +1546,150 @@ fn evaluator_migration_empty_csr_and_overmigration_match_host() {
         );
     }
 }
+
+#[test]
+fn device_stochastic_survival_matches_host_distribution() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 4000usize;
+    let n_ages = 4usize;
+    let z = 2usize;
+
+    let mut blueprint = dimension_blueprint(n_ages, z);
+    blueprint.stochastic = true;
+    blueprint.n_demes = n_batch;
+    blueprint.migration_indptr = vec![0; n_batch + 1];
+
+    let tile = |values: &[f64]| -> Vec<f64> {
+        (0..n_batch).flat_map(|_| values.iter().copied()).collect()
+    };
+    let survival = tile(&[0.9, 0.8, 0.7, 0.6, 0.85, 0.75, 0.65, 0.55]);
+    let ecology = EcologyParams {
+        n_demes: n_batch,
+        carrying_capacity: vec![1.0e9; n_batch],
+        eggs_per_female: vec![1.0; n_batch],
+        sex_ratio: vec![0.5; n_batch],
+        sperm_displacement_rate: vec![0.1; n_batch],
+        low_density_growth_rate: vec![1.0; n_batch],
+        growth_mode: vec![0; n_batch],
+        external_expected_eggs: vec![-1.0; n_batch],
+        survival_rates: survival.clone(),
+        mating_rates: tile(&[0.0; 8]),
+        reproduction_rates: tile(&[0.0; 4]),
+        fertility: tile(&[0.0; 4]),
+        competition_weights: tile(&[1.0; 4]),
+        equilibrium_distribution: vec![],
+        equilibrium_declared: vec![false; n_batch],
+        migration_rate: vec![],
+        custom_slots: vec![HashMap::new(); n_batch],
+    };
+    let mut one_ecology = ecology.clone();
+    one_ecology.n_demes = 1;
+    one_ecology.carrying_capacity.truncate(1);
+    for column in [
+        &mut one_ecology.eggs_per_female,
+        &mut one_ecology.sex_ratio,
+        &mut one_ecology.sperm_displacement_rate,
+        &mut one_ecology.low_density_growth_rate,
+        &mut one_ecology.external_expected_eggs,
+    ] {
+        column.truncate(1);
+    }
+    one_ecology.growth_mode.truncate(1);
+    one_ecology.equilibrium_declared.truncate(1);
+    one_ecology.survival_rates.truncate(8);
+    one_ecology.mating_rates.truncate(8);
+    one_ecology.reproduction_rates.truncate(4);
+    one_ecology.fertility.truncate(4);
+    one_ecology.competition_weights.truncate(4);
+    one_ecology.custom_slots.truncate(1);
+
+    let mut genetics = reproduction_genetics(n_ages, z);
+    for sex in 0..2 {
+        for zz in 0..z {
+            genetics.viability_fitness[(sex * n_ages) * z + zz] = 0.5 + 0.2 * (sex + zz) as f64;
+        }
+    }
+    let variants = vec![genetics.clone()];
+
+    let ind_stride = 2 * n_ages * z;
+    let sperm_stride = n_ages * z * z;
+    let one_ind: Vec<f64> = vec![100.0; ind_stride];
+    let one_sperm: Vec<f64> = (0..sperm_stride).map(|i| (i % 3) as f64).collect();
+    let ind_host: Vec<f32> = (0..n_batch)
+        .flat_map(|_| one_ind.iter().copied())
+        .map(|v| v as f32)
+        .collect();
+    let sperm_host: Vec<f32> = (0..n_batch)
+        .flat_map(|_| one_sperm.iter().copied())
+        .map(|v| v as f32)
+        .collect();
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, n_batch, n_ages, z, &ind_host, &sperm_host).expect("executor");
+    executor.set_seed(0x0123_4567_89AB_CDEF);
+    executor
+        .survival_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect("device stochastic survival");
+    let device_ind = executor.download_ind().expect("download");
+    let device_sperm = executor.download_sperm().expect("download");
+
+    // Host distribution: one independent CPU trial per batch element.
+    let mut cpu_sum_ind = vec![0.0f64; ind_stride];
+    let mut cpu_sq_ind = vec![0.0f64; ind_stride];
+    let mut cpu_sum_sperm = vec![0.0f64; sperm_stride];
+    let mut cpu_sq_sperm = vec![0.0f64; sperm_stride];
+    for trial in 0..n_batch {
+        let mut rng = new_rng(10_000 + trial as u64);
+        let mut ind = one_ind.clone();
+        let mut sperm = one_sperm.clone();
+        crate::kernels::age_structured::survival(
+            &mut rng,
+            &blueprint,
+            &one_ecology,
+            &genetics,
+            0,
+            &mut ind,
+            &mut sperm,
+        )
+        .expect("host survival");
+        for (slot, value) in ind.iter().enumerate() {
+            cpu_sum_ind[slot] += value;
+            cpu_sq_ind[slot] += value * value;
+        }
+        for (slot, value) in sperm.iter().enumerate() {
+            cpu_sum_sperm[slot] += value;
+            cpu_sq_sperm[slot] += value * value;
+        }
+    }
+    let trials = n_batch as f64;
+    for slot in 0..ind_stride {
+        let cpu_mean = cpu_sum_ind[slot] / trials;
+        let cpu_var = (cpu_sq_ind[slot] / trials - cpu_mean * cpu_mean).max(0.0);
+        let device_mean = (0..n_batch)
+            .map(|b| device_ind[b * ind_stride + slot] as f64)
+            .sum::<f64>()
+            / trials;
+        let tolerance = 5.0 * (cpu_var / trials).sqrt() + 0.5;
+        assert!(
+            (device_mean - cpu_mean).abs() <= tolerance,
+            "ind[{slot}]: device mean {device_mean} vs host {cpu_mean} (tol {tolerance})"
+        );
+    }
+    for slot in 0..sperm_stride {
+        let cpu_mean = cpu_sum_sperm[slot] / trials;
+        let cpu_var = (cpu_sq_sperm[slot] / trials - cpu_mean * cpu_mean).max(0.0);
+        let device_mean = (0..n_batch)
+            .map(|b| device_sperm[b * sperm_stride + slot] as f64)
+            .sum::<f64>()
+            / trials;
+        let tolerance = 5.0 * (cpu_var / trials).sqrt() + 0.5;
+        assert!(
+            (device_mean - cpu_mean).abs() <= tolerance,
+            "sperm[{slot}]: device mean {device_mean} vs host {cpu_mean} (tol {tolerance})"
+        );
+    }
+}

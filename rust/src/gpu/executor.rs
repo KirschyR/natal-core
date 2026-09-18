@@ -52,6 +52,10 @@ pub struct GpuExecutor {
     sperm: DeviceBuffer<f32>,
     /// Aging scratch, swapped into `sperm` after each aging launch.
     sperm_scratch: DeviceBuffer<f32>,
+    /// Sampling seed for the counter-based device RNG.
+    seed: u64,
+    /// Number of device ticks completed, used to vary draw sites per tick.
+    tick: u64,
 }
 
 impl GpuExecutor {
@@ -117,7 +121,36 @@ impl GpuExecutor {
             ind_scratch,
             sperm,
             sperm_scratch,
+            seed: 0,
+            tick: 0,
         })
+    }
+
+    /// Set the sampling seed for the counter-based device RNG.
+    ///
+    /// ## Parameters
+    /// - `seed`: Session seed; the two Philox key words are its halves.
+    pub fn set_seed(&mut self, seed: u64) {
+        self.seed = seed;
+    }
+
+    /// The two Philox key words derived from the executor seed.
+    ///
+    /// ## Returns
+    /// `(low, high)` 32-bit words.
+    fn rng_key(&self) -> (u32, u32) {
+        (self.seed as u32, (self.seed >> 32) as u32)
+    }
+
+    /// Draw-site counter for a given stage within the current tick.
+    ///
+    /// ## Parameters
+    /// - `stage`: Small per-stage index that must be stable across ticks.
+    ///
+    /// ## Returns
+    /// A 32-bit site that changes every tick.
+    fn rng_site(&self, stage: u32) -> u32 {
+        (self.tick as u32).wrapping_mul(16).wrapping_add(stage)
     }
 
     /// Bytes needed for one individual + sperm state copy, without scratch.
@@ -381,6 +414,40 @@ impl GpuExecutor {
         let scaling = DeviceBuffer::from_host(&stream, &scaling_host)?;
         let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
         let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
+        if blueprint.stochastic {
+            if blueprint.continuous_sampling {
+                return Err("GPU stochastic survival requires continuous_sampling=false".to_owned());
+            }
+            let (key0, key1) = self.rng_key();
+            let recruit_site = self.rng_site(0);
+            let survival_site = self.rng_site(1);
+            self.kernels.recruit_stochastic(
+                &stream,
+                self.ind.slice_mut(),
+                scaling.slice(),
+                n_batch,
+                n_ages,
+                n_ztypes,
+                key0,
+                key1,
+                recruit_site,
+            )?;
+            self.kernels.survival_stochastic(
+                &stream,
+                self.ind.slice_mut(),
+                self.sperm.slice_mut(),
+                survival_rates.slice(),
+                viability_buf.slice(),
+                n_batch,
+                n_ages,
+                n_ztypes,
+                blueprint.new_adult_age,
+                key0,
+                key1,
+                survival_site,
+            )?;
+            return Ok(());
+        }
         let mut factor = DeviceBuffer::from_host(&stream, &vec![0.0f32; n_batch])?;
         self.kernels.recruit_factor(
             &stream,
@@ -617,7 +684,9 @@ impl GpuExecutor {
     ) -> Result<(), String> {
         self.reproduction_tick(blueprint, ecology, variants, deme_variants)?;
         self.survival_tick(blueprint, ecology, variants, deme_variants)?;
-        self.age_tick()
+        self.age_tick()?;
+        self.tick = self.tick.wrapping_add(1);
+        Ok(())
     }
 
     /// Run one deterministic CSR migration step across the batch (demes).

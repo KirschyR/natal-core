@@ -292,9 +292,10 @@ fn samplers_match_theoretical_moments() {
     let kernels = Kernels::load(&context.context()).expect("kernels load");
     let stream = context.stream();
     let n = 1_000_000usize;
-    let cases: [(&str, u32, f32, f32, f64, f64); 6] = [
+    let cases: [(&str, u32, f32, f32, f64, f64); 7] = [
         ("binomial n=10 p=0.5", 1, 10.0, 0.5, 5.0, 2.5),
         ("binomial n=100 p=0.3", 1, 100.0, 0.3, 30.0, 21.0),
+        ("binomial n=100 p=0.8", 1, 100.0, 0.8, 80.0, 16.0),
         ("binomial n=10000 p=0.3", 1, 10_000.0, 0.3, 3000.0, 2100.0),
         ("poisson lambda=20", 2, 20.0, 0.0, 20.0, 20.0),
         ("poisson lambda=200", 2, 200.0, 0.0, 200.0, 200.0),

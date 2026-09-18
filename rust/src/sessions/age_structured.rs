@@ -82,6 +82,11 @@ pub struct AgeStructuredSession {
     state_tick: i64,
     execution: crate::sessions::status::ExecutionStatus,
     phase: usize,
+    /// Optional CUDA device executor for hook-free deterministic models. Off
+    /// unless Python explicitly calls ``enable_gpu``; the CPU path stays the
+    /// authority whenever it is `None`.
+    #[cfg(feature = "gpu")]
+    gpu: Option<crate::gpu::executor::GpuExecutor>,
 }
 
 #[pymethods]
@@ -225,7 +230,74 @@ impl AgeStructuredSession {
             state_tick: 0,
             execution: crate::sessions::status::ExecutionStatus::Ready,
             phase: 0,
+            #[cfg(feature = "gpu")]
+            gpu: None,
         })
+    }
+
+    /// Enable the optional CUDA bypass for this session.
+    ///
+    /// The device path currently covers hook-free, deterministic, panmictic
+    /// age-structured models. The current state is uploaded once; subsequent
+    /// ``run`` calls execute the whole tick on the device and copy the final
+    /// state back. Refuses explicitly (never silently falls back to CPU).
+    ///
+    /// ## Errors
+    /// Returns ``PyValueError`` when the model is ineligible, or a runtime
+    /// error when the device is unavailable.
+    #[cfg(feature = "gpu")]
+    fn enable_gpu(&mut self) -> PyResult<()> {
+        if self.blueprint.stochastic {
+            return Err(PyValueError::new_err(
+                "GPU path requires a deterministic model (stochastic=false)",
+            ));
+        }
+        if self.blueprint.n_demes != 1 || self.params.n_demes != 1 {
+            return Err(PyValueError::new_err(
+                "GPU path currently supports panmictic models only",
+            ));
+        }
+        if self.hooks.n_hooks != 0
+            || self
+                .hooks
+                .python_callbacks
+                .iter()
+                .any(|callbacks| !callbacks.is_empty())
+        {
+            return Err(PyValueError::new_err("GPU path requires a hook-free model"));
+        }
+        if self.params.growth_mode.iter().any(|mode| *mode >= 5) {
+            return Err(PyValueError::new_err(
+                "GPU path does not support custom growth curves",
+            ));
+        }
+        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
+        let ind_host: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
+        let sperm_host: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
+        let executor = crate::gpu::executor::GpuExecutor::new(
+            context,
+            1,
+            self.blueprint.n_ages,
+            self.blueprint.n_ztypes,
+            &ind_host,
+            &sperm_host,
+        )
+        .map_err(map_lifecycle_error)?;
+        self.gpu = Some(executor);
+        Ok(())
+    }
+
+    /// Whether the CUDA bypass is active for this session.
+    ///
+    /// ## Returns
+    /// ``"enabled"`` or ``"disabled"``.
+    #[cfg(feature = "gpu")]
+    fn gpu_status(&self) -> String {
+        if self.gpu.is_some() {
+            "enabled".to_owned()
+        } else {
+            "disabled".to_owned()
+        }
     }
 
     /// Pull exactly the named contract fields from the Python params object.
@@ -1089,6 +1161,43 @@ impl HookProgram {
 }
 
 impl AgeStructuredSession {
+    /// Execute `n_ticks` deterministic ticks on the device, then copy the
+    /// final state back into the f64 session state.
+    ///
+    /// ## Parameters
+    /// - `gpu`: The uploaded device executor.
+    /// - `blueprint`, `params`, `genetics`: The session's live contracts.
+    /// - `state_ind`, `state_sperm`, `state_tick`: Session state, updated in place.
+    /// - `n_ticks`: Number of ticks to run.
+    ///
+    /// ## Returns
+    /// `Ok(())` once the state has been copied back.
+    ///
+    /// ## Errors
+    /// Returns the first device-stage error.
+    #[cfg(feature = "gpu")]
+    #[allow(clippy::too_many_arguments)] // Mirrors the session state fields it updates.
+    fn run_gpu(
+        gpu: &mut crate::gpu::executor::GpuExecutor,
+        blueprint: &Blueprint,
+        params: &EcologyParams,
+        genetics: &GeneticsTensors,
+        state_ind: &mut Vec<f64>,
+        state_sperm: &mut Vec<f64>,
+        state_tick: &mut i64,
+        n_ticks: i64,
+    ) -> Result<(), String> {
+        let variants = [genetics.clone()];
+        let deme_variants = [0usize];
+        for _ in 0..n_ticks.max(0) {
+            gpu.tick(blueprint, params, &variants, &deme_variants)?;
+            *state_tick += 1;
+        }
+        *state_ind = gpu.download_ind()?.into_iter().map(f64::from).collect();
+        *state_sperm = gpu.download_sperm()?.into_iter().map(f64::from).collect();
+        Ok(())
+    }
+
     fn run_inner<'py>(
         &mut self,
         py: Python<'py>,
@@ -1097,6 +1206,25 @@ impl AgeStructuredSession {
         observation_mask: Option<PyReadonlyArray4<'py, f64>>,
         checkpoint_every: i64,
     ) -> PyResult<(i64, Bound<'py, PyArray2<f64>>, bool)> {
+        // Device branch: run the whole batch loop on the GPU and copy the final
+        // state back. This is an early return; the CPU path below is unchanged.
+        #[cfg(feature = "gpu")]
+        if let Some(mut gpu) = self.gpu.take() {
+            let outcome = Self::run_gpu(
+                &mut gpu,
+                &self.blueprint,
+                &self.params,
+                &self.genetics,
+                &mut self.state_ind,
+                &mut self.state_sperm,
+                &mut self.state_tick,
+                n_ticks,
+            );
+            self.gpu = Some(gpu);
+            outcome.map_err(map_lifecycle_error)?;
+            let empty = PyArray2::zeros(py, [0, 0], false);
+            return Ok((self.state_tick, empty, false));
+        }
         // Run the Rust batch loop directly on the session-owned state and
         // copy the flattened history into a NumPy 2-D array.  The lifecycle
         // kernels read the owned contracts at every stage boundary; Python

@@ -237,6 +237,37 @@ class RustLifecycleBackend:
             bool(config.fixed_egg_count), int(config.extreme_speed_mode),
         )
 
+    def enable_gpu(self) -> None:
+        """Enable the optional CUDA device path for this session.
+
+        The extension must be built with the ``gpu`` cargo feature and the
+        model must be hook-free, deterministic, and panmictic. Raises when the
+        device path is unavailable or the model is ineligible; it never
+        silently falls back to the CPU.
+
+        Raises:
+            RuntimeError: The installed extension has no GPU support.
+        """
+        enable = getattr(self._session, "enable_gpu", None)
+        if enable is None:
+            raise RuntimeError(
+                "this _engine_rs build has no GPU support; rebuild with "
+                "`maturin develop --features gpu`"
+            )
+        enable()
+
+    def gpu_status(self) -> str:
+        """Return the device-path status for this session.
+
+        Returns:
+            ``"enabled"``, ``"disabled"``, or ``"unavailable"`` when the
+            extension was built without the ``gpu`` feature.
+        """
+        status = getattr(self._session, "gpu_status", None)
+        if status is None:
+            return "unavailable"
+        return str(status())
+
     def refresh_params(self, fields: list[str], params_obj: Params) -> None:
         """Pull exactly *fields* from the contract params into the session.
 

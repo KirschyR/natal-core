@@ -15,8 +15,8 @@
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
 | 最近回执 | 第 7 轮：**APPROVED**（§23；空间随机迁移） |
-| 主 agent 处理 | 已完成；无待办 |
-| 待 evaluator 动作 | —（若后续有实质改动，重跑受影响门禁并追加回执） |
+| 主 agent 处理 | P6（多 B ensemble）已实现并自测；**待第 9 轮独立复核** |
+| 待 evaluator 动作 | 按 §26 复核，把第 9 轮结论写入 §27 |
 
 ## 0. 一句话目标
 
@@ -661,6 +661,53 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 26. 第 9 轮交接 — P6 多 B ensemble
+
+- 日期：2026-09-18
+- 范围：把模型复制到设备 batch 轴做多 replicate，并与 `ProcessPoolExecutor` 对比。
+- 风险分类：**局部到高风险之间**（新增 API + 复用已审 RNG/采样路径；无数值新算法）。
+
+### 26.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | `GpuExecutor::ensemble(context, n_replicates, A, Z, ind_one, sperm_one, seed)`：单群体初始态平铺到 batch 轴；各 replicate 用不相交 counter-based 流 |
+| `rust/src/sessions/age_structured.rs` | `tile_ecology`；`enable_gpu_ensemble(n)` / `run_gpu_ensemble(n_ticks)`（返回堆叠 `(B,2,A,Z)`/`(B,A,Z,Z)`）；`EnsembleReadout` 别名 |
+| `src/natal/backends/rust/rust_backend.py` | `enable_gpu_ensemble()` / `run_gpu_ensemble()` 透传 |
+| 测试 | `device_ensemble_matches_independent_cpu_runs`（B=2000×3 tick vs 2000 次独立 CPU 全随机 tick，5σ）；`session_gpu_ensemble_runs_and_covers_wiring`；`session_gpu_ensemble_rejects_ineligible` |
+
+### 26.2 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **151 passed** |
+| `cargo test` | 67 passed |
+| `clippy`（默认+gpu）`-D warnings` / `fmt` / `check_rust` / `phase0` | 通过 / 通过 / EXIT=0 / bit-identical |
+| `ruff` / `pyright` / `pytest` | 通过 / 0 errors / 3606 passed |
+| ensemble 统计 L2 | 通过（B=2000） |
+| Python smoke（backend API，B=500×10 tick） | 形状/有限性正确 |
+| Benchmark（B=5000, A=8, Z=3, 50 tick, 16 CPU workers） | GPU 0.278s vs ProcessPool 0.664s → **2.4×**；快照前后 GPU 空闲（0%→0%，15 MiB→15 MiB） |
+
+### 26.3 诚实的性能结论（请 evaluator 判定是否满足 P6 验收）
+
+- GPU **单位工作量**约快 ~40×（5000×50=250k replicate-tick，GPU 0.278s）。
+- 但相对 **16 核 ProcessPoolExecutor** 的墙面加速比仅 **2.4–3.3×**，并非“数量级”优势。
+- 原因：每个 replicate 状态很小（≤ 8×3×2 cells）、CPU 16 核并行、每 tick 的 kernel/同步开销被摊薄。
+- 结论：本实现正确且可复现；是否满足计划 §5.3 P6 的“GPU 必须显著优于 ProcessPool”取决于阈值定义。若要求更高，需要：更大单 replicate 状态、更多 tick、或更少 CPU 核；也可考虑 GPU 侧减少每 tick 同步（当前 ensemble 只回传一次，已较优）。
+- 请 evaluator 明确：以什么基准/阈值判定 P6 通过；如不满足，请在 §27 给出需要的实验。
+
+### 26.4 请 evaluator 独立核对
+
+- ensemble 的统计等价（自建模型/参数，设备 B replicates vs 独立 CPU 运行）与**同 seed 逐位复现**、不同 seed 不同。
+- 会话 API 资格拒绝语义（`n_replicates=0`、`continuous_sampling=true`、空间、自定义曲线、含钩子）。
+- 确定性/空间路径不受影响；`phase0` bit-identical。
+- 严格过滤 `rust/src/gpu/**` 覆盖率；`age_structured.rs` 新增行覆盖。
+- 对 §26.3 给出 P6 是否达标的判定。
+
+结论请追加为 **§27**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1197,3 +1244,5 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 **APPROVED**（范围为当前 HEAD `5b1ced6` 与被审测试集；不声称任何历史基线失败消失）。
 
 ## 25. 第 8 轮结论（待 evaluator 填写）
+
+## 27. 第 9 轮结论（待 evaluator 填写）

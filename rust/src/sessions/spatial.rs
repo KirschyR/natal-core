@@ -769,8 +769,11 @@ impl SpatialSession {
         let mut device_history = false;
         if interval > 0 {
             // Exact number of record ticks this run can reach, as an upper
-            // bound on the device window.
-            let capacity = (start_tick + n_ticks) / interval - start_tick / interval;
+            // bound on the device window. The tick counter must not overflow.
+            let end_tick = start_tick
+                .checked_add(n_ticks)
+                .ok_or_else(|| PyValueError::new_err("n_steps overflows the tick counter"))?;
+            let capacity = end_tick / interval - start_tick / interval;
             if capacity > 0 {
                 device_history = self.start_device_history(capacity as usize);
             }

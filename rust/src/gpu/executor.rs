@@ -1218,9 +1218,23 @@ impl GpuExecutor {
             .capacity
             .checked_mul(width)
             .ok_or_else(|| "history window size overflow".to_owned())?;
-        let required = rows * size_of::<f32>()
-            + spec.mask.len() * size_of::<f32>()
-            + spec.selected.len() * size_of::<i32>();
+        let row_bytes = rows
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| "history window size overflow".to_owned())?;
+        let mask_bytes = spec
+            .mask
+            .len()
+            .checked_mul(size_of::<f32>())
+            .ok_or_else(|| "history mask size overflow".to_owned())?;
+        let selected_bytes = spec
+            .selected
+            .len()
+            .checked_mul(size_of::<i32>())
+            .ok_or_else(|| "history selection size overflow".to_owned())?;
+        let required = row_bytes
+            .checked_add(mask_bytes)
+            .and_then(|value| value.checked_add(selected_bytes))
+            .ok_or_else(|| "history window size overflow".to_owned())?;
         let (free, _total) = self.context.memory_info()?;
         ensure_memory_budget(free, required)?;
         let stream = self.context.stream();

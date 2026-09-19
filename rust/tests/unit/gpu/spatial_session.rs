@@ -562,3 +562,152 @@ fn spatial_device_history_falls_back_for_raw_or_missing_window() {
     ));
     assert!(gpu.start_device_history(2));
 }
+
+/// Flatten a session's bound history store into `(flat values, width)`.
+///
+/// ## Parameters
+/// - `session`: A spatial session with a bound history store.
+///
+/// ## Returns
+/// `(flat row-major values, row width including the tick column)`.
+fn history_flat(session: &SpatialSession) -> (Vec<f64>, usize) {
+    let data = session.history_store.as_ref().unwrap().lock().unwrap();
+    let (flat, _rows) = data.flat_rows();
+    (flat, data.width)
+}
+
+/// Evaluator: non-zero start ticks and multi-run continuation must reconstruct
+/// device history ticks exactly like the host path.
+#[test]
+fn evaluator_device_history_start_tick_and_continuation() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let plane = 2 * 4 * 2;
+    let mask = vec![1.0f64; plane];
+    let selected = vec![0usize, 1, 2];
+    // (n_ticks, record_interval) sequences; intervals of 0 mean "no recording".
+    let sequences: [&[(i64, i64)]; 4] =
+        [&[(3, 2), (3, 2)], &[(1, 0), (4, 2)], &[(2, 3)], &[(5, 1)]];
+    for sequence in sequences {
+        let mut gpu = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        gpu.enable_gpu().expect("enable gpu");
+        gpu.history_store = Some(configured_history(
+            dims,
+            mask.clone(),
+            selected.clone(),
+            false,
+            false,
+        ));
+        let mut cpu = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        cpu.history_store = Some(configured_history(
+            dims,
+            mask.clone(),
+            selected.clone(),
+            false,
+            false,
+        ));
+        for &(n, interval) in sequence {
+            gpu.run_steps(n, interval).expect("gpu run_steps");
+            cpu.run_steps(n, interval).expect("cpu run_steps");
+        }
+        let (g_flat, g_width) = history_flat(&gpu);
+        let (c_flat, c_width) = history_flat(&cpu);
+        assert_eq!(g_width, c_width, "width for {sequence:?}");
+        assert_eq!(
+            g_flat.len(),
+            c_flat.len(),
+            "flat length for {sequence:?} (gpu {g_flat:?} vs cpu {c_flat:?})"
+        );
+        let g_ticks: Vec<i64> = g_flat.iter().step_by(g_width).map(|v| *v as i64).collect();
+        let c_ticks: Vec<i64> = c_flat.iter().step_by(c_width).map(|v| *v as i64).collect();
+        assert_eq!(g_ticks, c_ticks, "history ticks for {sequence:?}");
+        for (index, (got, want)) in g_flat.iter().zip(c_flat.iter()).enumerate() {
+            let got = *got as f32;
+            let want = *want as f32;
+            let tolerance = 1.2e-6f32 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "{sequence:?} [{index}]: device {got} vs host {want}"
+            );
+        }
+    }
+}
+
+/// Evaluator: `configure_history` must fail explicitly on an over-budget window
+/// (the session then keeps the host path; no silent engine fallback).
+#[test]
+fn evaluator_configure_history_over_budget_is_explicit() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let plane = 2 * 4 * 2;
+    let width = 2 * 3 * 1; // groups=1, out_d=3, out_a=1
+    let mut session = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    session.enable_gpu().expect("enable gpu");
+    // A window far beyond any device: configure must error, not silently shrink.
+    let huge = crate::gpu::executor::HistorySpec {
+        capacity: usize::MAX / 8,
+        width,
+        dims,
+        mask: vec![1.0f64; plane],
+        selected: vec![0, 1, 2],
+        collapse: true,
+        aggregate: false,
+    };
+    let mut gpu = session.gpu.take().expect("executor");
+    let result = gpu.configure_history(&huge);
+    session.gpu = Some(gpu);
+    assert!(result.is_err(), "over-budget history must be rejected");
+}
+
+#[test]
+fn run_steps_rejects_overflowing_tick_span() {
+    // The rejection builds a `PyValueError`; initialize the interpreter so the
+    // test also passes when run in isolation.
+    pyo3::prepare_freethreaded_python();
+    let (blueprint, ecology, genetics) = fixture();
+    let mut session = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    session.run_steps(1, 0).expect("first tick");
+    let error = session
+        .run_steps(i64::MAX, 1)
+        .expect_err("an overflowing tick span must be rejected");
+    assert!(
+        error.to_string().contains("overflow"),
+        "unexpected message: {error}"
+    );
+}

@@ -66,7 +66,8 @@ rust/**                  ④ 原生引擎（单 crate `natal-engine-core` → `_
 空间随机第 7 轮 APPROVED；第 8 轮（越界守卫，§25）APPROVED；第 9 轮（P6，§27）APPROVED；
 第 10 轮（CSR 缓存 + 零逐 tick 回传，§28）→ §29 **NOT APPROVED**（公共单 tick 读路径陈旧），
 已按 §30 修复（公共 `run_tick` 同步、`run_steps` 调 `advance_tick`），第 11 轮 **APPROVED**（§31）；
-第 12 轮（观测模式设备侧历史缓冲，§32）已实现并自测，**待复核（§33）**。
+第 12 轮（观测模式设备侧历史缓冲，§32）→ §33 **NOT APPROVED**（预算算术溢出 panic），
+已按 §34 修复（全程 checked、显式 Err），**待复核（§35）**。
 
 ---
 
@@ -203,11 +204,11 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **160**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  `cargo test --features gpu`（当前 **163**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
   （跳过硬件）、`ruff`、`pyright`、`pytest`（3606）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
-  `src/gpu/../../tests/...`），当前聚合 **97.54%**（executor 96.8%、kernels 98.0%）；新模块需 ≥95%。
+  `src/gpu/../../tests/...`），当前聚合 **97.55%**（executor 96.9%、kernels 98.0%）；新模块需 ≥95%。
 - 高风险改动必须由独立 evaluator 复核（走 `EVALUATE.md`，用 `adversarial-review` 技能）。
 
 ---

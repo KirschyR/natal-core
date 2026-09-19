@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 11 轮：**APPROVED**（§31；§29 阻塞项已解除） |
-| 待回执 | §33（第 12 轮设备侧历史缓冲） |
-| 主 agent 处理 | 第 12 轮：D5 完整形态（观测模式设备投影 + 一次回传）已实现并自测 |
-| 待 evaluator 动作 | 按 §32 复核，把第 12 轮结论写入 §33 |
+| 最近回执 | 第 12 轮：**NOT APPROVED**（§33；`configure_history` 容量算术溢出 panic，非显式 Err） |
+| 待回执 | §35（第 12 轮修复复核） |
+| 主 agent 处理 | §33 已修复：预算与 tick 跨度全程 checked，溢出返回显式 Err；自测通过 |
+| 待 evaluator 动作 | 按 §34 复核修复目标，把结论写入 §35 |
 
 ## 0. 一句话目标
 
@@ -874,6 +874,43 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 34. 第 12 轮修复交接（处理 §33 阻塞项）
+
+- 日期：2026-09-19
+- 针对 §33.1/§33.2：`configure_history` 预算算术未检查（极端容量 panic/回绕），`run_steps` 的 `start_tick + n_ticks` 未检查。
+- 风险分类：**高风险修复**（显存预算守卫的正确性契约），按 evaluator 建议实施。
+
+### 34.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | `configure_history`：`rows`、`row_bytes`、`mask_bytes`、`selected_bytes` 及求和全部改用 `checked_mul`/`checked_add`，任一溢出返回显式 `Err`，随后才做预算比较与分配。 |
+| `rust/src/sessions/spatial.rs` | `run_steps`：`start_tick.checked_add(n_ticks)`，溢出返回 `PyValueError`（不再未检查 `i64` 加法），再计算设备窗口容量。 |
+| 测试 | 新增 `run_steps_rejects_overflowing_tick_span`（`start_tick=1` 后 `run_steps(i64::MAX, 1)` → 显式 Err）；evaluator 的 `evaluator_configure_history_over_budget_is_explicit` 转绿。 |
+
+### 34.2 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu evaluator_configure_history_over_budget_is_explicit` | **ok**（修复前 panic `attempt to multiply with overflow`） |
+| `cargo test --features gpu run_steps_rejects_overflowing_tick_span` | ok |
+| `cargo test --features gpu` | **163 passed, 0 failed**（含 evaluator 2 个回归） |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3606 passed / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2112/2165 = 97.55%**；executor **930/960 = 96.9%**、kernels 98.0%、probe 96.1%，逐文件 ≥95% |
+| Python E2E 复核（重编扩展） | 观测历史 record_every=1/2 ticks 与值仍与 CPU 一致，max rel diff 9.5e-8 |
+
+### 34.3 请 evaluator 复核
+
+- 重跑 `evaluator_configure_history_over_budget_is_explicit` 确认显式 Err（不再 panic/回绕）。
+- 复核 `configure_history` 全路径无未检查算术；`run_steps` 溢出返回显式 `PyValueError`。
+- 确认 §33.3 的投影/时机/回退/CPU 不变性结论未受影响。
+- 其余 §33.5 残余风险不变（raw 未设备暂存、窗口未按 `max_rows` 收缩、boundary metadata、GPU checkpoint）。
+
+结论请追加为 **§35**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1563,3 +1600,76 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 
 §29 阻塞项修复正确、无回归，其余质量门禁与覆盖率均达标。**APPROVED**（范围为当前 HEAD `b9c1910`
 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 33. 第 12 轮结论（evaluator 独立执行，2026-09-19，HEAD=`d05b77c`）
+
+### 33.1 裁定：**NOT APPROVED**
+
+- **阻塞项（medium）**：新增的设备历史预算守卫 `GpuExecutor::configure_history` 使用**未检查乘法**计算
+  `required`，对超大 `capacity` 会 **panic**（debug）或**回绕**（release）而非返回文档承诺的显式 `Err`；
+  这使 §32.4 要求的“`required > free` 显式 Err、无静默行为”在最坏输入下不成立。
+  同一 `run_steps` 的容量计算还有未检查的 `i64` 加法。
+- 其余（投影内核、历史记录时机/continuation、回退语义、CPU 隔离、覆盖率、门禁）均通过。
+
+### 33.2 阻塞项证据（已实际运行且失败）
+
+- evaluator 回归测试 `rust/tests/unit/gpu/spatial_session.rs::evaluator_configure_history_over_budget_is_explicit`
+  命令：`cargo test --features gpu evaluator_configure_history_over_budget_is_explicit`
+  预期：`configure_history` 对超大窗口返回 `Err`（预算守卫显式失败）
+  实际：**panic `attempt to multiply with overflow`** → FAILED
+- 位置：`rust/src/gpu/executor.rs` `configure_history`
+  - `let required = rows * size_of::<f32>() + spec.mask.len() * size_of::<f32>() + spec.selected.len() * size_of::<i32>();`
+    其中 `rows = capacity.checked_mul(width)`（有检查），但随后的 `* size_of` **无检查**。
+  - 相关：`rust/src/sessions/spatial.rs` `run_steps` 的 `let capacity = (start_tick + n_ticks) / interval - start_tick / interval;`
+    `start_tick + n_ticks` 为未检查 `i64` 加法（`n_ticks` 直接来自公开 `run_steps(n_steps, ...)`）。
+- 触发：`run_steps` 收到极大的 `n_steps`（如 `10**18`）时 `capacity` 极大，
+  `capacity * width < usize::MAX` 但 `rows * 4 ≥ usize::MAX` → debug panic；release 下回绕可能**绕过预算检查**后
+  在 `vec![0.0f32; rows]` 处巨量分配失败。属极端输入，但可由公开 API 触达。
+- **建议修复**：`rows`、`required` 全程使用 `checked_mul`/`checked_add`（或 `saturating_mul`）并在溢出时返回
+  显式 `Err`；`run_steps` 的 `start_tick + n_ticks` 用 `checked_add`。修复后本回归测试应转绿。
+
+### 33.3 已独立验证正确的部分
+
+- **投影内核**：`observation_project` 与 host `output::observation::project` 的累加顺序
+  （deme→age→genotype）和输出布局一致；作者用例 `device_history_projection_matches_host_project`
+  覆盖 groups=1/2、非 0/1 权重、乱序 `selected=[2,0]`、四种 collapse/aggregate 组合，容差 1.2e-6 → 通过。
+- **历史记录时机 / continuation**（evaluator 新增
+  `evaluator_device_history_start_tick_and_continuation`）：对 `[(3,2),(3,2)]`、`[(1,0),(4,2)]`
+  （start_tick=1，非 interval 倍数）、`[(2,3)]`（capacity=0，无 device 窗口）、`[(5,1)]` 四种序列，
+  GPU 与 CPU 的 history tick 序列与值逐元素一致（容差 1.2e-6）；`flush` 的 tick 重建
+  `(start_tick/interval + 1)*interval` 与非零起点/多 run continuation 均正确 → **PASS**。
+- **回退语义**：GPU 未启用 / 无 store / raw 模式 → `start_device_history` 返回 false 并走 host 逐记录路径
+  （作者用例 `spatial_device_history_falls_back_for_raw_or_missing_window`）；非引擎回退。
+- **CPU 不变性**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；
+  `phase0_baseline.py --check` → `all scenarios bit-identical`。
+- **覆盖率**（严格过滤、排除 `/tests/`）：`src/gpu` 聚合 **2098/2151 = 97.54%**，逐文件均 ≥95%
+  （executor 96.8%、kernels 98.0%、probe 96.1%，其余 100%）。
+
+### 33.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu`（作者用例） | **160 passed** |
+| `cargo test --features gpu`（含 evaluator 2 个新增） | 161 passed, **1 failed**（=33.2） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+
+### 33.5 非阻塞 / 残余风险
+
+- 设备历史窗口按 `n_ticks/interval` 上界分配、未按 `max_rows` 收缩；大 D×长 T 会触发预算回退
+  （走 host 路径，仅失去零回传）——已声明。
+- `flush_device_history` 用 `append_row` 直接写行，未更新边界 metadata（`record_history` 会把
+  `boundaries` 的 phase/execution 写为该 tick 的值）；对“正常完成 tick”（phase=0/`Ready`）与默认值一致，
+  故当前无差异，但 stop/异常边界的 metadata 可能与 host 路径不同，建议后续对齐。
+- GPU checkpoint/restore 不支持设备回滚（既有）。
+
+### 33.6 结论
+
+设备侧历史缓冲的核心正确性、时机与回退语义均通过；但新增的**显存预算计算存在未检查算术**
+（极端容量下 panic/回绕），与 §32.4/D5 的“显式失败”要求相悖。**NOT APPROVED**，待主 agent 修复后回交。

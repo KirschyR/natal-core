@@ -391,6 +391,25 @@ impl GpuExecutor {
         blueprint: &Blueprint,
         ecology: &EcologyParams,
     ) -> Result<Vec<f32>, String> {
+        self.density_scaling_impl(blueprint, ecology, false)
+    }
+
+    /// Density scaling with an explicit discrete/age-structured `actual` rule.
+    ///
+    /// ## Parameters
+    /// - `blueprint`, `ecology`: Live contracts.
+    /// - `discrete_actual`: When `true`, compare the total age-0 count (the
+    ///   discrete-generation rule) instead of the competition-weighted
+    ///   age-structured juvenile count.
+    ///
+    /// ## Errors
+    /// As [`GpuExecutor::density_scaling`].
+    pub(crate) fn density_scaling_impl(
+        &self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        discrete_actual: bool,
+    ) -> Result<Vec<f32>, String> {
         let n_batch = self.n_batch;
         let n_ages = self.n_ages;
         let n_ztypes = self.n_ztypes;
@@ -517,6 +536,7 @@ impl GpuExecutor {
             n_ages,
             n_ztypes,
             blueprint.new_adult_age,
+            discrete_actual,
         )?;
         scaling.to_host(&stream)
     }
@@ -672,6 +692,37 @@ impl GpuExecutor {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
     ) -> Result<(), String> {
+        self.reproduction_impl(blueprint, ecology, variants, deme_variants, false)
+    }
+
+    /// Run one discrete-generation reproduction stage on the device.
+    ///
+    /// Mirrors `kernels::discrete_generation::reproduction`: adult-female
+    /// matings are distributed over adult males and fertilized into age-0
+    /// offspring, with discrete or continuous sampling.
+    ///
+    /// ## Errors
+    /// As [`GpuExecutor::reproduction_tick`].
+    pub fn discrete_reproduction_tick(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
+        self.reproduction_impl(blueprint, ecology, variants, deme_variants, true)
+    }
+
+    /// Shared reproduction body; `discrete` selects the lifecycle kernel.
+    #[allow(clippy::too_many_arguments)]
+    fn reproduction_impl(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+        discrete: bool,
+    ) -> Result<(), String> {
         let n_batch = self.n_batch;
         let n_ages = self.n_ages;
         let n_ztypes = self.n_ztypes;
@@ -809,7 +860,24 @@ impl GpuExecutor {
             female_compat: female_compat_buf.slice(),
             male_compat: male_compat_buf.slice(),
         };
-        if blueprint.stochastic {
+        if discrete {
+            let (key0, key1) = self.rng_key();
+            let site = self.rng_site(2);
+            self.kernels.discrete_reproduction(
+                &stream,
+                self.ind.slice_mut(),
+                &reproduction_buffers,
+                n_batch,
+                n_ages,
+                n_ztypes,
+                blueprint.stochastic,
+                blueprint.continuous_sampling,
+                blueprint.has_sex_chromosomes,
+                key0,
+                key1,
+                site,
+            )?;
+        } else if blueprint.stochastic {
             let (key0, key1) = self.rng_key();
             let site = self.rng_site(2);
             self.kernels.reproduction_stochastic(
@@ -870,6 +938,110 @@ impl GpuExecutor {
     ) -> Result<(), String> {
         self.reproduction_tick(blueprint, ecology, variants, deme_variants)?;
         self.survival_tick(blueprint, ecology, variants, deme_variants)?;
+        self.age_tick()?;
+        self.tick = self.tick.wrapping_add(1);
+        Ok(())
+    }
+
+    /// Run one discrete-generation survival stage on the device.
+    ///
+    /// Mirrors `kernels::discrete_generation::survival`: density regulation
+    /// (the discrete total age-0 rule) followed by age-0 viability, with
+    /// discrete or continuous sampling.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Dimensions and sampling flags (`n_ages == 2`).
+    /// - `ecology`: Per-deme ecology columns (`n_demes == n_batch`).
+    /// - `variants`: Shared genetics variant bank.
+    /// - `deme_variants`: Per-batch index into `variants`.
+    ///
+    /// ## Errors
+    /// As [`GpuExecutor::survival_tick`].
+    pub fn discrete_survival_tick(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        if blueprint.n_ages != n_ages || blueprint.n_ztypes != n_ztypes {
+            return Err(format!(
+                "executor dimensions (A={n_ages}, Z={n_ztypes}) disagree with the blueprint \
+                 (A={}, Z={})",
+                blueprint.n_ages, blueprint.n_ztypes
+            ));
+        }
+        if deme_variants.len() != n_batch {
+            return Err(format!(
+                "discrete_survival_tick needs {n_batch} deme-variant ids, got {}",
+                deme_variants.len()
+            ));
+        }
+        expect_len(
+            "survival_rates",
+            ecology.survival_rates.len(),
+            n_batch * 2 * n_ages,
+        )?;
+        let scaling_host = self.density_scaling_impl(blueprint, ecology, true)?;
+        let variant_stride = 2 * n_ages * n_ztypes;
+        let mut viability = vec![0.0f32; n_batch * variant_stride];
+        for (batch, &variant_id) in deme_variants.iter().enumerate() {
+            let genetics = variants.get(variant_id).ok_or_else(|| {
+                format!("deme {batch} references missing genetics variant {variant_id}")
+            })?;
+            if genetics.viability_fitness.len() != variant_stride {
+                return Err(format!(
+                    "variant {variant_id} viability_fitness has {} elements, expected {variant_stride}",
+                    genetics.viability_fitness.len()
+                ));
+            }
+            let dst = &mut viability[batch * variant_stride..(batch + 1) * variant_stride];
+            for (slot, value) in dst.iter_mut().zip(&genetics.viability_fitness) {
+                *slot = *value as f32;
+            }
+        }
+        let stream = self.context.stream();
+        let scaling = DeviceBuffer::from_host(&stream, &scaling_host)?;
+        let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
+        let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
+        let (key0, key1) = self.rng_key();
+        let site = self.rng_site(1);
+        self.kernels.discrete_survival(
+            &stream,
+            self.ind.slice_mut(),
+            n_batch,
+            n_ages,
+            n_ztypes,
+            blueprint.stochastic,
+            blueprint.continuous_sampling,
+            scaling.slice(),
+            survival_rates.slice(),
+            viability_buf.slice(),
+            key0,
+            key1,
+            site,
+        )
+    }
+
+    /// Run one full discrete-generation tick (reproduction → survival → aging).
+    ///
+    /// ## Parameters
+    /// - `blueprint`, `ecology`, `variants`, `deme_variants`: Live contracts.
+    ///
+    /// ## Errors
+    /// Returns the first device-stage error.
+    pub fn discrete_tick(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
+        self.discrete_reproduction_tick(blueprint, ecology, variants, deme_variants)?;
+        self.discrete_survival_tick(blueprint, ecology, variants, deme_variants)?;
         self.age_tick()?;
         self.tick = self.tick.wrapping_add(1);
         Ok(())

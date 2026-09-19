@@ -95,6 +95,7 @@ extern "C" __global__ void density_scaling(
     const float* sex_ratio,
     const int* growth_mode,
     const float* low_density_growth_rate,
+    int discrete_actual,
     float* scaling_out)
 {
     int b = blockIdx.x * blockDim.x + threadIdx.x;
@@ -177,14 +178,26 @@ extern "C" __global__ void density_scaling(
             : 1.0f;
     } else {
         float actual = 0.0f;
-        for (int age = 0; age < new_adult_age; ++age) {
+        if (discrete_actual != 0) {
+            // Discrete regulation compares the total age-0 count (both sexes)
+            // rather than the age-structured competition-weighted juveniles.
             float female_sum = 0.0f;
             float male_sum = 0.0f;
             for (int z = 0; z < Z; ++z) {
-                female_sum += ind[((0 * A + age) * Z + z) * n_batch + b];
-                male_sum += ind[((1 * A + age) * Z + z) * n_batch + b];
+                female_sum += ind[((0 * A + 0) * Z + z) * n_batch + b];
+                male_sum += ind[((1 * A + 0) * Z + z) * n_batch + b];
             }
-            actual += (female_sum + male_sum) * compw[age];
+            actual = female_sum + male_sum;
+        } else {
+            for (int age = 0; age < new_adult_age; ++age) {
+                float female_sum = 0.0f;
+                float male_sum = 0.0f;
+                for (int z = 0; z < Z; ++z) {
+                    female_sum += ind[((0 * A + age) * Z + z) * n_batch + b];
+                    male_sum += ind[((1 * A + age) * Z + z) * n_batch + b];
+                }
+                actual += (female_sum + male_sum) * compw[age];
+            }
         }
         float ratio = (expected_comp > 0.0f) ? actual / expected_comp : 1.0f;
         float r = low_density_growth_rate[b];
@@ -1886,6 +1899,325 @@ extern "C" __global__ void observation_project(
 }
 "#;
 
+/// Discrete-generation (two-age) lifecycle kernels.
+///
+/// These mirror `kernels::discrete_generation` for the batch-minor `(2, A, Z, B)`
+/// layout with `A == 2`: reproduction samples adult-female matings and
+/// fertilizes the pairs into age-0 offspring, and survival applies the density
+/// scaling (computed by [`Kernels::density_scaling`] with `discrete_actual`)
+/// and then age-0 viability. Both discrete and continuous sampling branches are
+/// provided.
+const DISCRETE_SOURCE: &str = r#"
+extern "C" __global__ void discrete_reproduction(
+    float* ind,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    int stochastic,
+    int continuous,
+    int has_sex_chromosomes,
+    const float* mating_rates,
+    const float* reproduction_rates,
+    const float* eggs_per_female,
+    const float* sex_ratio,
+    const int* female_only,
+    const int* male_only,
+    const float* fecundity,
+    const float* sexual_selection,
+    const float* offspring,
+    const float* female_compat,
+    const float* male_compat,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    int adult = A - 1;
+    float female_adult_rate = natal_clamp01(mating_rates[b * 2 * A + adult]);
+    float male_adult_rate = natal_clamp01(mating_rates[b * 2 * A + A + adult]);
+
+    float effective[NATAL_MAX_Z];
+    float females_total = 0.0f;
+    float males_total = 0.0f;
+    for (int z = 0; z < Z; ++z) {
+        effective[z] = ind[((1 * A + adult) * Z + z) * n_batch + b] * male_adult_rate;
+        females_total += ind[((0 * A + adult) * Z + z) * n_batch + b];
+        males_total += effective[z];
+    }
+    if (males_total == 0.0f || females_total == 0.0f) {
+        return;
+    }
+
+    float mating_prob[NATAL_MAX_Z * NATAL_MAX_Z];
+    const float* sel = sexual_selection + b * Z * Z;
+    for (int gf = 0; gf < Z; ++gf) {
+        float row_sum = 0.0f;
+        for (int gm = 0; gm < Z; ++gm) {
+            float v = sel[gf * Z + gm] * effective[gm];
+            mating_prob[gf * Z + gm] = v;
+            row_sum += v;
+        }
+        if (isfinite(row_sum) && row_sum > 1e-10f) {
+            for (int gm = 0; gm < Z; ++gm) {
+                mating_prob[gf * Z + gm] /= row_sum;
+            }
+        } else {
+            for (int gm = 0; gm < Z; ++gm) {
+                mating_prob[gf * Z + gm] = 0.0f;
+            }
+        }
+    }
+
+    RngState state;
+    rng_init(&state, (unsigned long long)b, key0, key1, site);
+
+    float pair_counts[NATAL_MAX_Z * NATAL_MAX_Z];
+    for (int i = 0; i < Z * Z; ++i) {
+        pair_counts[i] = 0.0f;
+    }
+    for (int gf = 0; gf < Z; ++gf) {
+        float n_female = ind[((0 * A + adult) * Z + gf) * n_batch + b];
+        if (n_female <= 0.0f) {
+            continue;
+        }
+        float n_mating;
+        if (stochastic) {
+            n_mating = continuous
+                ? sample_continuous_binomial(&state, n_female, female_adult_rate)
+                : sample_binomial(&state, roundf(n_female), female_adult_rate);
+        } else {
+            n_mating = n_female * female_adult_rate;
+        }
+        if (n_mating <= 1e-10f) {
+            continue;
+        }
+        const float* row = mating_prob + gf * Z;
+        if (stochastic) {
+            float drawn[NATAL_MAX_Z];
+            if (continuous) {
+                natal_continuous_multinomial(&state, n_mating, row, Z, drawn);
+            } else {
+                natal_multinomial(&state, roundf(n_mating), row, Z, drawn);
+            }
+            for (int gm = 0; gm < Z; ++gm) {
+                pair_counts[gf * Z + gm] += drawn[gm];
+            }
+        } else {
+            for (int gm = 0; gm < Z; ++gm) {
+                pair_counts[gf * Z + gm] += n_mating * row[gm];
+            }
+        }
+    }
+
+    float offspring_acc[NATAL_MAX_Z];
+    for (int z = 0; z < Z; ++z) {
+        offspring_acc[z] = 0.0f;
+    }
+    float p_reproduce = natal_clamp01(reproduction_rates[b * A + adult]);
+    float epf = eggs_per_female[b];
+    if (!(epf > 0.0f)) {
+        epf = 0.0f;
+    }
+    const float* ff = fecundity + b * 2 * Z;
+    for (int gf = 0; gf < Z; ++gf) {
+        for (int gm = 0; gm < Z; ++gm) {
+            float n_pairs = pair_counts[gf * Z + gm];
+            if (n_pairs <= 0.0f) {
+                continue;
+            }
+            float eggs_per_pair = epf * ff[gf] * ff[Z + gm];
+            float n_total;
+            if (stochastic) {
+                float n_pairs_eff = continuous ? n_pairs : roundf(n_pairs);
+                if (n_pairs_eff <= 0.0f) {
+                    continue;
+                }
+                float n_reproducing = n_pairs_eff;
+                if (p_reproduce < 1.0f - 1e-10f) {
+                    n_reproducing = continuous
+                        ? sample_continuous_binomial(&state, n_pairs_eff, p_reproduce)
+                        : sample_binomial(&state, n_pairs_eff, p_reproduce);
+                }
+                float lambda = fmaxf(n_reproducing * eggs_per_pair, 0.0f);
+                n_total = continuous ? sample_continuous_poisson(&state, lambda)
+                                     : sample_poisson(&state, lambda);
+            } else {
+                n_total = n_pairs * p_reproduce * eggs_per_pair;
+            }
+            if (n_total <= 1e-10f) {
+                continue;
+            }
+            const float* off = offspring + b * Z * Z * Z + (gf * Z + gm) * Z;
+            float p_surv = 0.0f;
+            for (int go = 0; go < Z; ++go) {
+                p_surv += off[go];
+            }
+            if (stochastic) {
+                if (p_surv <= 1e-10f) {
+                    continue;
+                }
+                float n_viable = n_total;
+                if (p_surv < 1.0f - 1e-10f) {
+                    n_viable = continuous
+                        ? sample_continuous_binomial(&state, n_total, p_surv)
+                        : sample_binomial(&state, roundf(n_total), p_surv);
+                }
+                if (n_viable <= 1e-10f) {
+                    continue;
+                }
+                float inv = 1.0f / p_surv;
+                float prob_norm[NATAL_MAX_Z];
+                float drawn[NATAL_MAX_Z];
+                for (int go = 0; go < Z; ++go) {
+                    prob_norm[go] = off[go] * inv;
+                }
+                if (continuous) {
+                    natal_continuous_multinomial(&state, n_viable, prob_norm, Z, drawn);
+                } else {
+                    natal_multinomial(&state, roundf(n_viable), prob_norm, Z, drawn);
+                }
+                for (int go = 0; go < Z; ++go) {
+                    offspring_acc[go] += drawn[go];
+                }
+            } else {
+                for (int go = 0; go < Z; ++go) {
+                    offspring_acc[go] += n_total * off[go];
+                }
+            }
+        }
+    }
+
+    float sr = natal_clamp01(sex_ratio[b]);
+    const float* fcompat = female_compat + b * Z;
+    const float* mcompat = male_compat + b * Z;
+    for (int go = 0; go < Z; ++go) {
+        float n_g = offspring_acc[go];
+        float n_f = 0.0f;
+        float n_m = 0.0f;
+        if (n_g > 1e-10f) {
+            if (has_sex_chromosomes && female_only[go]) {
+                n_f = n_g;
+            } else if (has_sex_chromosomes && male_only[go]) {
+                n_m = n_g;
+            } else {
+                float p_f;
+                if (has_sex_chromosomes) {
+                    float denom = fcompat[go] + mcompat[go];
+                    p_f = (denom > 1e-10f) ? natal_clamp01(fcompat[go] / denom) : 0.5f;
+                } else {
+                    p_f = sr;
+                }
+                float n_fem;
+                if (stochastic) {
+                    n_fem = continuous
+                        ? sample_continuous_binomial(&state, n_g, p_f)
+                        : sample_binomial(&state, roundf(n_g), p_f);
+                } else {
+                    n_fem = n_g * p_f;
+                }
+                n_f = n_fem;
+                n_m = n_g - n_fem;
+            }
+        }
+        ind[((0 * A + 0) * Z + go) * n_batch + b] = n_f;
+        ind[((1 * A + 0) * Z + go) * n_batch + b] = n_m;
+    }
+}
+
+extern "C" __global__ void discrete_survival(
+    float* ind,
+    int n_batch,
+    int n_ages,
+    int n_ztypes,
+    int stochastic,
+    int continuous,
+    const float* scaling,
+    const float* survival_rates,
+    const float* viability,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    int A = n_ages;
+    int Z = n_ztypes;
+    RngState state;
+    rng_init(&state, (unsigned long long)b, key0, key1, site);
+
+    float combined[2 * NATAL_MAX_Z];
+    float total = 0.0f;
+    for (int sex = 0; sex < 2; ++sex) {
+        for (int z = 0; z < Z; ++z) {
+            float raw = ind[((sex * A + 0) * Z + z) * n_batch + b];
+            float value = (stochastic && !continuous) ? roundf(raw) : raw;
+            combined[sex * Z + z] = value;
+            total += value;
+        }
+    }
+    if (total <= 0.0f) {
+        return;
+    }
+    float desired = (stochastic && !continuous) ? roundf(total * scaling[b]) : total * scaling[b];
+    if (desired <= 0.0f) {
+        for (int sex = 0; sex < 2; ++sex) {
+            for (int z = 0; z < Z; ++z) {
+                ind[((sex * A + 0) * Z + z) * n_batch + b] = 0.0f;
+            }
+        }
+        return;
+    }
+    float probs[2 * NATAL_MAX_Z];
+    float draws[2 * NATAL_MAX_Z];
+    for (int k = 0; k < 2 * Z; ++k) {
+        probs[k] = combined[k] / total;
+    }
+    if (stochastic) {
+        if (continuous) {
+            natal_continuous_multinomial(&state, desired, probs, 2 * Z, draws);
+        } else {
+            natal_multinomial(&state, roundf(desired), probs, 2 * Z, draws);
+        }
+    } else {
+        for (int k = 0; k < 2 * Z; ++k) {
+            draws[k] = combined[k] * (desired / total);
+        }
+    }
+    for (int sex = 0; sex < 2; ++sex) {
+        for (int z = 0; z < Z; ++z) {
+            ind[((sex * A + 0) * Z + z) * n_batch + b] = draws[sex * Z + z];
+        }
+    }
+
+    for (int z = 0; z < Z; ++z) {
+        float f = ind[((0 * A + 0) * Z + z) * n_batch + b];
+        float m = ind[((1 * A + 0) * Z + z) * n_batch + b];
+        float rate_f = survival_rates[b * 2 * A + 0] * viability[(b * 2 * A + 0) * Z + z];
+        float rate_m = survival_rates[b * 2 * A + A + 0] * viability[(b * 2 * A + A + 0) * Z + z];
+        float nf;
+        float nm;
+        if (stochastic) {
+            nf = continuous ? sample_continuous_binomial(&state, f, rate_f)
+                            : sample_binomial(&state, roundf(f), rate_f);
+            nm = continuous ? sample_continuous_binomial(&state, m, rate_m)
+                            : sample_binomial(&state, roundf(m), rate_m);
+        } else {
+            nf = f * rate_f;
+            nm = m * rate_m;
+        }
+        ind[((0 * A + 0) * Z + z) * n_batch + b] = nf;
+        ind[((1 * A + 0) * Z + z) * n_batch + b] = nm;
+    }
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -1999,6 +2331,10 @@ pub struct Kernels {
     migration_stochastic_gather_male: CudaFunction,
     /// `observation_project(...)`.
     observation_project: CudaFunction,
+    /// `discrete_reproduction(...)`.
+    discrete_reproduction: CudaFunction,
+    /// `discrete_survival(...)`.
+    discrete_survival: CudaFunction,
 }
 
 impl Kernels {
@@ -2022,7 +2358,7 @@ impl Kernels {
             ..Default::default()
         };
         let source = format!(
-            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}\n{SAMPLING_SOURCE}\n{OBSERVATION_SOURCE}"
+            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}\n{SAMPLING_SOURCE}\n{OBSERVATION_SOURCE}\n{DISCRETE_SOURCE}"
         );
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
@@ -2097,6 +2433,12 @@ impl Kernels {
         let observation_project = module
             .load_function("observation_project")
             .map_err(|err| format!("loading kernel `observation_project` failed: {err}"))?;
+        let discrete_reproduction = module
+            .load_function("discrete_reproduction")
+            .map_err(|err| format!("loading kernel `discrete_reproduction` failed: {err}"))?;
+        let discrete_survival = module
+            .load_function("discrete_survival")
+            .map_err(|err| format!("loading kernel `discrete_survival` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -2118,6 +2460,8 @@ impl Kernels {
             migration_stochastic_gather_sperm,
             migration_stochastic_gather_male,
             observation_project,
+            discrete_reproduction,
+            discrete_survival,
         })
     }
 
@@ -2194,6 +2538,7 @@ impl Kernels {
     /// ## Errors
     /// Returns a description when dimensions are out of range (including
     /// `n_ages > 64`) or the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
     pub fn density_scaling(
         &self,
         stream: &Arc<CudaStream>,
@@ -2202,6 +2547,7 @@ impl Kernels {
         n_ages: usize,
         n_ztypes: usize,
         new_adult_age: usize,
+        discrete_actual: bool,
     ) -> Result<(), String> {
         if n_batch == 0 || n_ages == 0 || n_ztypes == 0 {
             return Err("density_scaling requires non-zero dimensions".to_owned());
@@ -2220,6 +2566,7 @@ impl Kernels {
         let n_ages_i = n_ages as i32;
         let n_ztypes_i = n_ztypes as i32;
         let new_adult_i = new_adult_age as i32;
+        let discrete_i = i32::from(discrete_actual);
         let config = LaunchConfig {
             grid_dim: ((n_batch as u32).div_ceil(128), 1, 1),
             block_dim: (128, 1, 1),
@@ -2243,6 +2590,7 @@ impl Kernels {
         launch.arg(buffers.sex_ratio);
         launch.arg(buffers.growth_mode);
         launch.arg(buffers.low_density_growth_rate);
+        launch.arg(&discrete_i);
         launch.arg(&mut *buffers.scaling_out);
         unsafe { launch.launch(config) }
             .map(|_| ())
@@ -3060,6 +3408,124 @@ impl Kernels {
         unsafe { builder.launch(grid) }
             .map(|_| ())
             .map_err(|err| format!("observation_project launch failed: {err}"))
+    }
+
+    /// Run the discrete-generation reproduction stage in place.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn discrete_reproduction(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        buffers: &ReproductionBuffers<'_>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        stochastic: bool,
+        continuous: bool,
+        has_sex_chromosomes: bool,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        if n_ztypes > MAX_Z {
+            return Err(format!(
+                "discrete_reproduction supports at most {MAX_Z} zygote types, got {n_ztypes}"
+            ));
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let stochastic_i = i32::from(stochastic);
+        let continuous_i = i32::from(continuous);
+        let sex_chrom_i = i32::from(has_sex_chromosomes);
+        let config = stochastic_grid(n_batch);
+        let mut launch = stream.launch_builder(&self.discrete_reproduction);
+        launch.arg(&mut *ind);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&stochastic_i);
+        launch.arg(&continuous_i);
+        launch.arg(&sex_chrom_i);
+        launch.arg(buffers.mating_rates);
+        launch.arg(buffers.reproduction_rates);
+        launch.arg(buffers.eggs_per_female);
+        launch.arg(buffers.sex_ratio);
+        launch.arg(buffers.female_only);
+        launch.arg(buffers.male_only);
+        launch.arg(buffers.fecundity);
+        launch.arg(buffers.sexual_selection);
+        launch.arg(buffers.offspring);
+        launch.arg(buffers.female_compat);
+        launch.arg(buffers.male_compat);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("discrete_reproduction launch failed: {err}"))
+    }
+
+    /// Run the discrete-generation survival stage in place.
+    ///
+    /// `scaling` comes from [`Kernels::density_scaling`] with
+    /// `discrete_actual = true`.
+    ///
+    /// ## Errors
+    /// Returns a description when the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn discrete_survival(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        stochastic: bool,
+        continuous: bool,
+        scaling: &CudaSlice<f32>,
+        survival_rates: &CudaSlice<f32>,
+        viability: &CudaSlice<f32>,
+        key0: u32,
+        key1: u32,
+        site: u32,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        if n_ztypes > MAX_Z {
+            return Err(format!(
+                "discrete_survival supports at most {MAX_Z} zygote types, got {n_ztypes}"
+            ));
+        }
+        let n_batch_i = n_batch as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let stochastic_i = i32::from(stochastic);
+        let continuous_i = i32::from(continuous);
+        let config = stochastic_grid(n_batch);
+        let mut launch = stream.launch_builder(&self.discrete_survival);
+        launch.arg(&mut *ind);
+        launch.arg(&n_batch_i);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&stochastic_i);
+        launch.arg(&continuous_i);
+        launch.arg(scaling);
+        launch.arg(survival_rates);
+        launch.arg(viability);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("discrete_survival launch failed: {err}"))
     }
 }
 

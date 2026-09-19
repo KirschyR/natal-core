@@ -349,11 +349,6 @@ impl SpatialSession {
     /// error when the device is unavailable.
     #[cfg(feature = "gpu")]
     fn enable_gpu(&mut self) -> PyResult<()> {
-        if self.discrete {
-            return Err(PyValueError::new_err(
-                "GPU path currently supports age-structured spatial models only",
-            ));
-        }
         if self.hooks.n_hooks != 0
             || self
                 .hooks
@@ -1241,9 +1236,14 @@ impl SpatialSession {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
         stay_after_send: bool,
+        discrete: bool,
         state_tick: &mut i64,
     ) -> Result<(), String> {
-        gpu.tick(blueprint, ecology, variants, deme_variants)?;
+        if discrete {
+            gpu.discrete_tick(blueprint, ecology, variants, deme_variants)?;
+        } else {
+            gpu.tick(blueprint, ecology, variants, deme_variants)?;
+        }
         let all_zero = ecology.migration_rate.iter().all(|&rate| rate <= 0.0);
         if !all_zero {
             if blueprint.stochastic {
@@ -1487,6 +1487,7 @@ impl SpatialSession {
                 &self.variants,
                 &self.deme_variants,
                 self.stay_after_send,
+                self.discrete,
                 &mut self.state_tick,
             );
             self.gpu = Some(gpu);

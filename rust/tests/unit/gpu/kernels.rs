@@ -67,10 +67,10 @@ fn kernel_launchers_reject_invalid_shapes() {
         scaling_out: &mut out,
     };
     assert!(kernels
-        .density_scaling(&stream, &mut buffers, 0, 4, 2, 1)
+        .density_scaling(&stream, &mut buffers, 0, 4, 2, 1, false)
         .is_err());
     assert!(kernels
-        .density_scaling(&stream, &mut buffers, 1, 4, 2, 0)
+        .density_scaling(&stream, &mut buffers, 1, 4, 2, 0, false)
         .is_err());
 
     // Zero-batch / empty-plane short circuits.

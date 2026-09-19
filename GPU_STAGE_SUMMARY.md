@@ -68,7 +68,8 @@ rust/**                  ④ 原生引擎（单 crate `natal-engine-core` → `_
 已按 §30 修复（公共 `run_tick` 同步、`run_steps` 调 `advance_tick`），第 11 轮 **APPROVED**（§31）；
 第 12 轮（观测模式设备侧历史缓冲，§32）→ §33 **NOT APPROVED**（预算算术溢出 panic），
 已按 §34 修复（全程 checked、显式 Err），第 13 轮 **APPROVED**（§35）。
-第 14 轮（`continuous_sampling` 设备支持，§36）已实现并自测，**待复核（§37）**。
+第 14 轮（`continuous_sampling` 设备支持，§36）第 14 轮 **APPROVED**（§37）；
+第 15 轮（离散世代空间 GPU，§38）已实现并自测，**待复核（§39）**。
 
 ---
 
@@ -133,6 +134,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 | `RNG_SOURCE` | `philox4x32_10` / `fill_uniform` | counter-based RNG 基础 |
 | `SAMPLING_SOURCE` | `RngState`/`rng_uniform|normal`/`sample_binomial|poisson|gamma`/`natal_multinomial`/`multinomial_seq`/`recruit_stochastic`/`survival_stochastic`/`reproduction_stochastic`/`migration_stochastic_prepare`+`gather_*` | 随机路径 |
 | `OBSERVATION_SOURCE` | `observation_project` | 观测历史行设备投影（复刻 host `project`） |
+| `DISCRETE_SOURCE` | `discrete_reproduction` / `discrete_survival` | 离散二龄生命周期（繁殖/存活，离散或连续） |
 | （`cuda.rs`） | `add_one` | P0-b 工具链自证 |
 
 ---
@@ -182,7 +184,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
   `enable_gpu()`/`gpu_status()`（现接受 `stochastic=true` 与 `continuous_sampling=true`；第 14 轮起）、
   `enable_gpu_ensemble()`/`run_gpu_ensemble()`；`run_inner` 开头**提前返回**设备分支。
 - 空间：`SpatialSession`（`HeterogeneousSpatialEngineSession`）新增 `gpu` 字段、`enable_gpu()`/
-  `gpu_status()`（接受确定性 + 随机，含连续抽样；拒绝离散）、`run_gpu_tick`；`run_inner` 提前返回；
+  `gpu_status()`（接受确定性 + 随机 + 连续 + 离散）、`run_gpu_tick`；`run_inner` 提前返回；
   确定性用 `migrate_tick`、随机用 `migrate_tick_stochastic`。
 - Python：`rust_backend.py` 三个后端类分别透传；扩展未带 gpu 时给出可操作 `RuntimeError`。
 
@@ -192,7 +194,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 
 - **`continuous_sampling=true`**：**已支持**（第 14 轮）：设备连续二项/多项/Poisson 采样，生存/繁殖/迁移随机阶段均可用。
 - **hooks/停止门控**：含钩子模型设备拒绝；D6 设备侧门控未做。
-- **离散世代 GPU**：空间离散被拒；仅年龄结构。
+- **离散世代 GPU**：空间离散已支持（第 15 轮）；未覆盖 Wright-Fisher 融合模式。
 - **设备侧 history 驻留（观测模式）已实现**：空间观测历史在设备上投影成行、运行期零逐记录回传、结束时一次下载回填
   `HistoryStore`；**raw 模式与设备窗口超预算时仍走 host 逐记录路径**（第 12 轮，§32，待复核）。
 - **迁移 CSR 已缓存**（`MigrationCache`，含随机 `fwd_*` scratch），只在 CSR 变化时重建；`migration_rate` 仍逐 tick 上传。
@@ -205,11 +207,11 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **168**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  `cargo test --features gpu`（当前 **174**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
   （跳过硬件）、`ruff`、`pyright`、`pytest`（3606）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
-  `src/gpu/../../tests/...`），当前聚合 **97.75%**（executor 97.3%、kernels 98.1%）；新模块需 ≥95%。
+  `src/gpu/../../tests/...`），当前聚合 **96.94%**（executor 96.0%、kernels 97.4%）；新模块需 ≥95%。
 - 高风险改动必须由独立 evaluator 复核（走 `EVALUATE.md`，用 `adversarial-review` 技能）。
 
 ---
@@ -240,7 +242,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 2. **设备侧历史缓冲**（D5）：观测模式已完成（第 12 轮）；后续可把 raw 模式也搬到设备，并按 `max_rows` 收缩窗口。
 3. **停止门控**（D6）：无钩子模型的 `stop_if_*` 设备侧门控，消除主机同步。
 4. **`continuous_sampling` 支持**：已完成（第 14 轮，设备连续二项/多项/Poisson）。
-5. **离散世代 GPU 路径**（当前空间离散被拒）。
+5. **离散世代 GPU 路径**：已完成（第 15 轮；Wright-Fisher 融合模式未覆盖）。
 6. **frontend/population 级 ensemble 入口 + 文档**（`demos/` 或 `docs/` 同步，遵守中英同步规则）。
 7. 性能优化：CSR 缓存（第 10 轮）、观测历史设备投影（第 12 轮）已完成；剩余为 ecology 增量上传、融合 kernel、减少每 tick 启动。
 

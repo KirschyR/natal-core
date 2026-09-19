@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 13 轮：**APPROVED**（§35；§33 阻塞项已解除） |
-| 待回执 | §37（第 14 轮 continuous_sampling 设备支持） |
-| 主 agent 处理 | 第 14 轮：连续抽样设备支持已实现并自测 |
-| 待 evaluator 动作 | 按 §36 复核，把第 14 轮结论写入 §37 |
+| 最近回执 | 第 14 轮：**APPROVED**（§37；continuous_sampling 设备支持） |
+| 待回执 | §39（第 15 轮离散世代空间 GPU） |
+| 主 agent 处理 | 第 15 轮：离散世代空间 GPU 路径已实现并自测 |
+| 待 evaluator 动作 | 按 §38 复核，把第 15 轮结论写入 §39 |
 
 ## 0. 一句话目标
 
@@ -960,6 +960,55 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 38. 第 15 轮交接 — 离散世代（空间）GPU 路径
+
+- 日期：2026-09-19
+- 背景：§37 APPROVED。用户选择推进 `GPU_STAGE_SUMMARY §11` 第 5 项「离散世代 GPU 路径（当前空间离散被拒）」。
+- 风险分类：**高风险**（新增离散二龄生命周期的设备内核，含随机/连续采样；涉及数值与状态）。
+
+### 38.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | 新增 `DISCRETE_SOURCE`：`discrete_reproduction`（成年雌性求偶 + 受精，离散/连续）与 `discrete_survival`（密度缩放 + 幼体重采样 + 年龄 0 存活，离散/连续）。`density_scaling` 内核新增 `discrete_actual` 参数（离散用总年龄 0 计数，而非加权幼体），启动器同步。Kernels 结构/加载/源拼接新增两个内核。 |
+| `rust/src/gpu/executor.rs` | 新增 `discrete_reproduction_tick` / `discrete_survival_tick` / `discrete_tick`（复现→存活→衰老）；`reproduction_tick` 重构为 `reproduction_impl(discrete)`；`density_scaling` 拆为 `density_scaling_impl(discrete_actual)`。 |
+| `rust/src/sessions/spatial.rs` | `enable_gpu` 不再拒绝离散；`run_gpu_tick` 增加 `discrete` 参数并分派 `discrete_tick`。离散迁移复用既有确定性/随机 CSR 迁移内核（sperm 面恒零）。 |
+| 测试 | 空间会话：`spatial_discrete_device_tick_matches_cpu`（确定性 3 tick vs CPU，容差 1e-4）、`spatial_discrete_stochastic_device_tick_runs`；内核统计：离散繁殖/存活各 2 个（离散/连续采样，GPU vs host 同分布均值，5σ+0.5）。 |
+
+### 38.2 语义
+
+- 离散生命周期严格复刻 `kernels::discrete_generation`（两龄、无储精面、`reproduction_rates`/`mating_rates` 取成年列、`viability_fitness` 年龄 0 行）。
+- 密度缩放复用 `density_scaling` 内核，`discrete_actual` 分支用总年龄 0 计数，匹配 host `scaling_factor`。
+- 离散迁移沿用 P5 的 CSR 迁移内核；离散 `ind` 为 `(2,2,Z,B)`，sperm 面恒零。
+
+### 38.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **174 passed, 0 failed**（含 4 个离散分布用例 + 2 个会话用例） |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3606 passed / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2344/2418 = 96.94%**；executor 96.0%、kernels 97.4%、probe 96.1%，逐文件 ≥95% |
+| 离散繁殖/存活分布（离散与连续） | GPU vs host 同分布均值在 5σ+0.5 内 |
+| Python E2E（重编扩展，4 deme 空间离散） | 确定性 `run(3)` GPU/CPU 相对误差 **6.4e-9**；随机连续 `run(2)` 有限 |
+
+### 38.4 请 evaluator 独立核对
+
+- **内核逐分支**：`discrete_reproduction` / `discrete_survival` 与 host `kernels::discrete_generation` 的求偶/受精/性别/缩放/幼体重采样/存活分支一致；`density_scaling` 的 `discrete_actual` 与 `scaling_factor` 一致（含 fixed/linear/beverton_holt/ricker、declared 分布、external eggs）。
+- **统计等价**：自建参数对离散繁殖/存活做 GPU vs host 分布对照（含连续采样与边界 p/n）。
+- **会话/迁移**：离散空间 `enable_gpu` 接受且非静默回退；离散迁移复用正确；确定性 `phase0` 不变。
+- **无回归**：年龄结构/随机/连续/历史/ensemble 既有用例全部保持。
+
+### 38.5 残余风险 / 说明
+
+- 离散 GPU 未覆盖 Wright-Fisher 融合模式（`run_wf_tick`）；空间离散 CPU 路径本就不使用它，故非阻塞。
+- `discrete_survival` 固定 64 线程块（寄存器约束）。
+- CPU 数值内核/契约零改动（`git diff` 为空）。
+
+结论请追加为 **§39**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1769,3 +1818,63 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 
 §33 阻塞项修复正确、无回归，其余质量门禁与覆盖率均达标。**APPROVED**（范围为当前 HEAD `5c53092`
 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 37. 第 14 轮结论（evaluator 独立执行，2026-09-19，HEAD=`2308114`）
+
+### 37.1 裁定：**APPROVED**
+
+`continuous_sampling=true` 的设备路径（连续二项/多项/Poisson + Gamma 迭代改写）与 host 语义一致，
+四个随机阶段端到端统计等价（均值与方差），离散/确定性路径零回归，会话接受且非静默回退。
+
+### 37.2 独立核对
+
+- **连续采样器逐分支**（读 diff）：设备 `sample_continuous_binomial`（Beta 比例 = `Gamma(p(n-1))` 与
+  `Gamma((1-p)(n-1))` 归一 × n）、`sample_continuous_poisson`（`Gamma(λ,1)`）、
+  `natal_continuous_multinomial`（归一化 Gamma + 漂移校正）与 host `rng.rs` 的
+  `continuous_binomial/poisson/multinomial` 公式和分支一致；`sample_outbound_device` 连续分支
+  与 host `sample_outbound` 一致；`reproduction_stochastic` 连续分支的 mating/removal
+  （`removed_frac=min(p_remating,1)`、按比例移除）、fertilize（`continuous_poisson`、
+  `continuous_binomial`）、sex/viability 均与 host 对应分支一致。
+- **Gamma 迭代改写**：原 `shape<1` 递归等价改为一次性 `boost=pow(u,1/shape)` + `shape+1` 的 MS；
+  RNG 抽取顺序不变、分布不变。既有的 `evaluator_gamma_including_shape_below_one_matches_cpu`
+  （形状 0.3/0.5/0.9/1/2/5/20）与作者用例仍通过。
+- **端到端连续 L3**（evaluator 独立，Python 公共 API，panmictic 连续，K=300×5 tick）：
+  `gpu_status=="enabled"`、状态有限；总量 **CPU mean=42321.19 vs GPU mean=42324.59**
+  （合并 5σ 容差 1957，ratio **0.002**）；**方差比 GPU/CPU=1.109**（K=300 下 ~1.3σ，一致）。
+- **会话语义**：`enable_gpu` / `enable_gpu_ensemble` 删除 `continuous_sampling` 拒绝后接受连续并实际跑通
+  （不是静默回退）；离散路径与 `phase0` 不变。
+- **启动器参数顺序**：`recruit/survival/reproduction_stochastic` 及 migration prepare 的
+  `launch.arg` 顺序与各自 CUDA 内核签名逐一核对一致（`n_ztypes, continuous, new_adult_age, ...`）。
+- **CPU 不变性**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；
+  `phase0` bit-identical。
+
+### 37.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | **168 passed, 0 failed**（含 3 个连续分布用例 + 会话接线） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2131/2180 = 97.75%**；逐文件均 ≥95%（executor 97.3%、kernels 98.1%、probe 96.1%，其余 100%） |
+
+### 37.4 非阻塞发现（低）
+
+- **连续采样阈值与 host `EPS` 不一致**：设备 `sample_continuous_binomial` 用 `1e-12`（host `p<=EPS/>=1-EPS`、
+  `n<=1+EPS`，`EPS=1e-10`）、`natal_continuous_multinomial` 小 n 用 `1+1e-7` 且 `alpha<=1e-12`
+  （host 为 `1+EPS`、`alpha<=EPS`）、`sample_continuous_poisson` 用 `1e-12`（host `lambda<=EPS`）。
+  在 `(1e-12,1e-10]` / `n∈(1+1e-10,1+1e-7]` 等窗口内与 host 分支不同，但差异量级极小（结果≈0 或差 O(1/n)），
+  实测端到端均值/方差一致。建议为一致性与可维护性统一到 `EPS=1e-10`（与离散路径第 1 轮修复口径一致）。
+- 设备 `sample_gamma` 对任意大 shape 均用 Marsaglia-Tsang，而 host 在 `shape>=1e8` 用 Normal 近似；
+  CLT 下分布等价，可忽略。
+- `stochastic_grid` 固定 64 线程块为资源约束下的取值，未做占用率调优（仅性能）。
+
+### 37.5 结论
+
+连续抽样设备支持正确、与 host 统计等价、无回归，质量门禁与覆盖率达标。**APPROVED**（范围为当前 HEAD
+`2308114` 与被审测试集；不声称任何历史基线失败消失）。

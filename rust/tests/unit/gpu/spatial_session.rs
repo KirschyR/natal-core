@@ -255,19 +255,6 @@ fn spatial_device_branch_matches_cpu_and_covers_wiring() {
 
 #[test]
 fn spatial_enable_gpu_rejects_ineligible_models() {
-    let (blueprint, ecology, genetics) = fixture();
-
-    let discrete = make_session(
-        blueprint.clone(),
-        ecology.clone(),
-        vec![genetics.clone()],
-        vec![0, 0, 0],
-        false,
-        true,
-    );
-    let mut discrete = discrete;
-    assert!(discrete.enable_gpu().is_err(), "discrete must reject");
-
     let (blueprint, mut ecology, genetics) = fixture();
     ecology.growth_mode[0] = 5;
     let mut custom = make_session(
@@ -720,6 +707,213 @@ fn spatial_enable_gpu_accepts_continuous_sampling() {
     assert_eq!(session.gpu_status(), "enabled");
     session.run_steps(1, 0).expect("continuous device tick");
     assert_eq!(session.state_tick, 1);
+    assert!(session.state_ind.iter().all(|value| value.is_finite()));
+    assert!(session.state_sperm.iter().all(|value| value.is_finite()));
+}
+
+/// Deterministic 3-deme discrete-generation (two-age) fixture.
+///
+/// ## Returns
+/// `(blueprint, ecology, genetics)`.
+fn discrete_fixture() -> (Blueprint, EcologyParams, GeneticsTensors) {
+    let n_demes = 3usize;
+    let n_ages = 2usize;
+    let z = 2usize;
+    let blueprint = Blueprint {
+        n_sexes: 2,
+        n_ages,
+        n_ztypes: z,
+        n_gtypes: z,
+        n_glabs: 1,
+        new_adult_age: 1,
+        adult_ages: vec![1],
+        stochastic: false,
+        continuous_sampling: false,
+        fixed_egg_count: false,
+        has_sex_chromosomes: false,
+        extreme_speed_mode: 0,
+        ztype_names: (0..z).map(|i| format!("z{i}")).collect(),
+        gtype_names: (0..z).map(|i| format!("g{i}")).collect(),
+        female_only_by_sex_chrom: vec![false; z],
+        male_only_by_sex_chrom: vec![false; z],
+        initial_individual_count: vec![],
+        initial_sperm_storage: vec![],
+        n_demes,
+        migration_indptr: vec![0, 2, 4, 6],
+        migration_dest_idx: vec![1, 2, 0, 2, 0, 1],
+        migration_weights: vec![0.5; 6],
+    };
+    let tile = |values: &[f64]| -> Vec<f64> {
+        (0..n_demes).flat_map(|_| values.iter().copied()).collect()
+    };
+    let ecology = EcologyParams {
+        n_demes,
+        carrying_capacity: vec![500.0; n_demes],
+        eggs_per_female: vec![10.0; n_demes],
+        sex_ratio: vec![0.5; n_demes],
+        sperm_displacement_rate: vec![0.0; n_demes],
+        low_density_growth_rate: vec![3.0; n_demes],
+        growth_mode: vec![2; n_demes],
+        external_expected_eggs: vec![-1.0; n_demes],
+        survival_rates: tile(&[0.9, 0.8, 0.85, 0.75]),
+        mating_rates: tile(&[0.0, 0.9, 0.0, 0.9]),
+        reproduction_rates: tile(&[0.0, 0.8]),
+        fertility: tile(&[0.0, 1.0]),
+        competition_weights: tile(&[1.0, 0.8]),
+        equilibrium_distribution: vec![],
+        equilibrium_declared: vec![false; n_demes],
+        migration_rate: tile(&[0.1, 0.2, 0.1, 0.15]),
+        custom_slots: vec![HashMap::new(); n_demes],
+    };
+    let mut sexual_selection = vec![0.0; z * z];
+    for g in 0..z {
+        sexual_selection[g * z + g] = 1.0;
+    }
+    let mut offspring = vec![0.0; z * z * z];
+    for gf in 0..z {
+        for gm in 0..z {
+            offspring[(gf * z + gm) * z + (gf + gm) % z] = 1.0;
+        }
+    }
+    let genetics = GeneticsTensors {
+        viability_fitness: vec![1.0; 2 * n_ages * z],
+        fecundity_fitness: vec![1.0; 2 * z],
+        sexual_selection_fitness: sexual_selection,
+        zygote_viability_fitness: vec![1.0; 2 * z],
+        offspring_tensor: offspring,
+        meiosis_map: vec![0.0; 2 * z * z],
+        female_ztype_compatibility: vec![0.5; z],
+        male_ztype_compatibility: vec![0.5; z],
+    };
+    (blueprint, ecology, genetics)
+}
+
+/// Non-trivial two-age stacked state for 3 demes.
+///
+/// ## Returns
+/// `(individual_counts, sperm_storage)`; the sperm plane stays zero (discrete).
+fn discrete_initial_state() -> (Vec<f64>, Vec<f64>) {
+    let n_demes = 3usize;
+    let n_ages = 2usize;
+    let z = 2usize;
+    let mut ind = vec![0.0f64; n_demes * 2 * n_ages * z];
+    for deme in 0..n_demes {
+        for sex in 0..2 {
+            for age in 0..n_ages {
+                for g in 0..z {
+                    ind[deme * 2 * n_ages * z + (sex * n_ages + age) * z + g] =
+                        ((deme + sex + age + g + 1) * 5) as f64;
+                }
+            }
+        }
+    }
+    let sperm = vec![0.0f64; n_demes * n_ages * z * z];
+    (ind, sperm)
+}
+
+/// Build a spatial session holding the discrete two-age fixture state.
+fn make_discrete_session(
+    blueprint: Blueprint,
+    ecology: EcologyParams,
+    variants: Vec<GeneticsTensors>,
+    deme_variants: Vec<usize>,
+    stay_after_send: bool,
+    discrete: bool,
+) -> SpatialSession {
+    let (ind, sperm) = discrete_initial_state();
+    let seed = 0u64;
+    SpatialSession {
+        blueprint,
+        ecology,
+        variants,
+        deme_variants: deme_variants.clone(),
+        hooks: HookProgram::default(),
+        seed,
+        rngs: (0..deme_variants.len())
+            .map(|deme| new_rng(stream_seed(seed, deme as i64)))
+            .collect(),
+        state_ind: ind,
+        state_sperm: sperm,
+        state_tick: 0,
+        execution: ExecutionStatus::Ready,
+        phase: 0,
+        discrete,
+        stay_after_send,
+        eco_journal: Vec::new(),
+        checkpoints: Vec::<SpatialTickCheckpoint>::new(),
+        history_store: None,
+        gpu: None,
+    }
+}
+
+#[test]
+fn spatial_discrete_device_tick_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = discrete_fixture();
+    let mut gpu = make_discrete_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        true,
+    );
+    gpu.enable_gpu().expect("enable discrete spatial gpu");
+    assert_eq!(gpu.gpu_status(), "enabled");
+    for _ in 0..3 {
+        gpu.run_inner().expect("device discrete tick");
+    }
+    gpu.sync_gpu_state().expect("sync");
+
+    let mut cpu = make_discrete_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        true,
+    );
+    for _ in 0..3 {
+        cpu.run_inner().expect("cpu discrete tick");
+    }
+    assert_eq!(gpu.state_tick, cpu.state_tick);
+    for (index, (got, want)) in gpu.state_ind.iter().zip(cpu.state_ind.iter()).enumerate() {
+        let got = *got as f32;
+        let want = *want as f32;
+        let tolerance = 1.0e-4f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "discrete ind[{index}]: device {got} vs host {want}"
+        );
+    }
+}
+
+#[test]
+fn spatial_discrete_stochastic_device_tick_runs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (mut blueprint, ecology, genetics) = discrete_fixture();
+    blueprint.stochastic = true;
+    let mut session = make_discrete_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        true,
+    );
+    session
+        .enable_gpu()
+        .expect("enable stochastic discrete spatial gpu");
+    session
+        .run_steps(2, 0)
+        .expect("device stochastic discrete tick");
+    assert_eq!(session.state_tick, 2);
     assert!(session.state_ind.iter().all(|value| value.is_finite()));
     assert!(session.state_sperm.iter().all(|value| value.is_finite()));
 }

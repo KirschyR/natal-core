@@ -7,6 +7,9 @@ use crate::gpu::context::GpuContext;
 use crate::gpu::hardware_required;
 use crate::kernels::age_structured::{aging, reproduction, survival};
 use crate::kernels::density_regulation::regulation_scaling;
+use crate::kernels::discrete_generation::{
+    reproduction as discrete_reproduction, survival as discrete_survival,
+};
 use crate::kernels::equilibrium::equilibrium_metrics;
 use crate::kernels::rng::new_rng;
 use crate::kernels::spatial::migrate_csr_deterministic;
@@ -2916,4 +2919,211 @@ fn device_ensemble_matches_independent_cpu_runs() {
 /// The tiled column.
 fn tile_i64(values: &[i64], n: usize) -> Vec<i64> {
     (0..n).flat_map(|_| values.iter().copied()).collect()
+}
+
+// ---------------------------------------------------------------------------
+// Discrete-generation (two-age) device statistical checks.
+// ---------------------------------------------------------------------------
+
+/// Tiled two-age discrete ecology for a distribution test.
+fn discrete_ecology(n_batch: usize) -> EcologyParams {
+    let tile = |values: &[f64]| -> Vec<f64> {
+        (0..n_batch).flat_map(|_| values.iter().copied()).collect()
+    };
+    EcologyParams {
+        n_demes: n_batch,
+        carrying_capacity: vec![500.0; n_batch],
+        eggs_per_female: vec![10.0; n_batch],
+        sex_ratio: vec![0.5; n_batch],
+        sperm_displacement_rate: vec![0.0; n_batch],
+        low_density_growth_rate: vec![3.0; n_batch],
+        growth_mode: vec![2; n_batch],
+        external_expected_eggs: vec![-1.0; n_batch],
+        survival_rates: tile(&[0.9, 0.8, 0.85, 0.75]),
+        mating_rates: tile(&[0.0, 0.9, 0.0, 0.9]),
+        reproduction_rates: tile(&[0.0, 0.8]),
+        fertility: tile(&[0.0, 1.0]),
+        competition_weights: tile(&[1.0, 0.8]),
+        equilibrium_distribution: vec![],
+        equilibrium_declared: vec![false; n_batch],
+        migration_rate: vec![],
+        custom_slots: vec![HashMap::new(); n_batch],
+    }
+}
+
+/// Truncate a tiled discrete ecology to one deme.
+fn discrete_one_ecology(ecology: &EcologyParams) -> EcologyParams {
+    let mut one = ecology.clone();
+    one.n_demes = 1;
+    one.carrying_capacity.truncate(1);
+    one.eggs_per_female.truncate(1);
+    one.sex_ratio.truncate(1);
+    one.sperm_displacement_rate.truncate(1);
+    one.low_density_growth_rate.truncate(1);
+    one.growth_mode.truncate(1);
+    one.external_expected_eggs.truncate(1);
+    one.equilibrium_declared.truncate(1);
+    one.survival_rates.truncate(4);
+    one.mating_rates.truncate(4);
+    one.reproduction_rates.truncate(2);
+    one.fertility.truncate(2);
+    one.competition_weights.truncate(2);
+    one.custom_slots.truncate(1);
+    one
+}
+
+/// Compare one device discrete reproduction run against the host distribution.
+fn discrete_reproduction_case(continuous: bool) {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 2000usize;
+    let n_ages = 2usize;
+    let z = 2usize;
+    let mut blueprint = dimension_blueprint(n_ages, z);
+    blueprint.stochastic = true;
+    blueprint.continuous_sampling = continuous;
+    blueprint.n_demes = n_batch;
+    blueprint.migration_indptr = vec![0; n_batch + 1];
+    let ecology = discrete_ecology(n_batch);
+    let one_ecology = discrete_one_ecology(&ecology);
+    let genetics = reproduction_genetics(n_ages, z);
+    let variants = vec![genetics.clone()];
+
+    let ind_stride = 2 * n_ages * z;
+    let mut one_ind = vec![0.0f64; ind_stride];
+    for sex in 0..2 {
+        for zz in 0..z {
+            one_ind[(sex * n_ages + 1) * z + zz] = 100.0;
+        }
+    }
+    let ind_host: Vec<f32> = (0..n_batch)
+        .flat_map(|_| one_ind.iter().copied())
+        .map(|v| v as f32)
+        .collect();
+    let sperm_host = vec![0.0f32; n_batch * n_ages * z * z];
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, n_batch, n_ages, z, &ind_host, &sperm_host).expect("executor");
+    executor.set_seed(0x1111_2222_3333_4444);
+    executor
+        .discrete_reproduction_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect("device discrete reproduction");
+    let device = executor.download_ind().expect("download");
+
+    let mut sum = vec![0.0f64; ind_stride];
+    let mut sq = vec![0.0f64; ind_stride];
+    for trial in 0..n_batch {
+        let mut rng = new_rng(90_000 + trial as u64);
+        let mut ind = one_ind.clone();
+        discrete_reproduction(&mut rng, &blueprint, &one_ecology, &genetics, 0, &mut ind);
+        for (slot, value) in ind.iter().enumerate() {
+            sum[slot] += value;
+            sq[slot] += value * value;
+        }
+    }
+    let trials = n_batch as f64;
+    for slot in 0..ind_stride {
+        let cpu_mean = sum[slot] / trials;
+        let cpu_var = (sq[slot] / trials - cpu_mean * cpu_mean).max(0.0);
+        let device_mean = (0..n_batch)
+            .map(|b| device[b * ind_stride + slot] as f64)
+            .sum::<f64>()
+            / trials;
+        let tolerance = 5.0 * (cpu_var / trials).sqrt() + 0.5;
+        assert!(
+            (device_mean - cpu_mean).abs() <= tolerance,
+            "continuous={continuous} discrete repro slot {slot}: device {device_mean} vs host {cpu_mean} (tol {tolerance})"
+        );
+    }
+}
+
+#[test]
+fn device_discrete_reproduction_matches_host_distribution() {
+    discrete_reproduction_case(false);
+}
+
+#[test]
+fn device_discrete_reproduction_continuous_matches_host_distribution() {
+    discrete_reproduction_case(true);
+}
+
+/// Compare one device discrete survival run against the host distribution.
+fn discrete_survival_case(continuous: bool) {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 2000usize;
+    let n_ages = 2usize;
+    let z = 2usize;
+    let mut blueprint = dimension_blueprint(n_ages, z);
+    blueprint.stochastic = true;
+    blueprint.continuous_sampling = continuous;
+    blueprint.n_demes = n_batch;
+    blueprint.migration_indptr = vec![0; n_batch + 1];
+    let ecology = discrete_ecology(n_batch);
+    let one_ecology = discrete_one_ecology(&ecology);
+    let genetics = reproduction_genetics(n_ages, z);
+    let variants = vec![genetics.clone()];
+
+    let ind_stride = 2 * n_ages * z;
+    let mut one_ind = vec![0.0f64; ind_stride];
+    for sex in 0..2 {
+        for zz in 0..z {
+            one_ind[(sex * n_ages) * z + zz] = 100.0;
+        }
+    }
+    let ind_host: Vec<f32> = (0..n_batch)
+        .flat_map(|_| one_ind.iter().copied())
+        .map(|v| v as f32)
+        .collect();
+    let sperm_host = vec![0.0f32; n_batch * n_ages * z * z];
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, n_batch, n_ages, z, &ind_host, &sperm_host).expect("executor");
+    executor.set_seed(0x9999_8888_7777_6666);
+    executor
+        .discrete_survival_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect("device discrete survival");
+    let device = executor.download_ind().expect("download");
+
+    let mut sum = vec![0.0f64; ind_stride];
+    let mut sq = vec![0.0f64; ind_stride];
+    for trial in 0..n_batch {
+        let mut rng = new_rng(130_000 + trial as u64);
+        let mut ind = one_ind.clone();
+        discrete_survival(&mut rng, &blueprint, &one_ecology, &genetics, 0, &mut ind);
+        for (slot, value) in ind.iter().enumerate() {
+            sum[slot] += value;
+            sq[slot] += value * value;
+        }
+    }
+    let trials = n_batch as f64;
+    for slot in 0..ind_stride {
+        let cpu_mean = sum[slot] / trials;
+        let cpu_var = (sq[slot] / trials - cpu_mean * cpu_mean).max(0.0);
+        let device_mean = (0..n_batch)
+            .map(|b| device[b * ind_stride + slot] as f64)
+            .sum::<f64>()
+            / trials;
+        let tolerance = 5.0 * (cpu_var / trials).sqrt() + 0.5;
+        assert!(
+            (device_mean - cpu_mean).abs() <= tolerance,
+            "continuous={continuous} discrete survival slot {slot}: device {device_mean} vs host {cpu_mean} (tol {tolerance})"
+        );
+    }
+}
+
+#[test]
+fn device_discrete_survival_matches_host_distribution() {
+    discrete_survival_case(false);
+}
+
+#[test]
+fn device_discrete_survival_continuous_matches_host_distribution() {
+    discrete_survival_case(true);
 }

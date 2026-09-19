@@ -411,7 +411,7 @@ fn stochastic_launchers_short_circuit_or_reject() {
     let mut scratch_sperm = stream.alloc_zeros::<f32>(0).expect("alloc");
 
     assert!(kernels
-        .recruit_stochastic(&stream, &mut scratch_ind, &zero_f, 0, 4, 2, 1, 2, 3)
+        .recruit_stochastic(&stream, &mut scratch_ind, &zero_f, 0, 4, 2, false, 1, 2, 3)
         .is_ok());
     assert!(kernels
         .survival_stochastic(
@@ -424,6 +424,7 @@ fn stochastic_launchers_short_circuit_or_reject() {
             4,
             2,
             1,
+            false,
             1,
             2,
             3,
@@ -467,6 +468,7 @@ fn stochastic_launchers_short_circuit_or_reject() {
             1,
             false,
             false,
+            false,
             1,
             2,
             3,
@@ -482,6 +484,7 @@ fn stochastic_launchers_short_circuit_or_reject() {
             4,
             33,
             1,
+            false,
             false,
             false,
             1,

@@ -354,11 +354,6 @@ impl SpatialSession {
                 "GPU path currently supports age-structured spatial models only",
             ));
         }
-        if self.blueprint.continuous_sampling {
-            return Err(PyValueError::new_err(
-                "GPU path requires continuous_sampling=false",
-            ));
-        }
         if self.hooks.n_hooks != 0
             || self
                 .hooks

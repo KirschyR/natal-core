@@ -210,14 +210,6 @@ fn session_enable_gpu_rejects_ineligible_models() {
         let (ind, sperm) = initial_state();
 
         let (mut blueprint, params, genetics) = fixture();
-        blueprint.continuous_sampling = true;
-        let mut continuous = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
-        assert!(
-            continuous.enable_gpu().is_err(),
-            "continuous sampling must reject"
-        );
-
-        let (mut blueprint, params, genetics) = fixture();
         blueprint.n_demes = 2;
         let mut spatial = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
         assert!(spatial.enable_gpu().is_err(), "spatial must reject");
@@ -274,13 +266,37 @@ fn session_gpu_ensemble_runs_and_covers_wiring() {
 
 #[test]
 fn session_gpu_ensemble_rejects_ineligible() {
-    let (mut blueprint, params, genetics) = fixture();
-    blueprint.continuous_sampling = true;
-    let (ind, sperm) = initial_state();
-    let mut continuous = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
-    assert!(continuous.enable_gpu_ensemble(4).is_err());
-
     let (blueprint, params, genetics) = fixture();
+    let (ind, sperm) = initial_state();
     let mut session = make_session(blueprint, params, genetics, ind, sperm);
     assert!(session.enable_gpu_ensemble(0).is_err());
+}
+
+#[test]
+fn session_accepts_continuous_sampling() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|_py| {
+        let (mut blueprint, params, genetics) = fixture();
+        blueprint.stochastic = true;
+        blueprint.continuous_sampling = true;
+        let (ind, sperm) = initial_state();
+
+        let mut session = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        session
+            .enable_gpu()
+            .expect("continuous sampling must be accepted");
+        assert_eq!(session.gpu_status(), "enabled");
+
+        let mut ensemble = make_session(blueprint, params, genetics, ind, sperm);
+        ensemble
+            .enable_gpu_ensemble(4)
+            .expect("continuous ensemble must be accepted");
+        assert_eq!(ensemble.gpu_status(), "enabled");
+    });
 }

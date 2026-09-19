@@ -53,6 +53,20 @@ const MAX_Z: usize = 32;
 /// supports; the prepare kernel uses fixed `MAX_Z`-sized row arrays.
 pub const MAX_CSR_ROW: usize = MAX_Z;
 
+/// Bounded 1-D launch for the stochastic sampling kernels.
+///
+/// The continuous branches inline gamma-based samplers, so their unrolled
+/// local arrays raise register use above what a 1024-thread block can schedule
+/// ("too many resources requested for launch"). A 64-thread block keeps the
+/// register budget valid; these kernels are memory-bound, not occupancy-bound.
+fn stochastic_grid(n: usize) -> LaunchConfig {
+    LaunchConfig {
+        grid_dim: ((n as u32).div_ceil(64), 1, 1),
+        block_dim: (64, 1, 1),
+        shared_mem_bytes: 0,
+    }
+}
+
 /// CUDA C for the density-regulation scaling kernel.
 ///
 /// One thread per batch element evaluates the equilibrium metrics and the
@@ -885,14 +899,18 @@ __device__ __forceinline__ float sample_poisson(RngState* state, float lambda) {
     }
 }
 
-// Marsaglia-Tsang gamma sampler.
+// Marsaglia-Tsang gamma sampler. The shape < 1 boost is applied iteratively
+// (rather than by recursive self-call) so the large reproduction kernel does
+// not overflow the device call stack.
 __device__ float sample_gamma(RngState* state, float shape, float scale) {
+    float boost = 1.0f;
     if (shape < 1.0f) {
         float u = rng_uniform(state);
         if (u <= 0.0f) {
             u = 1e-7f;
         }
-        return sample_gamma(state, shape + 1.0f, scale) * powf(u, 1.0f / shape);
+        boost = powf(u, 1.0f / shape);
+        shape = shape + 1.0f;
     }
     float d = shape - 1.0f / 3.0f;
     float c = 1.0f / sqrtf(9.0f * d);
@@ -905,10 +923,89 @@ __device__ float sample_gamma(RngState* state, float shape, float scale) {
         v = v * v * v;
         float u = rng_uniform(state);
         if (u < 1.0f - 0.0331f * x * x * x * x) {
-            return d * v * scale;
+            return d * v * scale * boost;
         }
         if (logf(u) < 0.5f * x * x + d * (1.0f - v + logf(v))) {
-            return d * v * scale;
+            return d * v * scale * boost;
+        }
+    }
+}
+
+// Continuous binomial analogue: Beta(n-1) proportion times n.
+__device__ __forceinline__ float sample_continuous_binomial(
+    RngState* state, float n, float p)
+{
+    // Mirrors `continuous_binomial`: a Beta-distributed proportion times n,
+    // with the small-n mean path matching the host guards.
+    if (!isfinite(n) || !isfinite(p)) {
+        return 0.0f;
+    }
+    if (p <= 1e-12f) {
+        return 0.0f;
+    }
+    if (p >= 1.0f - 1e-12f) {
+        return n;
+    }
+    if (n <= 1.0f + 1e-12f) {
+        return n * p;
+    }
+    float concentration = n - 1.0f;
+    float alpha = fmaxf(p * concentration, 1e-12f);
+    float beta = fmaxf((1.0f - p) * concentration, 1e-12f);
+    float numerator = sample_gamma(state, alpha, 1.0f);
+    float denominator = sample_gamma(state, beta, 1.0f);
+    if (numerator == 0.0f) {
+        return 0.0f;
+    }
+    return (numerator / (numerator + denominator)) * n;
+}
+
+// Continuous Poisson analogue: a Gamma(shape=lambda, scale=1) draw.
+__device__ __forceinline__ float sample_continuous_poisson(RngState* state, float lambda)
+{
+    if (!isfinite(lambda) || lambda <= 1e-12f) {
+        return 0.0f;
+    }
+    return sample_gamma(state, lambda, 1.0f);
+}
+
+// Continuous multinomial: normalized Gamma draws with a drift correction.
+__device__ __forceinline__ void natal_continuous_multinomial(
+    RngState* state, float n, const float* p, int K, float* out)
+{
+    if (n <= 1.0f + 1e-7f) {
+        for (int k = 0; k < K; ++k) {
+            out[k] = n * p[k];
+        }
+        return;
+    }
+    float concentration = n - 1.0f;
+    float sum_gamma = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        float alpha = p[k] * concentration;
+        float value = (alpha <= 1e-12f) ? 0.0f : sample_gamma(state, alpha, 1.0f);
+        out[k] = value;
+        sum_gamma += value;
+    }
+    if (sum_gamma > 1e-12f) {
+        float factor = n / sum_gamma;
+        for (int k = 0; k < K; ++k) {
+            out[k] *= factor;
+        }
+    } else {
+        for (int k = 0; k < K; ++k) {
+            out[k] = n * p[k];
+        }
+    }
+    float total = 0.0f;
+    for (int k = 0; k < K; ++k) {
+        total += out[k];
+    }
+    float tolerance = 1e-6f * fmaxf(n, 1.0f);
+    if (total > 1e-12f && fabsf(total - n) > tolerance) {
+        float correction = n / total;
+        for (int k = 0; k < K; ++k) {
+            out[k] *= correction;
         }
     }
 }
@@ -1008,13 +1105,14 @@ __device__ __forceinline__ float natal_clamp01(float x) {
 }
 
 // Stochastic recruit: resample the age-0 categories into `desired` draws with
-// the discrete multinomial, matching `recruit_juveniles` (stochastic,
-// continuous_sampling=false). One thread per batch element.
+// the multinomial (discrete or continuous, matching `recruit_juveniles`). One
+// thread per batch element.
 extern "C" __global__ void recruit_stochastic(
     float* ind,
     int n_batch,
     int n_ages,
     int n_ztypes,
+    int continuous,
     const float* scaling,
     unsigned int key0,
     unsigned int key1,
@@ -1032,7 +1130,8 @@ extern "C" __global__ void recruit_stochastic(
     int cursor = 0;
     for (int sex = 0; sex < 2; ++sex) {
         for (int z = 0; z < Z; ++z) {
-            float value = roundf(ind[((sex * A + 0) * Z + z) * n_batch + b]);
+            float raw = ind[((sex * A + 0) * Z + z) * n_batch + b];
+            float value = continuous ? raw : roundf(raw);
             combined[cursor++] = value;
             if (sex == 0) {
                 female_sum += value;
@@ -1046,7 +1145,10 @@ extern "C" __global__ void recruit_stochastic(
     for (int i = 0; i < 2 * Z; ++i) {
         total_counts += combined[i];
     }
-    float desired = total > 0.0f ? roundf(total * scaling[b]) : 0.0f;
+    float desired = 0.0f;
+    if (total > 0.0f) {
+        desired = continuous ? (total * scaling[b]) : roundf(total * scaling[b]);
+    }
     if (total <= 0.0f || desired <= 0.0f) {
         for (int sex = 0; sex < 2; ++sex) {
             for (int z = 0; z < Z; ++z) {
@@ -1057,29 +1159,37 @@ extern "C" __global__ void recruit_stochastic(
     }
     RngState state;
     rng_init(&state, (unsigned long long)b, key0, key1, site);
-    float remaining = desired;
-    float tail = total_counts;
     float draws[2 * NATAL_MAX_Z];
-    for (int k = 0; k < 2 * Z - 1; ++k) {
-        float draw = 0.0f;
-        if (remaining > 0.0f && tail > 0.0f) {
-            float conditional = natal_clamp01(combined[k] / tail);
-            draw = sample_binomial(&state, remaining, conditional);
-            if (draw > remaining) {
-                draw = remaining;
+    if (continuous) {
+        float probs[2 * NATAL_MAX_Z];
+        for (int k = 0; k < 2 * Z; ++k) {
+            probs[k] = combined[k] / total_counts;
+        }
+        natal_continuous_multinomial(&state, desired, probs, 2 * Z, draws);
+    } else {
+        float remaining = desired;
+        float tail = total_counts;
+        for (int k = 0; k < 2 * Z - 1; ++k) {
+            float draw = 0.0f;
+            if (remaining > 0.0f && tail > 0.0f) {
+                float conditional = natal_clamp01(combined[k] / tail);
+                draw = sample_binomial(&state, remaining, conditional);
+                if (draw > remaining) {
+                    draw = remaining;
+                }
+            }
+            draws[k] = draw;
+            remaining -= draw;
+            tail -= combined[k];
+            if (remaining < 0.0f) {
+                remaining = 0.0f;
+            }
+            if (tail < 0.0f) {
+                tail = 0.0f;
             }
         }
-        draws[k] = draw;
-        remaining -= draw;
-        tail -= combined[k];
-        if (remaining < 0.0f) {
-            remaining = 0.0f;
-        }
-        if (tail < 0.0f) {
-            tail = 0.0f;
-        }
+        draws[2 * Z - 1] = remaining;
     }
-    draws[2 * Z - 1] = remaining;
     cursor = 0;
     for (int sex = 0; sex < 2; ++sex) {
         for (int z = 0; z < Z; ++z) {
@@ -1088,7 +1198,7 @@ extern "C" __global__ void recruit_stochastic(
     }
 }
 
-// Stochastic survival: `sample_survival_with_sperm` (continuous_sampling=false).
+// Stochastic survival: `sample_survival_with_sperm` (discrete or continuous).
 // One thread per (batch, age, zygote-type) owns its female cell, sperm column,
 // and male cell, so there are no cross-thread races.
 extern "C" __global__ void survival_stochastic(
@@ -1097,6 +1207,7 @@ extern "C" __global__ void survival_stochastic(
     int n_batch,
     int n_ages,
     int n_ztypes,
+    int continuous,
     int new_adult_age,
     const float* survival_rates,
     const float* viability,
@@ -1135,20 +1246,33 @@ extern "C" __global__ void survival_stochastic(
     if (virgins < 0.0f) {
         virgins = 0.0f;
     }
-    float n_virgins = roundf(virgins);
+    float n_virgins = continuous ? virgins : roundf(virgins);
     float new_sperm_sum = 0.0f;
     for (int mz = 0; mz < Z; ++mz) {
         int index = ((age * Z + g) * Z + mz) * n_batch + b;
-        float count = roundf(sperm[index]);
-        float survived = (count > 1e-10f) ? sample_binomial(&state, count, p_f) : 0.0f;
+        float count = continuous ? sperm[index] : roundf(sperm[index]);
+        float survived = 0.0f;
+        if (count > 1e-10f) {
+            survived = continuous ? sample_continuous_binomial(&state, count, p_f)
+                                  : sample_binomial(&state, count, p_f);
+        }
         sperm[index] = survived;
         new_sperm_sum += survived;
     }
-    float survived_virgins = (n_virgins > 1e-10f) ? sample_binomial(&state, n_virgins, p_f) : 0.0f;
+    float survived_virgins = 0.0f;
+    if (n_virgins > 1e-10f) {
+        survived_virgins = continuous ? sample_continuous_binomial(&state, n_virgins, p_f)
+                                      : sample_binomial(&state, n_virgins, p_f);
+    }
     ind[((0 * A + age) * Z + g) * n_batch + b] = new_sperm_sum + survived_virgins;
 
-    float n_m = roundf(ind[((1 * A + age) * Z + g) * n_batch + b]);
-    float survived_m = (n_m > 1e-10f) ? sample_binomial(&state, n_m, p_m) : 0.0f;
+    float n_m_raw = ind[((1 * A + age) * Z + g) * n_batch + b];
+    float n_m = continuous ? n_m_raw : roundf(n_m_raw);
+    float survived_m = 0.0f;
+    if (n_m > 1e-10f) {
+        survived_m = continuous ? sample_continuous_binomial(&state, n_m, p_m)
+                                : sample_binomial(&state, n_m, p_m);
+    }
     ind[((1 * A + age) * Z + g) * n_batch + b] = survived_m;
 }
 
@@ -1185,13 +1309,14 @@ __device__ __forceinline__ void natal_multinomial(
 }
 
 // Stochastic reproduction: `sample_mating` + `fertilize` + zygote viability,
-// stochastic (continuous_sampling=false). One thread per batch element.
+// stochastic (discrete or continuous). One thread per batch element.
 extern "C" __global__ void reproduction_stochastic(
     float* ind,
     float* sperm,
     int n_batch,
     int n_ages,
     int n_ztypes,
+    int continuous,
     int new_adult_age,
     int has_sex_chromosomes,
     int fixed_egg_count,
@@ -1274,33 +1399,51 @@ extern "C" __global__ void reproduction_stochastic(
             if (virgins < 0.0f) {
                 virgins = 0.0f;
             }
-            float n_mating_virgins = sample_binomial(&state, roundf(virgins), p_mating);
+            float n_mating_virgins = continuous
+                ? sample_continuous_binomial(&state, virgins, p_mating)
+                : sample_binomial(&state, roundf(virgins), p_mating);
             float p_remating = p_displace * p_mating;
             float n_remating = 0.0f;
             if (mated > 1e-10f && p_remating > 1e-10f) {
-                for (int gm = 0; gm < Z; ++gm) {
-                    int index = ((age * Z + gf) * Z + gm) * n_batch + b;
-                    float count = sperm[index];
-                    if (count > 1e-10f) {
-                        float removed = sample_binomial(&state, roundf(count), p_remating);
-                        float left = sperm[index] - removed;
-                        sperm[index] = left < 0.0f ? 0.0f : left;
-                        n_remating += removed;
+                if (continuous) {
+                    float removed_frac = p_remating < 1.0f ? p_remating : 1.0f;
+                    for (int gm = 0; gm < Z; ++gm) {
+                        int index = ((age * Z + gf) * Z + gm) * n_batch + b;
+                        sperm[index] -= sperm[index] * removed_frac;
+                    }
+                    n_remating = mated * removed_frac;
+                } else {
+                    for (int gm = 0; gm < Z; ++gm) {
+                        int index = ((age * Z + gf) * Z + gm) * n_batch + b;
+                        float count = sperm[index];
+                        if (count > 1e-10f) {
+                            float removed = sample_binomial(&state, roundf(count), p_remating);
+                            float left = sperm[index] - removed;
+                            sperm[index] = left < 0.0f ? 0.0f : left;
+                            n_remating += removed;
+                        }
                     }
                 }
             }
             float n_new = n_mating_virgins + n_remating;
             if (n_new > 1e-10f) {
-                float n_int = roundf(n_new);
-                if (n_int > 0.0f) {
-                    float row[NATAL_MAX_Z];
-                    float drawn[NATAL_MAX_Z];
-                    for (int gm = 0; gm < Z; ++gm) {
-                        row[gm] = mating_prob[gf * Z + gm];
-                    }
-                    natal_multinomial(&state, n_int, row, Z, drawn);
+                float row[NATAL_MAX_Z];
+                float drawn[NATAL_MAX_Z];
+                for (int gm = 0; gm < Z; ++gm) {
+                    row[gm] = mating_prob[gf * Z + gm];
+                }
+                if (continuous) {
+                    natal_continuous_multinomial(&state, n_new, row, Z, drawn);
                     for (int gm = 0; gm < Z; ++gm) {
                         sperm[((age * Z + gf) * Z + gm) * n_batch + b] += drawn[gm];
+                    }
+                } else {
+                    float n_int = roundf(n_new);
+                    if (n_int > 0.0f) {
+                        natal_multinomial(&state, n_int, row, Z, drawn);
+                        for (int gm = 0; gm < Z; ++gm) {
+                            sperm[((age * Z + gf) * Z + gm) * n_batch + b] += drawn[gm];
+                        }
                     }
                 }
             }
@@ -1326,17 +1469,24 @@ extern "C" __global__ void reproduction_stochastic(
                     continue;
                 }
                 float eggs_per_pair = epf * ff[gf] * ff[Z + gm] * ft;
-                float n_pairs_eff = roundf(n_pairs);
+                float n_pairs_eff = continuous ? n_pairs : roundf(n_pairs);
                 if (n_pairs_eff <= 0.0f) {
                     continue;
                 }
-                float n_reproducing = (pr < 1.0f - 1e-10f)
-                    ? sample_binomial(&state, n_pairs_eff, pr)
-                    : n_pairs_eff;
+                float n_reproducing = n_pairs_eff;
+                if (pr < 1.0f - 1e-10f) {
+                    n_reproducing = continuous
+                        ? sample_continuous_binomial(&state, n_pairs_eff, pr)
+                        : sample_binomial(&state, n_pairs_eff, pr);
+                }
                 float total_lambda = n_reproducing * eggs_per_pair;
-                float n_total = fixed_egg_count
-                    ? roundf(total_lambda)
-                    : sample_poisson(&state, total_lambda);
+                float n_total;
+                if (fixed_egg_count) {
+                    n_total = continuous ? total_lambda : roundf(total_lambda);
+                } else {
+                    n_total = continuous ? sample_continuous_poisson(&state, total_lambda)
+                                         : sample_poisson(&state, total_lambda);
+                }
                 if (n_total <= 1e-10f) {
                     continue;
                 }
@@ -1348,9 +1498,12 @@ extern "C" __global__ void reproduction_stochastic(
                 if (p_surv <= 1e-10f) {
                     continue;
                 }
-                float n_viable = (p_surv >= 1.0f - 1e-10f)
-                    ? n_total
-                    : sample_binomial(&state, roundf(n_total), p_surv);
+                float n_viable = n_total;
+                if (p_surv < 1.0f - 1e-10f) {
+                    n_viable = continuous
+                        ? sample_continuous_binomial(&state, n_total, p_surv)
+                        : sample_binomial(&state, roundf(n_total), p_surv);
+                }
                 if (n_viable <= 1e-10f) {
                     continue;
                 }
@@ -1360,7 +1513,11 @@ extern "C" __global__ void reproduction_stochastic(
                 for (int go = 0; go < Z; ++go) {
                     prob_norm[go] = off[go] * inv;
                 }
-                natal_multinomial(&state, roundf(n_viable), prob_norm, Z, drawn);
+                if (continuous) {
+                    natal_continuous_multinomial(&state, n_viable, prob_norm, Z, drawn);
+                } else {
+                    natal_multinomial(&state, roundf(n_viable), prob_norm, Z, drawn);
+                }
                 for (int go = 0; go < Z; ++go) {
                     offspring_acc[go] += drawn[go];
                 }
@@ -1389,27 +1546,34 @@ extern "C" __global__ void reproduction_stochastic(
                 } else {
                     p_f = sr;
                 }
-                float n_fem = sample_binomial(&state, roundf(n_g), p_f);
+                float n_fem = continuous
+                    ? sample_continuous_binomial(&state, n_g, p_f)
+                    : sample_binomial(&state, roundf(n_g), p_f);
                 n_f = n_fem;
                 n_m = n_g - n_fem;
             }
         }
-        float fv = (n_f > 0.0f)
-            ? sample_binomial(&state, roundf(n_f), natal_clamp01(zyg[go]))
-            : 0.0f;
-        float mv = (n_m > 0.0f)
-            ? sample_binomial(&state, roundf(n_m), natal_clamp01(zyg[Z + go]))
-            : 0.0f;
+        float fv = 0.0f;
+        if (n_f > 0.0f) {
+            fv = continuous
+                ? sample_continuous_binomial(&state, n_f, natal_clamp01(zyg[go]))
+                : sample_binomial(&state, roundf(n_f), natal_clamp01(zyg[go]));
+        }
+        float mv = 0.0f;
+        if (n_m > 0.0f) {
+            mv = continuous
+                ? sample_continuous_binomial(&state, n_m, natal_clamp01(zyg[Z + go]))
+                : sample_binomial(&state, roundf(n_m), natal_clamp01(zyg[Z + go]));
+        }
         ind[((0 * A + 0) * Z + go) * n_batch + b] = fv;
         ind[((1 * A + 0) * Z + go) * n_batch + b] = mv;
     }
 }
 
-// Discrete outbound sampling: mirrors `sample_outbound` with
-// continuous_sampling=false. `rate >= 1` moves everything, otherwise a
-// binomial draw on the rounded count.
+// Outbound sampling: mirrors `sample_outbound`. `rate >= 1` moves everything;
+// otherwise a continuous or discrete binomial draw.
 __device__ __forceinline__ float sample_outbound_device(
-    RngState* state, float value, float rate)
+    RngState* state, float value, float rate, int continuous)
 {
     if (value <= 0.0f || rate <= 0.0f) {
         return 0.0f;
@@ -1417,7 +1581,26 @@ __device__ __forceinline__ float sample_outbound_device(
     if (rate >= 1.0f) {
         return value;
     }
-    return sample_binomial(state, roundf(value), rate);
+    return continuous ? sample_continuous_binomial(state, value, rate)
+                      : sample_binomial(state, roundf(value), rate);
+}
+
+// Split an outbound amount across a CSR row's normalized probabilities and
+// return the total moved. The discrete branch rounds to a trial count exactly
+// as the host `distribute_csr_outbound` does.
+__device__ __forceinline__ float migration_split(
+    RngState* state, float outbound, const float* probs, int row_len, int continuous, float* drawn)
+{
+    if (continuous) {
+        natal_continuous_multinomial(state, outbound, probs, row_len, drawn);
+    } else {
+        natal_multinomial(state, roundf(outbound), probs, row_len, drawn);
+    }
+    float moved = 0.0f;
+    for (int pos = 0; pos < row_len; ++pos) {
+        moved += drawn[pos];
+    }
+    return moved;
 }
 
 // Pass 1 of stochastic CSR migration: one thread per source deme computes the
@@ -1439,6 +1622,7 @@ extern "C" __global__ void migration_stochastic_prepare(
     int n_batch,
     int n_ages,
     int n_ztypes,
+    int continuous,
     unsigned int key0,
     unsigned int key1,
     unsigned int site)
@@ -1475,20 +1659,17 @@ extern "C" __global__ void migration_stochastic_prepare(
             if (virgin < 0.0f && fabsf(virgin) < MIG_EPS) {
                 virgin = 0.0f;
             }
-            float outbound = sample_outbound_device(&state, virgin, female_rate);
+            float outbound = sample_outbound_device(&state, virgin, female_rate, continuous);
             float moved_total = 0.0f;
             if (outbound > 0.0f && row_len > 0 && total_w > 0.0f) {
-                float n_int = roundf(outbound);
-                if (n_int > 0.0f) {
-                    for (int pos = 0; pos < row_len; ++pos) {
-                        probs[pos] = weights[row_start + pos] / total_w;
-                    }
-                    natal_multinomial(&state, n_int, probs, row_len, drawn);
-                    for (int pos = 0; pos < row_len; ++pos) {
-                        int e = row_start + pos;
-                        fwd_f[(long long)e * A * Z + age * Z + gf] = drawn[pos];
-                        moved_total += drawn[pos];
-                    }
+                for (int pos = 0; pos < row_len; ++pos) {
+                    probs[pos] = weights[row_start + pos] / total_w;
+                }
+                moved_total =
+                    migration_split(&state, outbound, probs, row_len, continuous, drawn);
+                for (int pos = 0; pos < row_len; ++pos) {
+                    int e = row_start + pos;
+                    fwd_f[(long long)e * A * Z + age * Z + gf] = drawn[pos];
                 }
             } else {
                 for (int pos = 0; pos < row_len; ++pos) {
@@ -1500,20 +1681,17 @@ extern "C" __global__ void migration_stochastic_prepare(
             ind_out[female_index] = female_stay;
             for (int gm = 0; gm < Z; ++gm) {
                 float value = sperm_in[((age * Z + gf) * Z + gm) * n_batch + src];
-                float outbound_sperm = sample_outbound_device(&state, value, female_rate);
+                float outbound_sperm = sample_outbound_device(&state, value, female_rate, continuous);
                 float moved_sperm = 0.0f;
                 if (outbound_sperm > 0.0f && row_len > 0 && total_w > 0.0f) {
-                    float n_int = roundf(outbound_sperm);
-                    if (n_int > 0.0f) {
-                        for (int pos = 0; pos < row_len; ++pos) {
-                            probs[pos] = weights[row_start + pos] / total_w;
-                        }
-                        natal_multinomial(&state, n_int, probs, row_len, drawn);
-                        for (int pos = 0; pos < row_len; ++pos) {
-                            int e = row_start + pos;
-                            fwd_s[((long long)e * A + age) * Z * Z + gf * Z + gm] = drawn[pos];
-                            moved_sperm += drawn[pos];
-                        }
+                    for (int pos = 0; pos < row_len; ++pos) {
+                        probs[pos] = weights[row_start + pos] / total_w;
+                    }
+                    moved_sperm =
+                        migration_split(&state, outbound_sperm, probs, row_len, continuous, drawn);
+                    for (int pos = 0; pos < row_len; ++pos) {
+                        int e = row_start + pos;
+                        fwd_s[((long long)e * A + age) * Z * Z + gf * Z + gm] = drawn[pos];
                     }
                 } else {
                     for (int pos = 0; pos < row_len; ++pos) {
@@ -1531,20 +1709,17 @@ extern "C" __global__ void migration_stochastic_prepare(
         float male_rate = rate[src * 2 * A + A + age];
         for (int z = 0; z < Z; ++z) {
             float value = ind_in[((1 * A + age) * Z + z) * n_batch + src];
-            float outbound = sample_outbound_device(&state, value, male_rate);
+            float outbound = sample_outbound_device(&state, value, male_rate, continuous);
             float moved_total = 0.0f;
             if (outbound > 0.0f && row_len > 0 && total_w > 0.0f) {
-                float n_int = roundf(outbound);
-                if (n_int > 0.0f) {
-                    for (int pos = 0; pos < row_len; ++pos) {
-                        probs[pos] = weights[row_start + pos] / total_w;
-                    }
-                    natal_multinomial(&state, n_int, probs, row_len, drawn);
-                    for (int pos = 0; pos < row_len; ++pos) {
-                        int e = row_start + pos;
-                        fwd_m[(long long)e * A * Z + age * Z + z] = drawn[pos];
-                        moved_total += drawn[pos];
-                    }
+                for (int pos = 0; pos < row_len; ++pos) {
+                    probs[pos] = weights[row_start + pos] / total_w;
+                }
+                moved_total =
+                    migration_split(&state, outbound, probs, row_len, continuous, drawn);
+                for (int pos = 0; pos < row_len; ++pos) {
+                    int e = row_start + pos;
+                    fwd_m[(long long)e * A * Z + age * Z + z] = drawn[pos];
                 }
             } else {
                 for (int pos = 0; pos < row_len; ++pos) {
@@ -2528,6 +2703,7 @@ impl Kernels {
         n_batch: usize,
         n_ages: usize,
         n_ztypes: usize,
+        continuous: bool,
         key0: u32,
         key1: u32,
         site: u32,
@@ -2543,12 +2719,14 @@ impl Kernels {
         let n_batch_i = n_batch as i32;
         let n_ages_i = n_ages as i32;
         let n_ztypes_i = n_ztypes as i32;
-        let config = LaunchConfig::for_num_elems(n_batch as u32);
+        let continuous_i = i32::from(continuous);
+        let config = stochastic_grid(n_batch);
         let mut launch = stream.launch_builder(&self.recruit_stochastic);
         launch.arg(&mut *ind);
         launch.arg(&n_batch_i);
         launch.arg(&n_ages_i);
         launch.arg(&n_ztypes_i);
+        launch.arg(&continuous_i);
         launch.arg(scaling);
         launch.arg(&key0);
         launch.arg(&key1);
@@ -2574,6 +2752,7 @@ impl Kernels {
         n_ages: usize,
         n_ztypes: usize,
         new_adult_age: usize,
+        continuous: bool,
         key0: u32,
         key1: u32,
         site: u32,
@@ -2586,13 +2765,15 @@ impl Kernels {
         let n_ages_i = n_ages as i32;
         let n_ztypes_i = n_ztypes as i32;
         let new_adult_i = new_adult_age as i32;
-        let config = LaunchConfig::for_num_elems(cells as u32);
+        let continuous_i = i32::from(continuous);
+        let config = stochastic_grid(cells);
         let mut launch = stream.launch_builder(&self.survival_stochastic);
         launch.arg(&mut *ind);
         launch.arg(&mut *sperm);
         launch.arg(&n_batch_i);
         launch.arg(&n_ages_i);
         launch.arg(&n_ztypes_i);
+        launch.arg(&continuous_i);
         launch.arg(&new_adult_i);
         launch.arg(survival_rates);
         launch.arg(viability);
@@ -2621,6 +2802,7 @@ impl Kernels {
         new_adult_age: usize,
         has_sex_chromosomes: bool,
         fixed_egg_count: bool,
+        continuous: bool,
         key0: u32,
         key1: u32,
         site: u32,
@@ -2639,6 +2821,7 @@ impl Kernels {
         let new_adult_i = new_adult_age as i32;
         let sex_chrom_i = i32::from(has_sex_chromosomes);
         let fixed_eggs_i = i32::from(fixed_egg_count);
+        let continuous_i = i32::from(continuous);
         let config = LaunchConfig {
             grid_dim: ((n_batch as u32).div_ceil(64), 1, 1),
             block_dim: (64, 1, 1),
@@ -2650,6 +2833,7 @@ impl Kernels {
         launch.arg(&n_batch_i);
         launch.arg(&n_ages_i);
         launch.arg(&n_ztypes_i);
+        launch.arg(&continuous_i);
         launch.arg(&new_adult_i);
         launch.arg(&sex_chrom_i);
         launch.arg(&fixed_eggs_i);
@@ -2716,6 +2900,7 @@ impl Kernels {
         n_batch: usize,
         n_ages: usize,
         n_ztypes: usize,
+        continuous: bool,
         key0: u32,
         key1: u32,
         site: u32,
@@ -2731,8 +2916,9 @@ impl Kernels {
         let n_batch_i = n_batch as i32;
         let n_ages_i = n_ages as i32;
         let n_ztypes_i = n_ztypes as i32;
+        let continuous_i = i32::from(continuous);
         let cells = n_batch * n_ages * n_ztypes;
-        let grid_batch = LaunchConfig::for_num_elems(n_batch as u32);
+        let grid_batch = stochastic_grid(n_batch);
         let grid_cells = LaunchConfig::for_num_elems(cells as u32);
         let grid_sperm = LaunchConfig::for_num_elems((cells * n_ztypes) as u32);
 
@@ -2751,6 +2937,7 @@ impl Kernels {
         prepare.arg(&n_batch_i);
         prepare.arg(&n_ages_i);
         prepare.arg(&n_ztypes_i);
+        prepare.arg(&continuous_i);
         prepare.arg(&key0);
         prepare.arg(&key1);
         prepare.arg(&site);

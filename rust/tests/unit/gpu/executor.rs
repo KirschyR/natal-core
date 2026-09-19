@@ -1975,8 +1975,11 @@ fn evaluator_migration_empty_csr_and_overmigration_match_host() {
     }
 }
 
-#[test]
-fn device_stochastic_survival_matches_host_distribution() {
+/// Compare one device stochastic survival run against the host distribution.
+///
+/// ## Parameters
+/// - `continuous`: Whether to exercise the continuous-sampling branches.
+fn survival_distribution_case(continuous: bool) {
     if !hardware_required() {
         eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
         return;
@@ -1987,6 +1990,7 @@ fn device_stochastic_survival_matches_host_distribution() {
 
     let mut blueprint = dimension_blueprint(n_ages, z);
     blueprint.stochastic = true;
+    blueprint.continuous_sampling = continuous;
     blueprint.n_demes = n_batch;
     blueprint.migration_indptr = vec![0; n_batch + 1];
 
@@ -2123,7 +2127,21 @@ fn device_stochastic_survival_matches_host_distribution() {
 }
 
 #[test]
-fn device_stochastic_reproduction_matches_host_distribution() {
+fn device_stochastic_survival_matches_host_distribution() {
+    survival_distribution_case(false);
+}
+
+#[test]
+fn device_stochastic_survival_continuous_matches_host_distribution() {
+    survival_distribution_case(true);
+}
+
+/// Compare one device stochastic reproduction run against the host
+/// distribution.
+///
+/// ## Parameters
+/// - `continuous`: Whether to exercise the continuous-sampling branches.
+fn reproduction_distribution_case(continuous: bool) {
     if !hardware_required() {
         eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
         return;
@@ -2134,6 +2152,7 @@ fn device_stochastic_reproduction_matches_host_distribution() {
 
     let mut blueprint = dimension_blueprint(n_ages, z);
     blueprint.stochastic = true;
+    blueprint.continuous_sampling = continuous;
     blueprint.fixed_egg_count = false;
     blueprint.n_demes = n_batch;
     blueprint.migration_indptr = vec![0; n_batch + 1];
@@ -2274,7 +2293,20 @@ fn device_stochastic_reproduction_matches_host_distribution() {
 }
 
 #[test]
-fn device_stochastic_migration_matches_host_distribution() {
+fn device_stochastic_reproduction_matches_host_distribution() {
+    reproduction_distribution_case(false);
+}
+
+#[test]
+fn device_stochastic_reproduction_continuous_matches_host_distribution() {
+    reproduction_distribution_case(true);
+}
+
+/// Compare one device stochastic migration run against the host distribution.
+///
+/// ## Parameters
+/// - `continuous`: Whether to exercise the continuous-sampling branches.
+fn migration_distribution_case(continuous: bool) {
     if !hardware_required() {
         eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
         return;
@@ -2288,6 +2320,7 @@ fn device_stochastic_migration_matches_host_distribution() {
 
     let mut blueprint = dimension_blueprint(n_ages, z);
     blueprint.stochastic = true;
+    blueprint.continuous_sampling = continuous;
     blueprint.n_demes = n_batch;
     let mut indptr = vec![0i64; n_batch + 1];
     let mut dest = Vec::new();
@@ -2373,7 +2406,7 @@ fn device_stochastic_migration_matches_host_distribution() {
             &blueprint.migration_dest_idx,
             &blueprint.migration_weights,
             &rate_values,
-            false,
+            continuous,
             n_batch,
             n_ages,
             z,
@@ -2424,6 +2457,16 @@ fn device_stochastic_migration_matches_host_distribution() {
             );
         }
     }
+}
+
+#[test]
+fn device_stochastic_migration_matches_host_distribution() {
+    migration_distribution_case(false);
+}
+
+#[test]
+fn device_stochastic_migration_continuous_matches_host_distribution() {
+    migration_distribution_case(true);
 }
 
 // ---------------------------------------------------------------------------

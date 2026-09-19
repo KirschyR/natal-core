@@ -580,9 +580,6 @@ impl GpuExecutor {
         let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
         let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
         if blueprint.stochastic {
-            if blueprint.continuous_sampling {
-                return Err("GPU stochastic survival requires continuous_sampling=false".to_owned());
-            }
             let (key0, key1) = self.rng_key();
             let recruit_site = self.rng_site(0);
             let survival_site = self.rng_site(1);
@@ -593,6 +590,7 @@ impl GpuExecutor {
                 n_batch,
                 n_ages,
                 n_ztypes,
+                blueprint.continuous_sampling,
                 key0,
                 key1,
                 recruit_site,
@@ -607,6 +605,7 @@ impl GpuExecutor {
                 n_ages,
                 n_ztypes,
                 blueprint.new_adult_age,
+                blueprint.continuous_sampling,
                 key0,
                 key1,
                 survival_site,
@@ -811,11 +810,6 @@ impl GpuExecutor {
             male_compat: male_compat_buf.slice(),
         };
         if blueprint.stochastic {
-            if blueprint.continuous_sampling {
-                return Err(
-                    "GPU stochastic reproduction requires continuous_sampling=false".to_owned(),
-                );
-            }
             let (key0, key1) = self.rng_key();
             let site = self.rng_site(2);
             self.kernels.reproduction_stochastic(
@@ -829,6 +823,7 @@ impl GpuExecutor {
                 blueprint.new_adult_age,
                 blueprint.has_sex_chromosomes,
                 blueprint.fixed_egg_count,
+                blueprint.continuous_sampling,
                 key0,
                 key1,
                 site,
@@ -957,8 +952,8 @@ impl GpuExecutor {
 
     /// Run one stochastic CSR migration step across the batch (demes).
     ///
-    /// Mirrors `kernels::spatial::migrate_csr_stochastic_rngs` for
-    /// `continuous_sampling == false`: pass 1 samples each source's outbound
+    /// Mirrors `kernels::spatial::migrate_csr_stochastic_rngs` for both
+    /// discrete and continuous sampling: pass 1 samples each source's outbound
     /// and multinomial split into entry-indexed scratch, pass 2 gathers into
     /// each destination. A two-pass gather keeps the result reproducible
     /// (no atomics). Empty `migration_rate` is a no-op.
@@ -1033,6 +1028,7 @@ impl GpuExecutor {
                 n_batch,
                 n_ages,
                 n_ztypes,
+                blueprint.continuous_sampling,
                 key0,
                 key1,
                 site,

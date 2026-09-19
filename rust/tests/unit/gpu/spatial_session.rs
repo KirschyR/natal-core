@@ -268,21 +268,6 @@ fn spatial_enable_gpu_rejects_ineligible_models() {
     let mut discrete = discrete;
     assert!(discrete.enable_gpu().is_err(), "discrete must reject");
 
-    let (mut blueprint, ecology, genetics) = fixture();
-    blueprint.continuous_sampling = true;
-    let mut continuous = make_session(
-        blueprint,
-        ecology,
-        vec![genetics.clone()],
-        vec![0, 0, 0],
-        false,
-        false,
-    );
-    assert!(
-        continuous.enable_gpu().is_err(),
-        "continuous sampling must reject"
-    );
-
     let (blueprint, mut ecology, genetics) = fixture();
     ecology.growth_mode[0] = 5;
     let mut custom = make_session(
@@ -710,4 +695,31 @@ fn run_steps_rejects_overflowing_tick_span() {
         error.to_string().contains("overflow"),
         "unexpected message: {error}"
     );
+}
+
+#[test]
+fn spatial_enable_gpu_accepts_continuous_sampling() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (mut blueprint, ecology, genetics) = fixture();
+    blueprint.stochastic = true;
+    blueprint.continuous_sampling = true;
+    let mut session = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    session
+        .enable_gpu()
+        .expect("continuous sampling must be accepted");
+    assert_eq!(session.gpu_status(), "enabled");
+    session.run_steps(1, 0).expect("continuous device tick");
+    assert_eq!(session.state_tick, 1);
+    assert!(session.state_ind.iter().all(|value| value.is_finite()));
+    assert!(session.state_sperm.iter().all(|value| value.is_finite()));
 }

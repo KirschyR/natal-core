@@ -284,11 +284,6 @@ impl AgeStructuredSession {
     /// error when the device is unavailable.
     #[cfg(feature = "gpu")]
     fn enable_gpu(&mut self) -> PyResult<()> {
-        if self.blueprint.continuous_sampling {
-            return Err(PyValueError::new_err(
-                "GPU path requires continuous_sampling=false",
-            ));
-        }
         if self.blueprint.n_demes != 1 || self.params.n_demes != 1 {
             return Err(PyValueError::new_err(
                 "GPU path currently supports panmictic models only",
@@ -360,11 +355,6 @@ impl AgeStructuredSession {
     fn enable_gpu_ensemble(&mut self, n_replicates: usize) -> PyResult<()> {
         if n_replicates == 0 {
             return Err(PyValueError::new_err("n_replicates must be >= 1"));
-        }
-        if self.blueprint.continuous_sampling {
-            return Err(PyValueError::new_err(
-                "GPU ensemble requires continuous_sampling=false",
-            ));
         }
         if self.blueprint.n_demes != 1 || self.params.n_demes != 1 {
             return Err(PyValueError::new_err(

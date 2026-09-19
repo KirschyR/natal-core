@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 12 轮：**NOT APPROVED**（§33；`configure_history` 容量算术溢出 panic，非显式 Err） |
-| 待回执 | §35（第 12 轮修复复核） |
-| 主 agent 处理 | §33 已修复：预算与 tick 跨度全程 checked，溢出返回显式 Err；自测通过 |
-| 待 evaluator 动作 | 按 §34 复核修复目标，把结论写入 §35 |
+| 最近回执 | 第 13 轮：**APPROVED**（§35；§33 阻塞项已解除） |
+| 待回执 | §37（第 14 轮 continuous_sampling 设备支持） |
+| 主 agent 处理 | 第 14 轮：连续抽样设备支持已实现并自测 |
+| 待 evaluator 动作 | 按 §36 复核，把第 14 轮结论写入 §37 |
 
 ## 0. 一句话目标
 
@@ -911,6 +911,55 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 36. 第 14 轮交接 — `continuous_sampling` 设备支持
+
+- 日期：2026-09-19
+- 背景：§35 APPROVED（第 12 轮修复）。按用户选择推进「`continuous_sampling` 设备支持」（`GPU_STAGE_SUMMARY` §11 第 4 项）。
+- 风险分类：**高风险**（新增随机分布：连续二项/多项/Poisson，涉及科学抽样语义；需统计等价验证）。
+
+### 36.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | 新增设备采样器 `sample_continuous_binomial`（Beta 比例 × n）、`sample_continuous_poisson`（Gamma(λ,1)）、`natal_continuous_multinomial`（归一化 Gamma + 漂移校正）。`recruit_stochastic` / `survival_stochastic` / `reproduction_stochastic` / `migration_stochastic_prepare` 增加 `int continuous` 分支，去掉离散分支里的 `roundf`（连续路径用原始浮点计数与比例移除）。`sample_outbound_device` 增加连续分支。新增 `stochastic_grid`（64 线程块）避免连续分支提高寄存器用量后 1024 线程块报 `LAUNCH_OUT_OF_RESOURCES`。`sample_gamma` 改为**迭代**实现（原 shape<1 递归在 reproduction 大内核中导致设备栈溢出 → `CUDA_ERROR_ILLEGAL_ADDRESS`）。 |
+| `rust/src/gpu/executor.rs` | 删除 stochastic survival/reproduction/migration 对 `continuous_sampling` 的显式拒绝，向下透传 `blueprint.continuous_sampling`。 |
+| `rust/src/sessions/{age_structured,spatial}.rs` | 删除 `enable_gpu` / `enable_gpu_ensemble` 的 `continuous_sampling=false` 拒绝。 |
+| 测试 | 生存/繁殖/迁移三个分布测试参数化为 `continuous=false/true` 并各加一个连续用例（GPU vs host 同分布均值，5σ+0.5）；新增空间会话「连续被接受并跑 tick」与年龄结构会话/ensemble「连续被接受」。 |
+
+### 36.2 语义
+
+- 连续抽样严格复刻 host：连续二项 = Beta 比例（Gamma 构造）× n；连续多项 = 归一化 Gamma + 漂移校正；连续 Poisson = Gamma(λ,1)。CPU `continuous_sampling=false` 路径与门禁不变。
+- 设备 `sample_gamma` 的迭代改写只改变内部实现，分布不变（既有 `shape<1` gamma 统计用例仍通过）。
+
+### 36.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **168 passed, 0 failed**（含 3 个连续分布用例 + 2 个会话接线用例） |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3606 passed / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2131/2180 = 97.75%**；executor 97.3%、kernels 98.1%、probe 96.1%，逐文件 ≥95% |
+| 连续生存/繁殖/迁移分布 | GPU vs host 同分布均值在 5σ+0.5 内（`device_stochastic_*_continuous_matches_host_distribution`） |
+| Python E2E（重编扩展，4 deme 随机连续空间模型） | `enable_gpu` 接受；`run(3)` tick 前进、状态有限；连续 GPU 与 CPU 各自跑通（不同系综，不逐位） |
+
+### 36.4 请 evaluator 独立核对
+
+- **连续采样器正确性**：自建参数对照 host `continuous_binomial/poisson/multinomial` 的矩/分布（含 shape<1 的 Gamma 构造、大 λ/大 n、p→0/1 边界）。
+- **四个随机阶段**：连续模式下 survival/reproduction（含 mating/fertilize/sex/viability）/recruit/migration 的分布等价；确认离散路径与既有结论零回归。
+- **宿主迭代 gamma**：确认分布不变；检查无递归残留。
+- **会话语义**：`enable_gpu` / `enable_gpu_ensemble` 接受连续且不是静默回退；CPU 路径与 `phase0` 不变；无未检查算术等。
+- **性能/资源**：`stochastic_grid` 64 线程块是否影响既有离散用例表现（仅正确性要求）。
+
+### 36.5 残余风险 / 说明
+
+- 设备连续路径与 CPU 为统计等价，不逐位（既有约定）。
+- `stochastic_grid` 为资源约束下的固定块大小，未做占用率调优。
+- 本轮不改 raw 历史 / checkpoint 等既有残余项。
+
+结论请追加为 **§37**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1673,3 +1722,50 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 
 设备侧历史缓冲的核心正确性、时机与回退语义均通过；但新增的**显存预算计算存在未检查算术**
 （极端容量下 panic/回绕），与 §32.4/D5 的“显式失败”要求相悖。**NOT APPROVED**，待主 agent 修复后回交。
+
+---
+
+## 35. 第 13 轮结论（evaluator 独立执行，2026-09-19，HEAD=`5c53092`）
+
+### 35.1 裁定：**APPROVED**
+
+§33 阻塞项（`configure_history` 预算算术未检查、`run_steps` tick 跨度未检查）已解除；修复为产品语义层面的
+显式 `Err`，无回归。
+
+### 35.2 修复复核（独立运行）
+
+- 原失败回归 `cargo test --features gpu evaluator_configure_history_over_budget_is_explicit`
+  → **ok**（此前 panic `attempt to multiply with overflow`）。evaluator 测试断言未被改动。
+- 作者新增 `run_steps_rejects_overflowing_tick_span`（`start_tick=1` 后 `run_steps(i64::MAX, 1)`
+  → 显式 Err）→ **ok**。
+- 读 diff 核对：`configure_history` 的 `rows`/`row_bytes`/`mask_bytes`/`selected_bytes` 及求和
+  全部 `checked_mul`/`checked_add`，溢出返回显式 `Err`，之后才做预算比较与分配；
+  `run_steps` 的 `start_tick.checked_add(n_ticks)` 溢出返回 `PyValueError`。无遗留未检查算术。
+- `cargo test --features gpu evaluator_`（全部 21 个 evaluator 用例）→ **21 passed**，含
+  §33.3 的投影/时机/continuation/回退用例。
+
+### 35.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | **163 passed, 0 failed**（含 evaluator 2 个回归 + 作者新增） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU/numeric 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2112/2165 = 97.55%**；逐文件均 ≥95%（executor 96.9%、kernels 98.0%、probe 96.1%，其余 100%） |
+
+### 35.4 残余风险（非阻塞，延续 §33.5）
+
+- 设备历史窗口未按 `max_rows` 收缩；大 D×长 T 触发预算回退（走 host 路径，仅失去零回传）。
+- `flush_device_history` 用 `append_row` 未更新边界 metadata；正常完成 tick（phase=0/`Ready`）与 host 一致，
+  stop/异常边界可能不同。
+- raw 模式仍不走设备暂存（有意）；GPU checkpoint/restore 不支持设备回滚（既有）。
+
+### 35.5 结论
+
+§33 阻塞项修复正确、无回归，其余质量门禁与覆盖率均达标。**APPROVED**（范围为当前 HEAD `5c53092`
+与被审测试集；不声称任何历史基线失败消失）。

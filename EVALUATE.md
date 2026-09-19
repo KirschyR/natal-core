@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 15 轮：**APPROVED**（§39；离散世代空间 GPU 路径） |
-| 待回执 | §41（第 16 轮 frontend 级 ensemble 入口 + 文档） |
-| 主 agent 处理 | 第 16 轮：frontend ensemble 入口与中英文档已实现并自测 |
-| 待 evaluator 动作 | 按 §40 复核，把第 16 轮结论写入 §41 |
+| 最近回执 | 第 16 轮：**APPROVED**（§41；frontend ensemble 入口 + 文档） |
+| 待回执 | §43（第 17 轮性能优化：移除每 tick 缩放同步） |
+| 主 agent 处理 | 第 17 轮：确定性 survival 的每 tick 缩放 D2H 已移除，自测通过 |
+| 待 evaluator 动作 | 按 §42 复核，把第 17 轮结论写入 §43 |
 
 ## 0. 一句话目标
 
@@ -1057,6 +1057,48 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 42. 第 17 轮交接 — 性能优化（移除每 tick 缩放同步）
+
+- 日期：2026-09-19
+- 背景：§41 APPROVED。用户选择推进 `GPU_STAGE_SUMMARY §11` 第 7 项「性能优化」。
+- 风险分类：**局部代码修改**（设备缓冲区生命周期/同步时机；不涉数值公式与公开 API）。仍按惯例交独立复核。
+
+### 42.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增 `density_scaling_device`（把缩放因子留在设备，返回 `DeviceBuffer<f32>`）；`survival_tick`（年龄结构）与 `discrete_survival_tick` 改用它，**去掉每 tick 的缩放 D2H 同步 + 再次 H2D 上传**。保留公开的 `density_scaling`（内部经 `density_scaling_impl` 做一次 D2H）与 `density_scaling_impl`，供需要主机值的调用方/测试使用。 |
+
+### 42.2 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **174 passed, 0 failed** |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / **3611 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2352/2426 = 96.95%**；executor 96.0%、kernels 97.4%、probe 96.1%，逐文件 ≥95% |
+| 微基准（`density_scaling` device vs host，B=4×2000 次；nvidia-smi 前后 0%/15MiB） | device **62.3ms** vs host **71.5ms** → 每次去除约 **4.6µs** 同步 |
+
+### 42.3 诚实的性能结论（请 evaluator 判定期望）
+
+- 本改动移除的是**确定性 survival 路径每 tick 的设备→主机同步**（原实现 `density_scaling` 后 `to_host` 再上传），与项目「逐 tick 不回传」目标一致，风险极低。
+- 但临时全 tick 基准（B=20000, A=8, Z=3, 50 tick；nvidia-smi 0–3%）显示 **~20.9ms/tick**，stage 拆分约 repro **10.6ms**、surv **10.6ms**、aging **3.2µs**——两者几乎相同，且远高于传输量级（每 tick 约 15MB，PCIe 上传 <1ms），说明**瓶颈不在传输/同步，而在计算侧**；同一数值也可能是共享 GPU 多租户时间片造成的失真，需在空闲卡上复测才能定位。
+- 结论：**传输类优化（ecology 缓存等）在大 B 下收益有限**；进一步提升需要内核重构/占用率分析（更大风险，建议作为独立、需空闲 GPU 剖析的任务另立）。本轮先交付无争议的同步移除。
+
+### 42.4 请 evaluator 独立核对
+
+- **等价性**：`density_scaling` 的主机返回值与改动前一致；确定性年龄结构/离散设备状态逐 tick 结果不变（既有 L1/L2/L3 用例覆盖）。
+- **无残留同步**：`survival_tick` / `discrete_survival_tick` 内不再出现缩放因子的 D2H+H2D；`density_scaling_device` 不触发主机同步。
+- **回归/门禁/覆盖率**同既往口径。
+
+### 42.5 残余风险
+
+- 上述大 B 基准受共享 GPU 影响，结论仅定性；深层性能优化未做。
+
+结论请追加为 **§43**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1982,3 +2024,59 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 
 离散世代空间 GPU 路径正确、与 host 统计等价、确定性紧容差匹配、无回归，质量门禁与覆盖率达标。
 **APPROVED**（范围为当前 HEAD `a62cb79` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 41. 第 16 轮结论（evaluator 独立执行，2026-09-19，HEAD=`1211add`）
+
+### 41.1 裁定：**APPROVED**
+
+frontend 级 ensemble 公开入口语义正确、隔离性成立、中英文档同步；Rust 数值未改，既有门禁与回归不变。
+（Python 新增行覆盖率由 evaluator 补 2 个用例后达 100%，见 41.3。）
+
+### 41.2 独立核对
+
+- **公开合同**（读代码 + 独立运行）：`enable_gpu_ensemble(n)` 惰性建会话 / 同步后透传；`run_gpu_ensemble(ticks)`
+  返回 `(tick, (B,2,A,Z), (B,A,Z,Z))`。独立脚本：B=128、4 tick →
+  `ind (128,2,4,3)`、`sperm (128,4,3,3)`、全有限、`tick==4`。
+- **隔离性**：`run_gpu_ensemble` 后 `pop.tick` 与 `pop.state.individual_count` 均未变
+  （独立运行 + 仓库用例）。
+- **可复现**：同 seed 两个 pop 的 ensemble 结果逐位一致（独立运行）。
+- **拒绝路径**：`enable_gpu_ensemble(0)` → `ValueError`；先 `enable` 后 `run` 的顺序约束由 Rust 侧
+  显式报错；不合格模型（含钩子 / 自定义曲线 / 非 panmictic）由 Rust `enable_gpu_ensemble` 拒绝
+  （既有 `session_gpu_ensemble_rejects_ineligible` 覆盖）。非静默回退。
+- **文档中英同步**：`docs/en|zh/4_simulation_engine.md` 新增 §11（GPU Ensemble）并将小结顺延为 §12，
+  两版内容对应、方法名/形状/资格条件一致、示例使用公开 API。
+
+### 41.3 覆盖率（Python 新增行）
+
+`pytest tests/test_gpu_ensemble_frontend.py --cov=natal --cov-report=json`，按 diff 新增行统计：
+新增可执行 22 行，初始未覆盖 2 行（`enable_gpu_ensemble` 的惰性建会话分支 1026；
+`run_gpu_ensemble` 的 `backend is None` 守卫 1056，因 `build()` 已建会话故仓库用例未触及）。
+evaluator 补充 2 个针对性用例（`test_enable_gpu_ensemble_lazily_initializes_session`、
+`test_run_gpu_ensemble_missing_backend_raises`）后 **22/22 = 100%**。Rust `src/gpu/**` 覆盖率不变
+（第 15 轮 96.94%，本轮未改 Rust）。
+
+### 41.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `PYTHONUTF8=1 pytest -q` | **3611 passed**（作者 3609 + evaluator 2） |
+| `pytest -q tests/test_gpu_ensemble_frontend.py` | 5 passed |
+| `ruff check src demos tests` | 通过 |
+| `pyright` | 0 errors |
+| `cargo test` / `cargo test --features gpu` | 67 / 174 passed（Rust 未改，回归确认） |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+
+### 41.5 残余风险（非阻塞，见 §40.5）
+
+- 未提供 `Population` 级单群体 `enable_gpu`（一步回传）frontend 入口；本轮仅 ensemble，文档亦如此表述。
+- 未提供 frontend ensemble 的 `History` 集成（返回裸数组）。
+- `run_gpu_ensemble` 在已有单群体 `enable_gpu` 而 `_gpu_ensemble_replicates==0` 时 reshape 会失败；
+  属误用路径（应只用 ensemble），报错非静默。
+
+### 41.6 结论
+
+frontend ensemble 入口与文档满足公开合同、隔离性、可复现与同步要求；门禁全绿、Python 新增行覆盖率 100%。
+**APPROVED**（范围为当前 HEAD `1211add` 与被审测试集；不声称任何历史基线失败消失）。

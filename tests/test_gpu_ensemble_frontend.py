@@ -83,3 +83,22 @@ def test_gpu_ensemble_shapes_and_leaves_cpu_state_untouched() -> None:
     # and state are not advanced by it.
     assert pop.tick == tick_before
     np.testing.assert_array_equal(pop.state.individual_count, state_before)
+
+
+def test_enable_gpu_ensemble_lazily_initializes_session() -> None:
+    """``enable_gpu_ensemble`` must build the session when none exists yet."""
+    pop = _build_pop("__gpu_ens_lazy__")
+    pop._rust_lifecycle_backend = None  # pyright: ignore[reportPrivateUsage]
+    try:
+        pop.enable_gpu_ensemble(16)
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU ensemble unavailable: {exc}")
+    assert pop._rust_lifecycle_backend is not None
+
+
+def test_run_gpu_ensemble_missing_backend_raises() -> None:
+    """A population without a native session raises the explicit guard error."""
+    pop = _build_pop("__gpu_ens_nobackend__")
+    pop._rust_lifecycle_backend = None  # pyright: ignore[reportPrivateUsage]
+    with pytest.raises(RuntimeError, match="enable_gpu_ensemble"):
+        pop.run_gpu_ensemble(1)

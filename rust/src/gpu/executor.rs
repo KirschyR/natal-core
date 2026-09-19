@@ -394,7 +394,12 @@ impl GpuExecutor {
         self.density_scaling_impl(blueprint, ecology, false)
     }
 
-    /// Density scaling with an explicit discrete/age-structured `actual` rule.
+    /// Device-resident density scaling (no host round-trip).
+    ///
+    /// `survival_tick`/`discrete_survival_tick` use this so a deterministic
+    /// tick never synchronizes on the scaling factor. The host-returning
+    /// [`GpuExecutor::density_scaling`] wrapper remains for callers and tests
+    /// that need the values.
     ///
     /// ## Parameters
     /// - `blueprint`, `ecology`: Live contracts.
@@ -404,12 +409,12 @@ impl GpuExecutor {
     ///
     /// ## Errors
     /// As [`GpuExecutor::density_scaling`].
-    pub(crate) fn density_scaling_impl(
+    pub(crate) fn density_scaling_device(
         &self,
         blueprint: &Blueprint,
         ecology: &EcologyParams,
         discrete_actual: bool,
-    ) -> Result<Vec<f32>, String> {
+    ) -> Result<DeviceBuffer<f32>, String> {
         let n_batch = self.n_batch;
         let n_ages = self.n_ages;
         let n_ztypes = self.n_ztypes;
@@ -538,6 +543,25 @@ impl GpuExecutor {
             blueprint.new_adult_age,
             discrete_actual,
         )?;
+        Ok(scaling)
+    }
+
+    /// Host copy of the device density scaling.
+    ///
+    /// ## Parameters
+    /// - `blueprint`, `ecology`: Live contracts.
+    /// - `discrete_actual`: Discrete vs age-structured `actual` rule.
+    ///
+    /// ## Errors
+    /// As [`GpuExecutor::density_scaling`].
+    pub(crate) fn density_scaling_impl(
+        &self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        discrete_actual: bool,
+    ) -> Result<Vec<f32>, String> {
+        let scaling = self.density_scaling_device(blueprint, ecology, discrete_actual)?;
+        let stream = self.context.stream();
         scaling.to_host(&stream)
     }
 
@@ -577,7 +601,7 @@ impl GpuExecutor {
                 deme_variants.len()
             ));
         }
-        let scaling_host = self.density_scaling(blueprint, ecology)?;
+        let scaling = self.density_scaling_device(blueprint, ecology, false)?;
         let variant_stride = 2 * n_ages * n_ztypes;
         let mut viability = vec![0.0f32; n_batch * variant_stride];
         for (batch, &variant_id) in deme_variants.iter().enumerate() {
@@ -596,7 +620,6 @@ impl GpuExecutor {
             }
         }
         let stream = self.context.stream();
-        let scaling = DeviceBuffer::from_host(&stream, &scaling_host)?;
         let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
         let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
         if blueprint.stochastic {
@@ -985,7 +1008,7 @@ impl GpuExecutor {
             ecology.survival_rates.len(),
             n_batch * 2 * n_ages,
         )?;
-        let scaling_host = self.density_scaling_impl(blueprint, ecology, true)?;
+        let scaling = self.density_scaling_device(blueprint, ecology, true)?;
         let variant_stride = 2 * n_ages * n_ztypes;
         let mut viability = vec![0.0f32; n_batch * variant_stride];
         for (batch, &variant_id) in deme_variants.iter().enumerate() {
@@ -1004,7 +1027,6 @@ impl GpuExecutor {
             }
         }
         let stream = self.context.stream();
-        let scaling = DeviceBuffer::from_host(&stream, &scaling_host)?;
         let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
         let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
         let (key0, key1) = self.rng_key();

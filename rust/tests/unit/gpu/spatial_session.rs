@@ -188,10 +188,23 @@ fn spatial_device_branch_matches_cpu_and_covers_wiring() {
         );
         gpu_session.enable_gpu().expect("spatial enable_gpu");
         assert_eq!(gpu_session.gpu_status(), "enabled");
+        let host_ind_before = gpu_session.state_ind.clone();
+        let host_sperm_before = gpu_session.state_sperm.clone();
         for _ in 0..3 {
             gpu_session.run_inner().expect("device spatial tick");
         }
         assert_eq!(gpu_session.state_tick, 3);
+        // Device ticks keep state resident: the host arrays are untouched
+        // until an explicit sync (zero per-tick copy-back).
+        assert_eq!(
+            gpu_session.state_ind, host_ind_before,
+            "device ticks must not copy individual state back to the host"
+        );
+        assert_eq!(
+            gpu_session.state_sperm, host_sperm_before,
+            "device ticks must not copy sperm state back to the host"
+        );
+        gpu_session.sync_gpu_state().expect("device state sync");
 
         let mut cpu_session = make_session(
             blueprint.clone(),
@@ -326,7 +339,9 @@ fn spatial_stochastic_session_device_tick_runs() {
     );
     session.enable_gpu().expect("enable stochastic spatial gpu");
     assert_eq!(session.gpu_status(), "enabled");
-    session.run_inner().expect("device stochastic spatial tick");
+    session
+        .run_steps(1, 0)
+        .expect("device stochastic spatial tick");
     assert_eq!(session.state_tick, 1);
     assert!(session.state_ind.iter().all(|value| value.is_finite()));
     assert!(session.state_sperm.iter().all(|value| value.is_finite()));

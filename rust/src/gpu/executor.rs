@@ -56,6 +56,45 @@ pub struct GpuExecutor {
     seed: u64,
     /// Number of device ticks completed, used to vary draw sites per tick.
     tick: u64,
+    /// Cached static migration buffers for the current CSR, if any.
+    migration_cache: Option<MigrationCache>,
+}
+
+/// Device-resident static buffers for one migration CSR.
+///
+/// The migration graph is frozen in the blueprint, so its forward arrays and
+/// the reverse CSR never change between ticks. Building them once removes the
+/// per-tick host rebuild and the repeated host-to-device uploads; the
+/// tick-varying `migration_rate` column is still transferred every call.
+///
+/// The stochastic scratch (`fwd_*`) is safe to reuse because the prepare
+/// kernel writes every entry's slot for every age and zygote type on each
+/// launch, including explicit zeros, so no stale sample can be read.
+struct MigrationCache {
+    /// Hash of the CSR contents the cache was built from.
+    fingerprint: u64,
+    /// Forward row pointers, `n_batch + 1`.
+    indptr: DeviceBuffer<i32>,
+    /// Reverse row pointers, `n_batch + 1`.
+    rev_indptr: DeviceBuffer<i32>,
+    /// Deterministic reverse source indices, one per CSR entry.
+    rev_src: DeviceBuffer<i32>,
+    /// Deterministic reverse weights, one per CSR entry.
+    rev_weight: DeviceBuffer<f32>,
+    /// Deterministic source-row weight sums, one per source.
+    row_sum: DeviceBuffer<f32>,
+    /// Forward destinations for the stochastic pass, one per CSR entry.
+    dest: DeviceBuffer<i32>,
+    /// Forward weights for the stochastic pass, one per CSR entry.
+    weights: DeviceBuffer<f32>,
+    /// Stochastic reverse CSR entry indices, one per CSR entry.
+    rev_entry: DeviceBuffer<i32>,
+    /// Stochastic female forward scratch, `nnz · A · Z`.
+    fwd_f: DeviceBuffer<f32>,
+    /// Stochastic sperm forward scratch, `nnz · A · Z · Z`.
+    fwd_s: DeviceBuffer<f32>,
+    /// Stochastic male forward scratch, `nnz · A · Z`.
+    fwd_m: DeviceBuffer<f32>,
 }
 
 impl GpuExecutor {
@@ -123,6 +162,7 @@ impl GpuExecutor {
             sperm_scratch,
             seed: 0,
             tick: 0,
+            migration_cache: None,
         })
     }
 
@@ -818,75 +858,34 @@ impl GpuExecutor {
             ecology.migration_rate.len(),
             n_batch * 2 * n_ages,
         )?;
-        let indptr: Vec<i32> = blueprint
-            .migration_indptr
-            .iter()
-            .map(|value| *value as i32)
-            .collect();
-        let dest: Vec<i32> = blueprint
-            .migration_dest_idx
-            .iter()
-            .map(|value| *value as i32)
-            .collect();
-        let weights: Vec<f32> = blueprint
-            .migration_weights
-            .iter()
-            .map(|value| *value as f32)
-            .collect();
-        let nnz = dest.len();
-        // Reverse CSR: incoming (source, weight) lists per destination.
-        let mut rev_indptr = vec![0i32; n_batch + 1];
-        for &d in &dest {
-            if d < 0 || d as usize >= n_batch {
-                return Err(format!("migration destination {d} out of range"));
-            }
-            rev_indptr[d as usize + 1] += 1;
-        }
-        for i in 1..=n_batch {
-            rev_indptr[i] += rev_indptr[i - 1];
-        }
-        let mut rev_src = vec![0i32; nnz];
-        let mut rev_weight = vec![0f32; nnz];
-        let mut cursor: Vec<i32> = rev_indptr.clone();
-        let mut row_sum_w = vec![0f32; n_batch];
-        for src in 0..n_batch {
-            let start = indptr[src] as usize;
-            let end = indptr[src + 1] as usize;
-            let mut sum = 0.0f32;
-            for entry in start..end {
-                let d = dest[entry] as usize;
-                let position = cursor[d] as usize;
-                rev_src[position] = src as i32;
-                rev_weight[position] = weights[entry];
-                cursor[d] += 1;
-                sum += weights[entry];
-            }
-            row_sum_w[src] = sum;
-        }
-        let stream = self.context.stream();
-        let rate = upload_f64(&stream, &ecology.migration_rate)?;
-        let indptr_buf = DeviceBuffer::from_host(&stream, &indptr)?;
-        let rev_indptr_buf = DeviceBuffer::from_host(&stream, &rev_indptr)?;
-        let rev_src_buf = DeviceBuffer::from_host(&stream, &rev_src)?;
-        let rev_weight_buf = DeviceBuffer::from_host(&stream, &rev_weight)?;
-        let row_sum_buf = DeviceBuffer::from_host(&stream, &row_sum_w)?;
-        self.kernels.migration(
-            &stream,
-            self.ind.slice(),
-            self.sperm.slice(),
-            self.ind_scratch.slice_mut(),
-            self.sperm_scratch.slice_mut(),
-            rate.slice(),
-            indptr_buf.slice(),
-            rev_indptr_buf.slice(),
-            rev_src_buf.slice(),
-            rev_weight_buf.slice(),
-            row_sum_buf.slice(),
-            stay_after,
-            n_batch,
-            n_ages,
-            n_ztypes,
-        )?;
+        self.ensure_migration_cache(blueprint)?;
+        let cache = self
+            .migration_cache
+            .take()
+            .expect("migration cache ensured above");
+        let result = (|| -> Result<(), String> {
+            let stream = self.context.stream();
+            let rate = upload_f64(&stream, &ecology.migration_rate)?;
+            self.kernels.migration(
+                &stream,
+                self.ind.slice(),
+                self.sperm.slice(),
+                self.ind_scratch.slice_mut(),
+                self.sperm_scratch.slice_mut(),
+                rate.slice(),
+                cache.indptr.slice(),
+                cache.rev_indptr.slice(),
+                cache.rev_src.slice(),
+                cache.rev_weight.slice(),
+                cache.row_sum.slice(),
+                stay_after,
+                n_batch,
+                n_ages,
+                n_ztypes,
+            )
+        })();
+        self.migration_cache = Some(cache);
+        result?;
         std::mem::swap(&mut self.ind, &mut self.ind_scratch);
         std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
         Ok(())
@@ -942,6 +941,68 @@ impl GpuExecutor {
                 ));
             }
         }
+        self.ensure_migration_cache(blueprint)?;
+        let mut cache = self
+            .migration_cache
+            .take()
+            .expect("migration cache ensured above");
+        let (key0, key1) = self.rng_key();
+        let site = self.rng_site(3);
+        let result = (|| -> Result<(), String> {
+            let stream = self.context.stream();
+            let rate = upload_f64(&stream, &ecology.migration_rate)?;
+            self.kernels.migration_stochastic(
+                &stream,
+                self.ind.slice(),
+                self.sperm.slice(),
+                self.ind_scratch.slice_mut(),
+                self.sperm_scratch.slice_mut(),
+                rate.slice(),
+                cache.indptr.slice(),
+                cache.dest.slice(),
+                cache.weights.slice(),
+                cache.fwd_f.slice_mut(),
+                cache.fwd_s.slice_mut(),
+                cache.fwd_m.slice_mut(),
+                cache.rev_indptr.slice(),
+                cache.rev_entry.slice(),
+                n_batch,
+                n_ages,
+                n_ztypes,
+                key0,
+                key1,
+                site,
+            )
+        })();
+        self.migration_cache = Some(cache);
+        result?;
+        std::mem::swap(&mut self.ind, &mut self.ind_scratch);
+        std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
+        Ok(())
+    }
+
+    /// Build the static device migration buffers for `blueprint`.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Frozen CSR (row pointers, destinations, weights).
+    /// - `fingerprint`: Hash of the CSR contents, stored for invalidation.
+    ///
+    /// ## Returns
+    /// The populated cache, or a description of the first invalid destination
+    /// or failed transfer.
+    fn build_migration_cache(
+        &self,
+        blueprint: &Blueprint,
+        fingerprint: u64,
+    ) -> Result<MigrationCache, String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        let indptr: Vec<i32> = blueprint
+            .migration_indptr
+            .iter()
+            .map(|value| *value as i32)
+            .collect();
         let dest: Vec<i32> = blueprint
             .migration_dest_idx
             .iter()
@@ -963,7 +1024,28 @@ impl GpuExecutor {
         for i in 1..=n_batch {
             rev_indptr[i] += rev_indptr[i - 1];
         }
-        // Reverse CSR stores the CSR entry index so pass 2 can read `fwd_*`.
+        // Reverse CSR for the deterministic gather: incoming (source, weight)
+        // lists per destination, plus each source row's weight sum.
+        let mut rev_src = vec![0i32; nnz];
+        let mut rev_weight = vec![0f32; nnz];
+        let mut row_sum = vec![0f32; n_batch];
+        let mut cursor = rev_indptr.clone();
+        for src in 0..n_batch {
+            let start = indptr[src] as usize;
+            let end = indptr[src + 1] as usize;
+            let mut sum = 0.0f32;
+            for entry in start..end {
+                let d = dest[entry] as usize;
+                let position = cursor[d] as usize;
+                rev_src[position] = src as i32;
+                rev_weight[position] = weights[entry];
+                cursor[d] += 1;
+                sum += weights[entry];
+            }
+            row_sum[src] = sum;
+        }
+        // Reverse CSR for the stochastic gather stores the CSR entry index so
+        // pass 2 can read the entry-indexed forward scratch.
         let mut rev_entry = vec![0i32; nnz];
         let mut cursor = rev_indptr.clone();
         for pair in indptr.windows(2) {
@@ -977,42 +1059,46 @@ impl GpuExecutor {
             }
         }
         let stream = self.context.stream();
-        let rate = upload_f64(&stream, &ecology.migration_rate)?;
-        let indptr_buf = DeviceBuffer::from_host(&stream, &indptr)?;
-        let dest_buf = DeviceBuffer::from_host(&stream, &dest)?;
-        let weights_buf = DeviceBuffer::from_host(&stream, &weights)?;
-        let rev_indptr_buf = DeviceBuffer::from_host(&stream, &rev_indptr)?;
-        let rev_entry_buf = DeviceBuffer::from_host(&stream, &rev_entry)?;
-        let mut fwd_f = DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes])?;
-        let mut fwd_s =
-            DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes * n_ztypes])?;
-        let mut fwd_m = DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes])?;
-        let (key0, key1) = self.rng_key();
-        let site = self.rng_site(3);
-        self.kernels.migration_stochastic(
-            &stream,
-            self.ind.slice(),
-            self.sperm.slice(),
-            self.ind_scratch.slice_mut(),
-            self.sperm_scratch.slice_mut(),
-            rate.slice(),
-            indptr_buf.slice(),
-            dest_buf.slice(),
-            weights_buf.slice(),
-            fwd_f.slice_mut(),
-            fwd_s.slice_mut(),
-            fwd_m.slice_mut(),
-            rev_indptr_buf.slice(),
-            rev_entry_buf.slice(),
-            n_batch,
-            n_ages,
-            n_ztypes,
-            key0,
-            key1,
-            site,
-        )?;
-        std::mem::swap(&mut self.ind, &mut self.ind_scratch);
-        std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
+        Ok(MigrationCache {
+            fingerprint,
+            indptr: DeviceBuffer::from_host(&stream, &indptr)?,
+            rev_indptr: DeviceBuffer::from_host(&stream, &rev_indptr)?,
+            rev_src: DeviceBuffer::from_host(&stream, &rev_src)?,
+            rev_weight: DeviceBuffer::from_host(&stream, &rev_weight)?,
+            row_sum: DeviceBuffer::from_host(&stream, &row_sum)?,
+            dest: DeviceBuffer::from_host(&stream, &dest)?,
+            weights: DeviceBuffer::from_host(&stream, &weights)?,
+            rev_entry: DeviceBuffer::from_host(&stream, &rev_entry)?,
+            fwd_f: DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes])?,
+            fwd_s: DeviceBuffer::from_host(
+                &stream,
+                &vec![0.0f32; nnz * n_ages * n_ztypes * n_ztypes],
+            )?,
+            fwd_m: DeviceBuffer::from_host(&stream, &vec![0.0f32; nnz * n_ages * n_ztypes])?,
+        })
+    }
+
+    /// Ensure the static migration cache matches `blueprint`.
+    ///
+    /// The cache is rebuilt only when the CSR contents change, so a session's
+    /// frozen blueprint builds it once and reuses it for every tick.
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Frozen CSR to compare against the cached fingerprint.
+    ///
+    /// ## Errors
+    /// Returns a description when the cache must be rebuilt and the rebuild
+    /// fails.
+    fn ensure_migration_cache(&mut self, blueprint: &Blueprint) -> Result<(), String> {
+        let fingerprint = csr_fingerprint(blueprint);
+        let stale = self
+            .migration_cache
+            .as_ref()
+            .is_none_or(|cache| cache.fingerprint != fingerprint);
+        if stale {
+            let cache = self.build_migration_cache(blueprint, fingerprint)?;
+            self.migration_cache = Some(cache);
+        }
         Ok(())
     }
 
@@ -1055,6 +1141,27 @@ impl GpuExecutor {
     pub fn n_batch(&self) -> usize {
         self.n_batch
     }
+}
+
+/// Hash the frozen migration CSR so the device cache can detect a change.
+///
+/// Weights are hashed by their bit pattern because `f64` is not `Hash`.
+///
+/// ## Parameters
+/// - `blueprint`: Frozen model carrying the CSR arrays.
+///
+/// ## Returns
+/// A stable-within-process hash of the row pointers, destinations, and
+/// weights.
+fn csr_fingerprint(blueprint: &Blueprint) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    blueprint.migration_indptr.hash(&mut hasher);
+    blueprint.migration_dest_idx.hash(&mut hasher);
+    for weight in &blueprint.migration_weights {
+        hasher.write_u64(weight.to_bits());
+    }
+    hasher.finish()
 }
 
 /// Upload a host `f64` slice as an `f32` device buffer (`f64 → f32` per §D2).

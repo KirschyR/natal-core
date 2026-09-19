@@ -15,8 +15,9 @@
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
 | 最近回执 | 第 7 轮：**APPROVED**（§23；空间随机迁移） |
-| 主 agent 处理 | P6（多 B ensemble）已实现并自测；**待第 9 轮独立复核** |
-| 待 evaluator 动作 | 按 §26 复核，把第 9 轮结论写入 §27 |
+| 待回执 | §25（第 8 轮越界守卫）、§27（第 9 轮 P6） |
+| 主 agent 处理 | 第 10 轮：设备侧 CSR 缓存 + 空间逐 tick 零回传，已自测；**待独立复核** |
+| 待 evaluator 动作 | 先补 §25、§27；再按 §28 复核，把第 10 轮结论写入 §29 |
 
 ## 0. 一句话目标
 
@@ -705,6 +706,74 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 对 §26.3 给出 P6 是否达标的判定。
 
 结论请追加为 **§27**。
+
+---
+
+## 28. 第 10 轮交接 — 设备侧 CSR 缓存 + 空间逐 tick 零回传
+
+- 日期：2026-09-19
+- 背景：§25（第 8 轮越界守卫）与 §27（第 9 轮 P6）回执尚未返回；本轮按 `GPU_STAGE_SUMMARY.md` §11
+  的建议先做「设备侧 CSR 缓存 + 零逐 tick 回传」。**不涉及数值公式、随机分布或公开 API**，但改动了
+  空间会话的状态同步时机，按高风险（状态语义）提交独立复核。
+- 风险分类：**高风险**（会话状态回传/历史记录时机；虽无新数值算法，但影响状态可见性与历史正确性）。
+
+### 28.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增 `MigrationCache`：把冻结 CSR 的前向/反向数组、`row_sum`、以及随机迁移的 `dest/weights/rev_entry` 与 `fwd_f/fwd_s/fwd_m` scratch 常驻显存，按 CSR 指纹失效；`migrate_tick` / `migrate_tick_stochastic` 改为复用缓存（仅每 tick 重传动态 `migration_rate`）。新增 `csr_fingerprint`、`build_migration_cache`、`ensure_migration_cache`。 |
+| `rust/src/sessions/spatial.rs` | `run_gpu_tick` 不再逐 tick 下载 `ind/sperm`；新增 `sync_gpu_state`（GPU 版与 CPU 空实现），在 `run_steps` 的历史记录边界、停止返回处和运行结束处调用。 |
+| `rust/tests/unit/gpu/executor.rs` | 新增 `migration_cache_reuses_buffers_and_invalidates_on_new_csr`、`stochastic_migration_reuses_cached_scratch_reproducibly`、`stochastic_migration_validates_inputs`、`ensemble_rejects_mismatched_replicate_state`；新增 `assert_migration_close` 辅助。 |
+| `rust/tests/unit/gpu/spatial_session.rs` | 确定性用例改为显式断言“逐 tick 不下载”（host 数组不变）+ 显式 `sync_gpu_state`；随机用例改走 `run_steps(1, 0)`。 |
+
+**未改动**：`rust/src/kernels`、`rust/src/model`、`src/natal/contracts`、`rust/src/lib.rs`（`git diff` 为空）。
+
+### 28.2 行为变化与理由
+
+1. **CSR 静态缓存**：迁移图在 blueprint 里是冻结的，前向 CSR 与反向 CSR 不会逐 tick 变化。缓存后
+   每 tick 只上传会变的 `migration_rate`，并省掉随机路径 `fwd_*` 的“分配 + 清零上传”。随机 `fwd_*`
+   可安全复用：`migration_stochastic_prepare` 对每个 CSR entry 的每个 age/z 槽都写入（含显式 0）。
+2. **零逐 tick 回传**：设备 tick 期间状态常驻显存；host `ind/sperm` 只在历史记录边界和一次运结结束时
+   刷新（`sync_gpu_state`）。历史记录分别在记录前同步，故历史内容不变；仅去掉了非记录 tick 的 D2H。
+3. **CPU 路径**：`sync_gpu_state` 在非 gpu feature 下是空实现，`run_steps` 调用它不改变任何 CPU 行为。
+
+### 28.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `python scripts/check_rust.py` | EXIT=0（67 passed） |
+| `cargo test`（默认 feature） | **67 passed, 0 failed** |
+| `cargo test --features gpu` | **155 passed, 0 failed** |
+| `cargo clippy --features gpu -- -D warnings` | 通过 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | `all scenarios bit-identical` |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`）覆盖率 | 聚合 **97.37%**；`executor.rs` **807/837 = 96.4%**，逐文件均 ≥95% |
+| 迁移微基准（D=16384, A=8, Z=3, 20 tick 随机迁移；GPU 前后均 15 MiB / 0%） | 缓存复用 **79.3 ms** vs 每 tick 重建 **196.8 ms** → 迁移阶段 **~2.48×** |
+
+> 说明：上述为**主 agent 自测**，不是独立审查。微基准为单次采样、未做多次重复；共享 GPU 上仅用于
+> 量级参考。
+
+### 28.4 请 evaluator 独立核对
+
+- **零回传正确性**：多次 GPU tick 后 host 数组确实不变，`sync_gpu_state`/`run_steps` 后与 CPU 对照一致
+  （自建模型/更大 D，非仅仓库用例）。
+- **历史正确性**：`run_steps(..., record_interval>1)` 时，记录到的每个 tick 都来自“该 tick 的设备状态”，
+  与 CPU 记录的 tick 序列/状态一致；随机模式用统计等价而非逐位。
+- **缓存失效**：同一 CSR 命中（仅 rate 变化仍正确）；不同 CSR（dest/weights/indptr 任一变化）必须重建，
+  且结果与 host 参考一致；随机 scratch 复用不得泄漏上一 tick 的样本。
+- **CPU 不变性**：`git diff` 证明 kernels/model/contracts/lib.rs 零改动；`phase0` bit-identical。
+- **覆盖率**：严格按绝对路径过滤并排除 `/tests/`（注意历史坑：`src/gpu/../../tests/...`）。
+- **共享 GPU 波动**：本轮出现过一次 instrumented 运行失败、重跑即通过；请记录复现率，勿计入产品缺陷。
+
+### 28.5 已知残余风险（非阻塞，供判定）
+
+- 显存驻留增加：CSR 缓存（含随机 `fwd_s` = `nnz·A·Z²·4`）现在常驻，`GpuExecutor::new` 的预算守卫
+  未计入这部分；超限时 `DeviceBuffer::from_host` 会显式报错（不静默回退），但发生在首次迁移时而非入口。
+- GPU 会话的 checkpoint/restore 仍不支持设备侧状态回滚（既有问题，本轮未扩大）。
+- 未做 ecology 缓存：ecology 可被会话/回调修改，缓存会破坏其“每 tick 生效”语义，故本轮有意不做。
+
+结论请追加为 **§29**。
 
 ---
 

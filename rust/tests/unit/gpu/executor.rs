@@ -1317,6 +1317,263 @@ fn migration_tick_validates_inputs() {
         .is_err());
 }
 
+/// Compare a device migration result against a host reference with f32
+/// tolerance.
+///
+/// ## Parameters
+/// - `label`: Prefix for assertion messages.
+/// - `got`, `want`: Device and host values.
+fn assert_migration_close(label: &str, got: &[f32], want: &[f64]) {
+    for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+        let want = *want as f32;
+        let tolerance = 1.2e-6f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "{label}[{index}]: device {got} vs host {want}"
+        );
+    }
+}
+
+#[test]
+fn migration_cache_reuses_buffers_and_invalidates_on_new_csr() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (_, mut ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let rate_a: Vec<f64> = (0..n_batch * 2 * n_ages)
+        .map(|i| 0.1 + 0.02 * (i % 7) as f64)
+        .collect();
+    let rate_b: Vec<f64> = (0..n_batch * 2 * n_ages)
+        .map(|i| 0.05 + 0.03 * (i % 5) as f64)
+        .collect();
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let indptr = [0i64, 2, 3, 3, 4];
+    let dest = [1i64, 2, 0, 2];
+    let weights = [0.5f64, 0.5, 1.0, 1.0];
+    let blueprint = migration_blueprint();
+    let ind_f64: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let sperm_f64: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+
+    // Two ticks on the same CSR: the static buffers are built once and reused
+    // while the changing rate column still drives each tick.
+    ecology.migration_rate = rate_a.clone();
+    executor
+        .migrate_tick(&blueprint, &ecology, false)
+        .expect("first device migration");
+    let first_fingerprint = executor
+        .migration_cache
+        .as_ref()
+        .expect("cache after first tick")
+        .fingerprint;
+    ecology.migration_rate = rate_b.clone();
+    executor
+        .migrate_tick(&blueprint, &ecology, false)
+        .expect("second device migration");
+    let second_fingerprint = executor
+        .migration_cache
+        .as_ref()
+        .expect("cache after second tick")
+        .fingerprint;
+    assert_eq!(
+        first_fingerprint, second_fingerprint,
+        "the same CSR must reuse the cached buffers"
+    );
+
+    let (cpu_one_ind, cpu_one_sperm) = migrate_csr_deterministic(
+        &ind_f64, &sperm_f64, &indptr, &dest, &weights, &rate_a, false, n_batch, n_ages, n_ztypes,
+    )
+    .expect("host first migration");
+    let (cpu_two_ind, cpu_two_sperm) = migrate_csr_deterministic(
+        &cpu_one_ind,
+        &cpu_one_sperm,
+        &indptr,
+        &dest,
+        &weights,
+        &rate_b,
+        false,
+        n_batch,
+        n_ages,
+        n_ztypes,
+    )
+    .expect("host second migration");
+    assert_migration_close(
+        "cache-reuse ind",
+        &executor.download_ind().expect("download ind"),
+        &cpu_two_ind,
+    );
+    assert_migration_close(
+        "cache-reuse sperm",
+        &executor.download_sperm().expect("download sperm"),
+        &cpu_two_sperm,
+    );
+
+    // A different CSR must invalidate the cached plan and match the host.
+    let mut other = migration_blueprint();
+    let other_dest = [2i64, 0, 1, 0];
+    let other_weights = [0.25f64, 0.75, 0.5, 0.5];
+    other.migration_dest_idx = other_dest.to_vec();
+    other.migration_weights = other_weights.to_vec();
+    executor
+        .migrate_tick(&other, &ecology, false)
+        .expect("third device migration with a new CSR");
+    let third_fingerprint = executor
+        .migration_cache
+        .as_ref()
+        .expect("cache after third tick")
+        .fingerprint;
+    assert_ne!(
+        second_fingerprint, third_fingerprint,
+        "a different CSR must rebuild the cache"
+    );
+    let (cpu_three_ind, cpu_three_sperm) = migrate_csr_deterministic(
+        &cpu_two_ind,
+        &cpu_two_sperm,
+        &indptr,
+        &other_dest,
+        &other_weights,
+        &rate_b,
+        false,
+        n_batch,
+        n_ages,
+        n_ztypes,
+    )
+    .expect("host third migration");
+    assert_migration_close(
+        "invalidate ind",
+        &executor.download_ind().expect("download ind"),
+        &cpu_three_ind,
+    );
+    assert_migration_close(
+        "invalidate sperm",
+        &executor.download_sperm().expect("download sperm"),
+        &cpu_three_sperm,
+    );
+}
+
+#[test]
+fn stochastic_migration_reuses_cached_scratch_reproducibly() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n0 = 4;
+    let n_ages = 3;
+    let z = 2;
+    let copies = 64;
+    let (blueprint, ecology) = evaluator_block_diagonal(n0, n_ages, z, copies);
+    let n_batch = blueprint.n_demes;
+    let ind: Vec<f32> = (0..n_batch * 2 * n_ages * z)
+        .map(|i| ((i * 7) % 41) as f32 + 1.0)
+        .collect();
+    let sperm: Vec<f32> = (0..n_batch * n_ages * z * z)
+        .map(|i| ((i * 5) % 13) as f32)
+        .collect();
+
+    let run_twice = |ind: &[f32], sperm: &[f32]| -> (Vec<f32>, Vec<f32>) {
+        let context = GpuContext::new(0).expect("device 0 context");
+        let mut executor = GpuExecutor::new(context, n_batch, n_ages, z, ind, sperm)
+            .expect("executor uploads and compiles");
+        executor.set_seed(0xFEED);
+        executor
+            .migrate_tick_stochastic(&blueprint, &ecology)
+            .expect("first stochastic migration");
+        executor
+            .migrate_tick_stochastic(&blueprint, &ecology)
+            .expect("second stochastic migration");
+        (
+            executor.download_ind().expect("download ind"),
+            executor.download_sperm().expect("download sperm"),
+        )
+    };
+
+    let (a_ind, a_sperm) = run_twice(&ind, &sperm);
+    let (b_ind, b_sperm) = run_twice(&ind, &sperm);
+    assert_eq!(
+        a_ind.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        b_ind.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "reusing the stochastic scratch must stay reproducible"
+    );
+    assert_eq!(
+        a_sperm.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        b_sperm.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "reusing the stochastic scratch must stay reproducible"
+    );
+}
+
+#[test]
+fn stochastic_migration_validates_inputs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (_, mut ecology) = density_fixture();
+    ecology.migration_rate = vec![0.1f64; 4 * 2 * 4];
+    let (ind, sperm) = populated_state(4, 4, 2);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, 4, 4, 2, &ind, &sperm).expect("executor uploads and compiles");
+
+    // Missing CSR row pointers are rejected before any launch.
+    let mut bad_indptr = migration_blueprint();
+    bad_indptr.migration_indptr = vec![0, 2];
+    assert!(executor
+        .migrate_tick_stochastic(&bad_indptr, &ecology)
+        .is_err());
+
+    // An empty migration column is a no-op.
+    let mut empty = ecology.clone();
+    empty.migration_rate = vec![];
+    assert!(executor
+        .migrate_tick_stochastic(&migration_blueprint(), &empty)
+        .is_ok());
+}
+
+#[test]
+fn ensemble_rejects_mismatched_replicate_state() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let ind_one = vec![1.0f32; 2 * n_ages * n_ztypes];
+    let sperm_one = vec![0.0f32; n_ages * n_ztypes * n_ztypes];
+
+    // Wrong individual length per replicate.
+    let context = GpuContext::new(0).expect("device 0 context");
+    assert!(GpuExecutor::ensemble(
+        context,
+        3,
+        n_ages,
+        n_ztypes,
+        &ind_one[..ind_one.len() - 1],
+        &sperm_one,
+        1,
+    )
+    .is_err());
+
+    // Wrong sperm length per replicate.
+    let context = GpuContext::new(0).expect("device 0 context");
+    assert!(GpuExecutor::ensemble(
+        context,
+        3,
+        n_ages,
+        n_ztypes,
+        &ind_one,
+        &sperm_one[..sperm_one.len() - 1],
+        1,
+    )
+    .is_err());
+}
+
 // ---------------------------------------------------------------------------
 // Evaluator adversarial migration topologies (P5).
 // ---------------------------------------------------------------------------

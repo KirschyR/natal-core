@@ -63,7 +63,8 @@ rust/**                  ④ 原生引擎（单 crate `natal-engine-core` → `_
 | 最新文档 | `8b84eeb` `d6f24a2` | 各轮交接/回执 |
 
 独立审查（`EVALUATE.md`）：P0–P3 第 3 轮 APPROVED；P5 第 4 轮 APPROVED；P4 第 6 轮 APPROVED（PTRS 修复后）；
-空间随机第 7 轮 APPROVED；**P6 第 9 轮待回执**。
+空间随机第 7 轮 APPROVED；**第 8 轮（越界守卫，§25）、第 9 轮（P6，§27）待回执**；第 10 轮
+（CSR 缓存 + 零逐 tick 回传，§28）已实现并自测，**待第 10 轮独立复核（§29）**。
 
 ---
 
@@ -187,8 +188,9 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 - **`continuous_sampling=true`**：设备显式拒绝（未实现连续抽样）。
 - **hooks/停止门控**：含钩子模型设备拒绝；D6 设备侧门控未做。
 - **离散世代 GPU**：空间离散被拒；仅年龄结构。
-- **设备侧 history 驻留**：年龄结构设备分支跑完才回传（无历史）；空间为逐 tick 回传（历史可用但有同步开销）。
-- **迁移每 tick 重建反 CSR** 并整列上传（性能取舍，未缓存）。
+- **设备侧 history 驻留**：年龄结构设备分支跑完才回传（无历史）；空间已改为运行期**零逐 tick 回传**
+  （仅历史边界与结束时 `sync_gpu_state`），但历史行仍先在 host 生成，**未做设备侧历史缓冲**（第 10 轮，待复核）。
+- **迁移 CSR 已缓存**（`MigrationCache`，含随机 `fwd_*` scratch），只在 CSR 变化时重建；`migration_rate` 仍逐 tick 上传。
 - **无 frontend/population 级 ensemble 入口与文档**；ensemble 仅到 backend 层。
 - `survival_stochastic` 对非法状态 `n_virgins<-EPS` 静默夹 0，CPU 返回 `Err`（低危，未对齐）。
 - P6 性能：GPU 单位工作量约快 ~40×，但相对 16 核 `ProcessPoolExecutor` 墙面加速比仅 **2.4–3.3×**，未达数量级。
@@ -198,7 +200,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **151**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  `cargo test --features gpu`（当前 **155**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
   （跳过硬件）、`ruff`、`pyright`、`pytest`（3606）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
@@ -228,14 +230,15 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 ## 11. 下一步计划（建议顺序）
 
-1. **等 P6 第 9 轮回执**（`EVALUATE.md` §27）。若判定“加速比不足”，需与用户确认阈值；可换更大单 replicate 状态、
-   更少 CPU 核、或更多 tick 重测。
-2. **设备侧 history 驻留**（D5）：空间分支改为设备内缓冲、结束一次回传，去除逐 tick 下载。
+1. **等 §25 / §27 / §29 回执**（第 8–10 轮）。P6 若判定“加速比不足”，需与用户确认阈值；可换更大单 replicate
+   状态、更少 CPU 核、或更多 tick 重测。
+2. **设备侧历史缓冲**（D5 完整形态）：把历史行改在设备侧暂存、`query()` 时一次下载；当前只做到“运行期零逐 tick
+   回传 + 边界同步”。
 3. **停止门控**（D6）：无钩子模型的 `stop_if_*` 设备侧门控，消除主机同步。
 4. **`continuous_sampling` 支持**：连续二项/多项。
 5. **离散世代 GPU 路径**（当前空间离散被拒）。
 6. **frontend/population 级 ensemble 入口 + 文档**（`demos/` 或 `docs/` 同步，遵守中英同步规则）。
-7. 性能优化：缓存反 CSR / ecology 上传、融合 kernel、减少每 tick 启动。
+7. 性能优化：CSR 缓存已完成（第 10 轮）；剩余为 ecology 增量上传、融合 kernel、减少每 tick 启动。
 
 每完成一个阶段：跑全部门禁 → 独立审查（`EVALUATE.md` 交接 → 回执）→ 再进入下一阶段。
 

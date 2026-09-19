@@ -777,18 +777,22 @@ impl SpatialSession {
             return Err(PyValueError::new_err("n_steps must be >= 0"));
         }
         if record_interval > 0 && self.state_tick % record_interval == 0 {
+            self.sync_gpu_state()?;
             self.record_history(true)?;
         }
         for _ in 0..n_ticks {
             let previous = self.state_tick;
             self.run_tick()?;
             if self.state_tick == previous {
+                self.sync_gpu_state()?;
                 return Ok((self.state_tick, true));
             }
             if record_interval > 0 && self.state_tick % record_interval == 0 {
+                self.sync_gpu_state()?;
                 self.record_history(true)?;
             }
         }
+        self.sync_gpu_state()?;
         Ok((self.state_tick, false))
     }
 
@@ -1210,16 +1214,21 @@ fn validate_stacked_sperm(
 
 impl SpatialSession {
     /// Run one deterministic spatial tick on the device (lifecycle then
-    /// migration) and copy the state back into the f64 session state.
+    /// migration), leaving the result resident on the GPU.
+    ///
+    /// The host session arrays are deliberately not copied back here: a
+    /// multi-tick run keeps its state on the device and refreshes the host
+    /// arrays only at history boundaries and at the end of the run
+    /// ([`Self::sync_gpu_state`]).
     ///
     /// ## Parameters
     /// - `gpu`: Uploaded device executor.
     /// - `blueprint`, `ecology`, `variants`, `deme_variants`: Live contracts.
     /// - `stay_after_send`: Deterministic migration bookkeeping mode.
-    /// - `state_ind`, `state_sperm`, `state_tick`: Session state, updated in place.
+    /// - `state_tick`: Session tick, updated in place.
     ///
     /// ## Returns
-    /// `Ok(())` once the tick is complete and downloaded.
+    /// `Ok(())` once the tick is complete on the device.
     ///
     /// ## Errors
     /// Returns the first device-stage error.
@@ -1232,8 +1241,6 @@ impl SpatialSession {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
         stay_after_send: bool,
-        state_ind: &mut Vec<f64>,
-        state_sperm: &mut Vec<f64>,
         state_tick: &mut i64,
     ) -> Result<(), String> {
         gpu.tick(blueprint, ecology, variants, deme_variants)?;
@@ -1245,9 +1252,38 @@ impl SpatialSession {
                 gpu.migrate_tick(blueprint, ecology, stay_after_send)?;
             }
         }
-        *state_ind = gpu.download_ind()?.into_iter().map(f64::from).collect();
-        *state_sperm = gpu.download_sperm()?.into_iter().map(f64::from).collect();
         *state_tick += 1;
+        Ok(())
+    }
+
+    /// Copy the resident device state back into the host session arrays.
+    ///
+    /// Called at history record boundaries and once at the end of a run so a
+    /// multi-tick device run does not transfer state every tick. This is a
+    /// no-op on the CPU path (no device executor).
+    ///
+    /// ## Errors
+    /// Returns the download error when the device copy fails.
+    #[cfg(feature = "gpu")]
+    fn sync_gpu_state(&mut self) -> PyResult<()> {
+        if let Some(gpu) = self.gpu.take() {
+            let outcome = (|| -> Result<(), String> {
+                self.state_ind = gpu.download_ind()?.into_iter().map(f64::from).collect();
+                self.state_sperm = gpu.download_sperm()?.into_iter().map(f64::from).collect();
+                Ok(())
+            })();
+            self.gpu = Some(gpu);
+            outcome.map_err(map_lifecycle_error)?;
+        }
+        Ok(())
+    }
+
+    /// CPU build of [`Self::sync_gpu_state`]: nothing to transfer.
+    ///
+    /// ## Errors
+    /// Never fails.
+    #[cfg(not(feature = "gpu"))]
+    fn sync_gpu_state(&mut self) -> PyResult<()> {
         Ok(())
     }
 
@@ -1262,8 +1298,6 @@ impl SpatialSession {
                 &self.variants,
                 &self.deme_variants,
                 self.stay_after_send,
-                &mut self.state_ind,
-                &mut self.state_sperm,
                 &mut self.state_tick,
             );
             self.gpu = Some(gpu);

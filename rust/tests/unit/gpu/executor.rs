@@ -3188,16 +3188,72 @@ fn stochastic_survival_rejects_negative_virgin_state() {
         .expect_err("negative virgins must be rejected");
     assert!(error.contains("n_virgins"), "unexpected error: {error}");
 
-    // A sub-tolerance negative is f32 rounding noise and clamps silently.
-    let mut tiny_sperm = vec![0.0f32; n_batch * sperm_stride];
+    // A valid state (stored sperm == female) must not be rejected. The adults
+    // sit at age 1 so recruitment (age 0 only) cannot disturb the comparison.
+    let mut valid_ind = vec![0.0f32; n_batch * ind_stride];
+    let mut valid_sperm = vec![0.0f32; n_batch * sperm_stride];
+    valid_ind[(0 * n_ages + 1) * z + 0] = 1000.0;
     for gm in 0..z {
-        tiny_sperm[(0 * z + 0) * z + gm] = 5.0e-5;
+        valid_sperm[(1 * z + 0) * z + gm] = 500.0;
     }
     let context = GpuContext::new(0).expect("device 0 context");
     let mut tolerant =
-        GpuExecutor::new(context, n_batch, n_ages, z, &ind, &tiny_sperm).expect("exec");
+        GpuExecutor::new(context, n_batch, n_ages, z, &valid_ind, &valid_sperm).expect("exec");
     tolerant.set_seed(1);
     tolerant
         .survival_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
-        .expect("rounding-noise negative must clamp");
+        .expect("a valid stored==female state must not be rejected");
+}
+
+#[test]
+fn evaluator_valid_large_virgin_state_is_not_rejected() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // A valid state (stored sperm mathematically equal to the female count) at
+    // a realistic per-genotype scale (~1e5, Z=4) whose f32 sequential sum
+    // overshoots by ~0.008. The host (f64) sees virgins == 0 and continues;
+    // the fixed 1e-3f device tolerance must not abort this valid run.
+    let n_batch = 1usize;
+    let n_ages = 4usize;
+    let z = 4usize;
+    let rate = evaluator_rate(n_batch, n_ages);
+    let ecology = evaluator_migration_ecology(n_batch, n_ages, &rate);
+    let genetics = reproduction_genetics(n_ages, z);
+    let variants = vec![genetics];
+    let mut blueprint = dimension_blueprint(n_ages, z);
+    blueprint.stochastic = true;
+    blueprint.continuous_sampling = true;
+    blueprint.n_demes = n_batch;
+    blueprint.migration_indptr = vec![0; n_batch + 1];
+
+    let ind_stride = 2 * n_ages * z;
+    let sperm_stride = n_ages * z * z;
+    let mut ind = vec![0.0f32; n_batch * ind_stride];
+    let mut sperm = vec![0.0f32; n_batch * sperm_stride];
+    // Age 1, female ztype 0 carries 100000 individuals; age 0 stays zero so
+    // recruitment does not resample the juvenile class.
+    ind[(0 * n_ages + 1) * z + 0] = 100000.0;
+    let stored = [
+        25000.25390625f32,
+        25000.666015625,
+        24999.32421875,
+        24999.755859375,
+    ];
+    // Mathematical sum is exactly 100000.0 (virgins == 0).
+    let math_sum: f64 = stored.iter().map(|v| f64::from(*v)).sum();
+    assert_eq!(math_sum, 100000.0);
+    for gm in 0..z {
+        sperm[(1 * z + 0) * z + gm] = stored[gm];
+    }
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, z, &ind, &sperm).expect("exec");
+    executor.set_seed(7);
+    let result = executor.survival_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch]);
+    assert!(
+        result.is_ok(),
+        "a valid stored==female state must not be rejected: {result:?}"
+    );
 }

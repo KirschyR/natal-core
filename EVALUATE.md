@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 18 轮：**APPROVED**（§45；A1 GPU checkpoint 设备恢复） |
-| 待回执 | §47（第 19 轮 A2：随机生存非法状态显式报错） |
-| 主 agent 处理 | 第 19 轮：A2 已实现并自测；下一项为 C10 |
-| 待 evaluator 动作 | 按 §46 复核，把第 19 轮结论写入 §47 |
+| 最近回执 | 第 19 轮：**NOT APPROVED**（§47；固定 `1e-3f` 容差对大规模有效状态误报） |
+| 待回执 | §49（第 19 轮 A2 修复复核） |
+| 主 agent 处理 | A2 已按尺度相关容差修复并自测；下一项为 C10 |
+| 待 evaluator 动作 | 按 §48 复核修复目标，把结论写入 §49 |
 
 ## 0. 一句话目标
 
@@ -1191,6 +1191,40 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 48. 第 19 轮修复交接（处理 §47 阻塞项）
+
+- 日期：2026-09-19
+- 针对 §47.1/§47.2：固定绝对容差 `1e-3f` 对大规模有效状态误报。
+- 风险分类：**局部代码修改**（容差公式；方向与 A2 相同）。
+
+### 48.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | 容差改为**尺度相关**：`tol = 8 * (|n_f_raw| + |total_sperm|) * NATAL_F32_EPS + NATAL_VIRGIN_EPS_ABS`，其中 `NATAL_F32_EPS = 1.19209290e-7f`、绝对下限 `NATAL_VIRGIN_EPS_ABS = 1e-9f`；仅当 `virgins < -tol` 置 violation（否则夹 0）。 |
+| `rust/tests/unit/gpu/executor.rs` | 作者用例第二段改为「有效 stored==female（成年 age1，避免 recruit 干扰）必须 `Ok`」。 |
+
+### 48.2 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu evaluator_valid_large_virgin_state_is_not_rejected`（§47.2 失败回归） | **ok**（修复前 `Err`） |
+| `cargo test --features gpu stochastic_survival_rejects_negative_virgin_state` | ok（`-20` → Err；有效 stored==female → Ok） |
+| `cargo test --features gpu` | **179 passed, 0 failed**（含 evaluator 回归） |
+| `cargo test` / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3611 passed / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2390/2464 = 97.00%**；executor 96.2%、kernels 97.5%、probe 96.1%，每文件 ≥95% |
+
+### 48.3 请 evaluator 复核
+
+- 重跑 `evaluator_valid_large_virgin_state_is_not_rejected` 确认转绿、且 `-20` 等真实非法状态仍 `Err`。
+- 核对尺度相关容差在更大规模（接近 2²⁴ 整数上限）与 Z 较大时无误报；必要时给出更保守系数。
+- 其余 §47.3 结论（分布等价、门禁、覆盖率）与 §47.4 同步权衡（每 tick 4 字节 D2H）不变。
+
+结论请追加为 **§49**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2276,3 +2310,63 @@ GPU 会话 checkpoint 回滚现在同时回滚显存状态与设备 tick；恢�
 
 A1 设备恢复正确、经会话级逐位用例与 Python 端到端逐位对照独立确认，质量与覆盖率达标。**APPROVED**
 （范围为当前 HEAD `7edff1b` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 47. 第 19 轮结论（evaluator 独立执行，2026-09-19，HEAD=`25dae0a`）
+
+### 47.1 裁定：**NOT APPROVED**
+
+- **阻塞项（medium）**：A2 使用**固定绝对容差** `NATAL_VIRGIN_EPS = 1e-3f` 判定“显著为负的 virgin 计数”。
+  在较大单格点计数（约 `≥1e5`）与多个 sperm 类别下，`stored_total` 的 f32 顺序累加会产生 `>1e-3` 的正偏差，
+  使**有效状态**（数学上 `stored ≤ female`、host f64 判 `virgins == 0`）被误判为非法并中止运行。
+- A2 对“明显非法状态”的显式报错行为本身正确；其余门禁/覆盖率通过。
+
+### 47.2 阻塞项证据（已实际运行且失败）
+
+- evaluator 回归测试 `rust/tests/unit/gpu/executor.rs::evaluator_valid_large_virgin_state_is_not_rejected`
+  命令：`cargo test --features gpu evaluator_valid_large_virgin_state_is_not_rejected`
+  构造：`n_ages=4, Z=4, female(age1,z0)=100000.0`，`sperm(age1,gf0,gm0..3)=
+  [25000.25390625, 25000.666015625, 24999.32421875, 24999.755859375]`，其**数学和恰为 100000.0**
+  （host f64 判 `virgins == 0`，不报错）。
+  预期：设备 `survival_tick` 返回 `Ok`（有效状态，不得中止）
+  实际：**`Err("Invalid state: n_virgins < 0 in GPU stochastic survival")`** → FAILED。
+- 机理：设备按 `stored += sperm[...]` 顺序 f32 累加得 `100000.0078125`，`virgins = 100000 − 100000.0078 =
+  −0.0078125 < −1e-3` → 置 violation。该偏差随量级增长：数值搜索显示
+  `female=1e5, Z=4` 的有效状态最大正偏差 `≈0.0078`，`Z=8 ≈0.0078`，`Z=32 ≈0.023`；
+  `female=1e4, Z=32 ≈0.0029`——均超过 `1e-3`。
+- 位置：`rust/src/gpu/kernels.rs` `survival_stochastic` 的 `if (virgins < -NATAL_VIRGIN_EPS)`；
+  常量 `#define NATAL_VIRGIN_EPS 1e-3f`。宿主对照为 `age_structured::sample_survival_with_sperm` 的
+  `n_virgins_raw < -EPS`（`EPS=1e-10`，f64）。
+- **建议修复**：改为**尺度相关**容差，例如
+  `tol = c * (fabsf(n_f_raw) + fabsf(total_sperm)) * FLT_EPSILON + 1e-9f`
+  （`c≈8`，f32 eps≈1.2e-7），或对 `stored` 用树形/成对求和降低偏差；这样 `-20` 等真实非法状态仍被拒绝
+  （1e5 量级 tol≈0.1），而 `-0.008` 的舍入噪声被接受。修复后本回归测试应转绿。
+
+### 47.3 已独立验证正确的部分
+
+- **明显非法路径**：作者用例 `stochastic_survival_rejects_negative_virgin_state`（`-20 → Err`；
+  `-1e-4 → Ok` 夹 0）通过。
+- **随机生存分布**：`device_stochastic_survival_*_matches_host_distribution`（离散/连续）仍通过。
+- **门禁/覆盖率**：见 47.4；确定性路径与既有能力零回归。
+- **同步权衡**：随机生存每 tick 增加一次 4 字节 D2H（读取 violation）。功能正确，但与“逐 tick 零回传”
+  目标有轻微冲突；若后续定位为热点，可考虑延后到下载边界检查。非阻塞。
+
+### 47.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` / `cargo test --features gpu`（作者用例） | 67 / **178 passed** |
+| `cargo test --features gpu`（含 evaluator 回归） | 178 passed, **1 failed**（=47.2） |
+| `cargo test --features gpu stochastic_survival_rejects_negative_virgin_state` | passed |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3611 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2390/2464 = 97.00%**；逐文件均 ≥95% |
+
+### 47.5 结论
+
+A2 的“显式拒绝非法状态”方向正确，但固定 `1e-3f` 容差会在较大规模下**误伤有效状态并中止运行**；
+已给出实际失败的回归测试与尺度相关容差的修复建议。**NOT APPROVED**，待主 agent 修复后回交复核。

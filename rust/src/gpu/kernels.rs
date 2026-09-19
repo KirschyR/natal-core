@@ -1108,10 +1108,13 @@ extern "C" __global__ void multinomial_seq(
 #define NATAL_MAX_Z 32
 
 // f32 tolerance for the virgin-count non-negativity check. The host uses a
-// 1e-10 f64 threshold; f32 rounding on fractional (continuous-sampling) counts
-// is coarser, so the device rejects only meaningfully negative states and
-// clamps the rounding noise.
-#define NATAL_VIRGIN_EPS 1e-3f
+// 1e-10 f64 threshold; the device must scale the tolerance with magnitude,
+// because a sequential f32 sum of the sperm categories drifts by roughly
+// `8 * eps * (|female| + |sperm|)` at count scales up to the 2^24 integer
+// limit. States inside that drift are rounding noise and clamp to zero;
+// meaningfully negative states are reported through `violation`.
+#define NATAL_VIRGIN_EPS_ABS 1e-9f
+#define NATAL_F32_EPS 1.19209290e-7f
 
 __device__ __forceinline__ float natal_clamp01(float x) {
     if (x <= 0.0f) {
@@ -1264,10 +1267,13 @@ extern "C" __global__ void survival_stochastic(
     }
     float virgins = n_f_raw - total_sperm;
     if (virgins < 0.0f) {
-        if (virgins < -NATAL_VIRGIN_EPS) {
+        float tolerance = 8.0f * (fabsf(n_f_raw) + fabsf(total_sperm)) * NATAL_F32_EPS
+            + NATAL_VIRGIN_EPS_ABS;
+        if (virgins < -tolerance) {
             // The host errors on a meaningfully negative virgin count; record
             // it so the executor can return an explicit failure instead of
-            // silently clamping a corrupted state.
+            // silently clamping a corrupted state. Magnitude-scaled so valid
+            // large states whose f32 sum drifts positive are not misreported.
             violation[0] = 1;
         }
         virgins = 0.0f;

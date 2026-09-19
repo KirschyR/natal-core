@@ -64,8 +64,9 @@ rust/**                  ④ 原生引擎（单 crate `natal-engine-core` → `_
 
 独立审查（`EVALUATE.md`）：P0–P3 第 3 轮 APPROVED；P5 第 4 轮 APPROVED；P4 第 6 轮 APPROVED（PTRS 修复后）；
 空间随机第 7 轮 APPROVED；第 8 轮（越界守卫，§25）APPROVED；第 9 轮（P6，§27）APPROVED；
-第 10 轮（CSR 缓存 + 零逐 tick 回传，§28）**NOT APPROVED**（§29：公共单 tick 读路径陈旧），
-已按 §30 修复（公共 `run_tick` 同步、`run_steps` 调 `advance_tick`），**待复核（§31）**。
+第 10 轮（CSR 缓存 + 零逐 tick 回传，§28）→ §29 **NOT APPROVED**（公共单 tick 读路径陈旧），
+已按 §30 修复（公共 `run_tick` 同步、`run_steps` 调 `advance_tick`），第 11 轮 **APPROVED**（§31）；
+第 12 轮（观测模式设备侧历史缓冲，§32）已实现并自测，**待复核（§33）**。
 
 ---
 
@@ -129,6 +130,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 | `MIGRATION_SOURCE` | `migration_female/sperm/male` | 确定性 CSR **gather**（反 CSR，无原子） |
 | `RNG_SOURCE` | `philox4x32_10` / `fill_uniform` | counter-based RNG 基础 |
 | `SAMPLING_SOURCE` | `RngState`/`rng_uniform|normal`/`sample_binomial|poisson|gamma`/`natal_multinomial`/`multinomial_seq`/`recruit_stochastic`/`survival_stochastic`/`reproduction_stochastic`/`migration_stochastic_prepare`+`gather_*` | 随机路径 |
+| `OBSERVATION_SOURCE` | `observation_project` | 观测历史行设备投影（复刻 host `project`） |
 | （`cuda.rs`） | `add_one` | P0-b 工具链自证 |
 
 ---
@@ -189,8 +191,8 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 - **`continuous_sampling=true`**：设备显式拒绝（未实现连续抽样）。
 - **hooks/停止门控**：含钩子模型设备拒绝；D6 设备侧门控未做。
 - **离散世代 GPU**：空间离散被拒；仅年龄结构。
-- **设备侧 history 驻留**：年龄结构设备分支跑完才回传（无历史）；空间已改为运行期**零逐 tick 回传**
-  （仅历史边界与结束时 `sync_gpu_state`），但历史行仍先在 host 生成，**未做设备侧历史缓冲**（第 10 轮，待复核）。
+- **设备侧 history 驻留（观测模式）已实现**：空间观测历史在设备上投影成行、运行期零逐记录回传、结束时一次下载回填
+  `HistoryStore`；**raw 模式与设备窗口超预算时仍走 host 逐记录路径**（第 12 轮，§32，待复核）。
 - **迁移 CSR 已缓存**（`MigrationCache`，含随机 `fwd_*` scratch），只在 CSR 变化时重建；`migration_rate` 仍逐 tick 上传。
 - **无 frontend/population 级 ensemble 入口与文档**；ensemble 仅到 backend 层。
 - `survival_stochastic` 对非法状态 `n_virgins<-EPS` 静默夹 0，CPU 返回 `Err`（低危，未对齐）。
@@ -201,11 +203,11 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **155**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  `cargo test --features gpu`（当前 **160**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
   （跳过硬件）、`ruff`、`pyright`、`pytest`（3606）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
-  `src/gpu/../../tests/...`），当前聚合 ~97%；新模块需 ≥95%。
+  `src/gpu/../../tests/...`），当前聚合 **97.54%**（executor 96.8%、kernels 98.0%）；新模块需 ≥95%。
 - 高风险改动必须由独立 evaluator 复核（走 `EVALUATE.md`，用 `adversarial-review` 技能）。
 
 ---
@@ -231,15 +233,14 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 ## 11. 下一步计划（建议顺序）
 
-1. **等 §25 / §27 / §29 回执**（第 8–10 轮）。P6 若判定“加速比不足”，需与用户确认阈值；可换更大单 replicate
+1. **等 §33 回执**（第 12 轮）。P6 若判定“加速比不足”，需与用户确认阈值；可换更大单 replicate
    状态、更少 CPU 核、或更多 tick 重测。
-2. **设备侧历史缓冲**（D5 完整形态）：把历史行改在设备侧暂存、`query()` 时一次下载；当前只做到“运行期零逐 tick
-   回传 + 边界同步”。
+2. **设备侧历史缓冲**（D5）：观测模式已完成（第 12 轮）；后续可把 raw 模式也搬到设备，并按 `max_rows` 收缩窗口。
 3. **停止门控**（D6）：无钩子模型的 `stop_if_*` 设备侧门控，消除主机同步。
 4. **`continuous_sampling` 支持**：连续二项/多项。
 5. **离散世代 GPU 路径**（当前空间离散被拒）。
 6. **frontend/population 级 ensemble 入口 + 文档**（`demos/` 或 `docs/` 同步，遵守中英同步规则）。
-7. 性能优化：CSR 缓存已完成（第 10 轮）；剩余为 ecology 增量上传、融合 kernel、减少每 tick 启动。
+7. 性能优化：CSR 缓存（第 10 轮）、观测历史设备投影（第 12 轮）已完成；剩余为 ecology 增量上传、融合 kernel、减少每 tick 启动。
 
 每完成一个阶段：跑全部门禁 → 独立审查（`EVALUATE.md` 交接 → 回执）→ 再进入下一阶段。
 

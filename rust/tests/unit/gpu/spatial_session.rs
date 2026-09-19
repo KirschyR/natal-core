@@ -12,6 +12,8 @@ use crate::kernels::rng::{new_rng, stream_seed};
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
 use crate::model::genetics::GeneticsTensors;
+use crate::output::history::{HistoryData, SharedHistory};
+use crate::output::observation::project;
 use crate::sessions::status::ExecutionStatus;
 use std::collections::HashMap;
 
@@ -391,4 +393,172 @@ fn evaluator_single_tick_syncs_host_state() {
             "host ind[{index}] stale after run_tick: gpu {got} vs cpu {want}"
         );
     }
+}
+
+/// Build a configured observation history store for the fixture dimensions.
+///
+/// ## Parameters
+/// - `dims`, `mask`, `selected`, `collapse`, `aggregate`: Projection config.
+///
+/// ## Returns
+/// A shared store whose `width` includes the tick column.
+fn configured_history(
+    dims: [usize; 4],
+    mask: Vec<f64>,
+    selected: Vec<usize>,
+    collapse: bool,
+    aggregate: bool,
+) -> SharedHistory {
+    let store = HistoryData::transient(1, dims, false);
+    {
+        let mut data = store.lock().unwrap();
+        data.mask = mask;
+        data.selected = selected;
+        data.collapse_age = collapse;
+        data.aggregate = aggregate;
+        let zero = vec![0.0f64; dims.iter().product()];
+        let projected =
+            project(&zero, &data.mask, dims, &data.selected, collapse, aggregate).unwrap();
+        data.width = 1 + projected.len();
+    }
+    store
+}
+
+#[test]
+fn spatial_device_history_stages_and_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let plane = 2 * 4 * 2;
+    let mask = vec![1.0f64; plane];
+    for (collapse, aggregate) in [(false, false), (true, true)] {
+        for interval in [1i64, 2] {
+            let selected = vec![0usize, 1, 2];
+            let mut gpu = make_session(
+                blueprint.clone(),
+                ecology.clone(),
+                vec![genetics.clone()],
+                vec![0, 0, 0],
+                false,
+                false,
+            );
+            gpu.enable_gpu().expect("enable gpu");
+            gpu.history_store = Some(configured_history(
+                dims,
+                mask.clone(),
+                selected.clone(),
+                collapse,
+                aggregate,
+            ));
+            // Guard against a silent host fallback: the window must be usable.
+            assert!(
+                gpu.start_device_history(8),
+                "device history staging must be available"
+            );
+            gpu.run_steps(4, interval).expect("gpu run_steps");
+
+            let mut cpu = make_session(
+                blueprint.clone(),
+                ecology.clone(),
+                vec![genetics.clone()],
+                vec![0, 0, 0],
+                false,
+                false,
+            );
+            cpu.history_store = Some(configured_history(
+                dims,
+                mask.clone(),
+                selected.clone(),
+                collapse,
+                aggregate,
+            ));
+            cpu.run_steps(4, interval).expect("cpu run_steps");
+
+            let (g_flat, g_width, g_rows) = {
+                let data = gpu.history_store.as_ref().unwrap().lock().unwrap();
+                let (flat, rows) = data.flat_rows();
+                (flat, data.width, rows)
+            };
+            let (c_flat, c_width, c_rows) = {
+                let data = cpu.history_store.as_ref().unwrap().lock().unwrap();
+                let (flat, rows) = data.flat_rows();
+                (flat, data.width, rows)
+            };
+            assert_eq!(g_width, c_width);
+            assert_eq!(g_rows, c_rows, "history row count");
+            let expected: Vec<i64> = (0..=4).step_by(interval as usize).collect();
+            assert_eq!(g_rows, expected.len(), "unexpected row count");
+            for (row, tick) in expected.iter().enumerate() {
+                assert_eq!(g_flat[row * g_width] as i64, *tick, "gpu tick");
+                assert_eq!(c_flat[row * c_width] as i64, *tick, "cpu tick");
+            }
+            for (index, (got, want)) in g_flat.iter().zip(c_flat.iter()).enumerate() {
+                let got = *got as f32;
+                let want = *want as f32;
+                let tolerance = 1e-4f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "collapse={collapse} aggregate={aggregate} interval={interval} [{index}]: \
+                     device {got} vs host {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn spatial_device_history_falls_back_for_raw_or_missing_window() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+
+    // GPU disabled: no device window.
+    let mut plain = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    assert!(!plain.start_device_history(2));
+
+    // GPU enabled but no history store: no device window.
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.enable_gpu().expect("enable gpu");
+    assert!(!gpu.start_device_history(2));
+
+    // Raw history is full-state: it keeps the host per-record path.
+    let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
+    gpu.history_store = Some(HistoryData::transient(raw_width, dims, true));
+    assert!(!gpu.start_device_history(2));
+    gpu.run_steps(2, 1).expect("raw gpu run");
+    let ticks: Vec<i64> = {
+        let data = gpu.history_store.as_ref().unwrap().lock().unwrap();
+        data.rows.iter().map(|row| row[0] as i64).collect()
+    };
+    assert_eq!(ticks, vec![0, 1, 2], "raw history must keep host recording");
+
+    // Observation history on the same GPU session uses the device window.
+    gpu.history_store = Some(configured_history(
+        dims,
+        vec![1.0; 16],
+        vec![0, 1, 2],
+        true,
+        true,
+    ));
+    assert!(gpu.start_device_history(2));
 }

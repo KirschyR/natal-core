@@ -58,6 +58,8 @@ pub struct GpuExecutor {
     tick: u64,
     /// Cached static migration buffers for the current CSR, if any.
     migration_cache: Option<MigrationCache>,
+    /// Device-staged observation history rows for the current run, if any.
+    history: Option<DeviceHistory>,
 }
 
 /// Device-resident static buffers for one migration CSR.
@@ -95,6 +97,67 @@ struct MigrationCache {
     fwd_s: DeviceBuffer<f32>,
     /// Stochastic male forward scratch, `nnz · A · Z`.
     fwd_m: DeviceBuffer<f32>,
+}
+
+/// Host description of one device-side history projection window.
+///
+/// The session builds this from the bound [`crate::output::history::HistoryData`]
+/// configuration so the device rows match the host observation projection.
+pub struct HistorySpec {
+    /// Number of record rows this window may hold.
+    pub capacity: usize,
+    /// Projected values per row, excluding the host-added tick column.
+    pub width: usize,
+    /// Population dimensions `[n_demes, n_sexes, n_ages, n_ztypes]`.
+    pub dims: [usize; 4],
+    /// Observation weights, `groups · S · A · Z`.
+    pub mask: Vec<f64>,
+    /// Deme indices retained by the projection.
+    pub selected: Vec<usize>,
+    /// Collapse the age axis to one output column.
+    pub collapse: bool,
+    /// Aggregate all selected demes into one output column.
+    pub aggregate: bool,
+}
+
+/// Device-resident observation history rows for the current run.
+///
+/// Rows are projected on the device and downloaded once, so a long run does
+/// not synchronize host state at every record tick. Only observation-mode
+/// (non-raw) history is staged; raw rows keep the host path.
+struct DeviceHistory {
+    /// Projected values per row, excluding the tick column.
+    width: usize,
+    /// Allocated row capacity.
+    capacity: usize,
+    /// Rows written so far.
+    rows: usize,
+    /// Number of observation groups.
+    n_groups: usize,
+    /// `n_sexes · n_ages · n_ztypes`.
+    plane: usize,
+    /// Number of selected demes.
+    n_selected: usize,
+    /// Sex-axis length.
+    n_sexes: usize,
+    /// Age-axis length.
+    n_ages: usize,
+    /// Zygote-type axis length.
+    n_ztypes: usize,
+    /// Output deme extent (`1` when aggregating).
+    out_d: usize,
+    /// Output age extent (`1` when collapsing).
+    out_a: usize,
+    /// Age-axis collapse flag.
+    collapse: bool,
+    /// Deme aggregation flag.
+    aggregate: bool,
+    /// Observation weights uploaded as `f32`.
+    mask: DeviceBuffer<f32>,
+    /// Selected deme indices uploaded as `i32`.
+    selected: DeviceBuffer<i32>,
+    /// Row-major row storage, `capacity · width`.
+    buffer: DeviceBuffer<f32>,
 }
 
 impl GpuExecutor {
@@ -163,6 +226,7 @@ impl GpuExecutor {
             seed: 0,
             tick: 0,
             migration_cache: None,
+            history: None,
         })
     }
 
@@ -1100,6 +1164,162 @@ impl GpuExecutor {
             self.migration_cache = Some(cache);
         }
         Ok(())
+    }
+
+    /// Allocate the device history window described by `spec`.
+    ///
+    /// The projection dimensions must match the executor, and the whole window
+    /// (rows plus mask/selection) must fit in the measured free memory. The
+    /// session treats an error as "device staging unavailable" and keeps the
+    /// host per-record path, so no engine fallback is involved.
+    ///
+    /// ## Parameters
+    /// - `spec`: Projection configuration and row capacity.
+    ///
+    /// ## Returns
+    /// `Ok(())` once the window is resident.
+    ///
+    /// ## Errors
+    /// Returns a description when the dimensions disagree, the width does not
+    /// match the mask, or the window does not fit.
+    pub fn configure_history(&mut self, spec: &HistorySpec) -> Result<(), String> {
+        let [d, s, a, z] = spec.dims;
+        let plane = s * a * z;
+        if plane == 0 || d != self.n_batch || s != 2 || a != self.n_ages || z != self.n_ztypes {
+            return Err(format!(
+                "history projection dims {:?} do not match the executor (A={}, Z={})",
+                spec.dims, self.n_ages, self.n_ztypes
+            ));
+        }
+        if spec.mask.is_empty() || spec.mask.len() % plane != 0 {
+            return Err(format!(
+                "history mask length {} is not a positive multiple of the state plane {plane}",
+                spec.mask.len()
+            ));
+        }
+        if spec.selected.is_empty() || spec.selected.iter().any(|index| *index >= d) {
+            return Err("history deme selection is empty or out of range".to_owned());
+        }
+        let groups = spec.mask.len() / plane;
+        let out_d = if spec.aggregate {
+            1
+        } else {
+            spec.selected.len()
+        };
+        let out_a = if spec.collapse { 1 } else { a };
+        let width = groups * out_d * s * out_a;
+        if spec.capacity == 0 || spec.width != width {
+            return Err(format!(
+                "history spec width mismatch: computed {width}, got {}",
+                spec.width
+            ));
+        }
+        let rows = spec
+            .capacity
+            .checked_mul(width)
+            .ok_or_else(|| "history window size overflow".to_owned())?;
+        let required = rows * size_of::<f32>()
+            + spec.mask.len() * size_of::<f32>()
+            + spec.selected.len() * size_of::<i32>();
+        let (free, _total) = self.context.memory_info()?;
+        ensure_memory_budget(free, required)?;
+        let stream = self.context.stream();
+        let mask: Vec<f32> = spec.mask.iter().map(|value| *value as f32).collect();
+        let selected: Vec<i32> = spec.selected.iter().map(|value| *value as i32).collect();
+        self.history = Some(DeviceHistory {
+            width,
+            capacity: spec.capacity,
+            rows: 0,
+            n_groups: groups,
+            plane,
+            n_selected: spec.selected.len(),
+            n_sexes: s,
+            n_ages: a,
+            n_ztypes: z,
+            out_d,
+            out_a,
+            collapse: spec.collapse,
+            aggregate: spec.aggregate,
+            mask: DeviceBuffer::from_host(&stream, &mask)?,
+            selected: DeviceBuffer::from_host(&stream, &selected)?,
+            buffer: DeviceBuffer::from_host(&stream, &vec![0.0f32; rows])?,
+        });
+        Ok(())
+    }
+
+    /// Project the current device state into the next history row.
+    ///
+    /// ## Returns
+    /// `Ok(())` after the row is enqueued and the row count advances.
+    ///
+    /// ## Errors
+    /// Returns a description when no window is configured, it is full, or the
+    /// launch fails.
+    pub fn record_history_row(&mut self) -> Result<(), String> {
+        let mut history = self
+            .history
+            .take()
+            .ok_or_else(|| "device history is not configured".to_owned())?;
+        if history.rows >= history.capacity {
+            self.history = Some(history);
+            return Err("device history window is full".to_owned());
+        }
+        let row_offset = history.rows * history.width;
+        let stream = self.context.stream();
+        let result = self.kernels.observation_project(
+            &stream,
+            self.ind.slice(),
+            history.mask.slice(),
+            history.selected.slice(),
+            history.n_groups,
+            history.plane,
+            history.n_selected,
+            history.n_sexes,
+            history.n_ages,
+            history.n_ztypes,
+            self.n_batch,
+            history.collapse,
+            history.aggregate,
+            history.out_d,
+            history.out_a,
+            row_offset,
+            history.buffer.slice_mut(),
+        );
+        if result.is_ok() {
+            history.rows += 1;
+        }
+        self.history = Some(history);
+        result
+    }
+
+    /// Copy the staged history rows back, flushing them from the device.
+    ///
+    /// ## Returns
+    /// Row-major `rows · width` values, or an empty vector when no window is
+    /// configured.
+    ///
+    /// ## Errors
+    /// Returns a description when the device-to-host copy fails.
+    pub fn download_history_rows(&mut self) -> Result<Vec<f32>, String> {
+        let Some(history) = self.history.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let stream = self.context.stream();
+        let all = history.buffer.to_host(&stream)?;
+        Ok(all[..history.rows * history.width].to_vec())
+    }
+
+    /// Projected values per staged history row.
+    ///
+    /// ## Returns
+    /// The row width, or `None` when no window is configured.
+    pub fn history_width(&self) -> Option<usize> {
+        self.history.as_ref().map(|history| history.width)
+    }
+
+    /// Drop the device history window, releasing its memory.
+    pub fn clear_history(&mut self) {
+        self.history = None;
     }
 
     /// Copy the individual state back in the batch-major CPU layout.

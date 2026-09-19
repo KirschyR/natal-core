@@ -13,8 +13,9 @@ use crate::kernels::spatial::migrate_csr_deterministic;
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
 use crate::model::genetics::GeneticsTensors;
+use crate::output::observation::project;
 
-use super::GpuExecutor;
+use super::{GpuExecutor, HistorySpec};
 use std::collections::HashMap;
 
 /// Build a blueprint carrying only the dimensions `aging` reads.
@@ -1572,6 +1573,176 @@ fn ensemble_rejects_mismatched_replicate_state() {
         1,
     )
     .is_err());
+}
+
+#[test]
+fn device_history_projection_matches_host_project() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 3;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let ind_f64: Vec<f64> = ind.iter().map(|value| f64::from(*value)).collect();
+    let dims = [n_batch, 2, n_ages, n_ztypes];
+    let plane = 2 * n_ages * n_ztypes;
+    let mask_one: Vec<f64> = (0..plane)
+        .map(|index| if index % 3 == 0 { 1.0 } else { 0.5 })
+        .collect();
+    let mask_two: Vec<f64> = (0..2 * plane)
+        .map(|index| if index < plane { 1.0 } else { 0.25 })
+        .collect();
+    let selected = vec![2usize, 0];
+
+    for (mask, selected) in [(&mask_one, vec![0usize, 2]), (&mask_two, selected)] {
+        for (collapse, aggregate) in [(false, false), (true, false), (false, true), (true, true)] {
+            let groups = mask.len() / plane;
+            let out_d = if aggregate { 1 } else { selected.len() };
+            let out_a = if collapse { 1 } else { n_ages };
+            let width = groups * out_d * 2 * out_a;
+            let spec = HistorySpec {
+                capacity: 2,
+                width,
+                dims,
+                mask: mask.clone(),
+                selected: selected.clone(),
+                collapse,
+                aggregate,
+            };
+            let context = GpuContext::new(0).expect("device 0 context");
+            let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+                .expect("executor uploads and compiles");
+            executor
+                .configure_history(&spec)
+                .expect("configure history");
+            executor.record_history_row().expect("record row");
+            let got = executor.download_history_rows().expect("download rows");
+            let want = project(&ind_f64, mask, dims, &selected, collapse, aggregate)
+                .expect("host projection");
+            assert_eq!(got.len(), want.len(), "width mismatch");
+            for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+                let want = *want as f32;
+                let tolerance = 1.2e-6f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "groups={groups} collapse={collapse} aggregate={aggregate} cell[{index}]: \
+                     device {got} vs host {want}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn device_history_rejects_over_budget_and_empty_mask() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 3;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let dims = [n_batch, 2, n_ages, n_ztypes];
+    let plane = 2 * n_ages * n_ztypes;
+    let selected = vec![0usize, 1, 2];
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+
+    // Recording or downloading without a window is an explicit error / empty.
+    assert!(executor.record_history_row().is_err());
+    assert!(executor.history_width().is_none());
+    assert!(executor
+        .download_history_rows()
+        .expect("empty download")
+        .is_empty());
+
+    // An observation-mode window larger than free memory is refused, which the
+    // session treats as "stage on the host instead".
+    let huge = HistorySpec {
+        capacity: 1usize << 40,
+        width: 8,
+        dims,
+        mask: vec![1.0; plane],
+        selected: selected.clone(),
+        collapse: false,
+        aggregate: true,
+    };
+    assert!(executor.configure_history(&huge).is_err());
+
+    // A store without a configured observation mask cannot be projected.
+    let no_mask = HistorySpec {
+        capacity: 2,
+        width: 2,
+        dims,
+        mask: Vec::new(),
+        selected: selected.clone(),
+        collapse: false,
+        aggregate: true,
+    };
+    assert!(executor.configure_history(&no_mask).is_err());
+
+    // Dimensions, selection, and width are validated against the executor.
+    let bad_dims = HistorySpec {
+        capacity: 2,
+        width: 2,
+        dims: [2, 2, n_ages, n_ztypes],
+        mask: vec![1.0; plane],
+        selected: selected.clone(),
+        collapse: false,
+        aggregate: true,
+    };
+    assert!(executor.configure_history(&bad_dims).is_err());
+    let bad_selected = HistorySpec {
+        capacity: 2,
+        width: 2,
+        dims,
+        mask: vec![1.0; plane],
+        selected: vec![0, 9],
+        collapse: false,
+        aggregate: true,
+    };
+    assert!(executor.configure_history(&bad_selected).is_err());
+    let bad_width = HistorySpec {
+        capacity: 2,
+        width: 999,
+        dims,
+        mask: vec![1.0; plane],
+        selected: selected.clone(),
+        collapse: false,
+        aggregate: true,
+    };
+    assert!(executor.configure_history(&bad_width).is_err());
+    let overflow = HistorySpec {
+        capacity: usize::MAX,
+        width: 24,
+        dims,
+        mask: vec![1.0; plane],
+        selected: selected.clone(),
+        collapse: false,
+        aggregate: false,
+    };
+    assert!(executor.configure_history(&overflow).is_err());
+
+    // A full window refuses further rows, and clearing drops the window.
+    let spec = HistorySpec {
+        capacity: 1,
+        width: 8,
+        dims,
+        mask: vec![1.0; plane],
+        selected,
+        collapse: false,
+        aggregate: true,
+    };
+    executor.configure_history(&spec).expect("configure");
+    executor.record_history_row().expect("first row");
+    assert!(executor.record_history_row().is_err(), "window must fill");
+    assert_eq!(executor.history_width(), Some(8));
+    executor.clear_history();
+    assert!(executor.record_history_row().is_err(), "cleared window");
 }
 
 // ---------------------------------------------------------------------------

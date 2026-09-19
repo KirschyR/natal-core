@@ -756,28 +756,46 @@ impl SpatialSession {
     }
 
     /// Advance and retain spatial boundaries entirely inside the session.
+    ///
+    /// With observation history bound on the CUDA path, the record rows are
+    /// projected on the device and downloaded once at the end, so a multi-tick
+    /// run does not synchronize host state at every boundary.
     fn run_steps(&mut self, n_ticks: i64, record_interval: i64) -> PyResult<(i64, bool)> {
         if n_ticks < 0 {
             return Err(PyValueError::new_err("n_steps must be >= 0"));
         }
-        if record_interval > 0 && self.state_tick % record_interval == 0 {
+        let start_tick = self.state_tick;
+        let interval = record_interval;
+        let mut device_history = false;
+        if interval > 0 {
+            // Exact number of record ticks this run can reach, as an upper
+            // bound on the device window.
+            let capacity = (start_tick + n_ticks) / interval - start_tick / interval;
+            if capacity > 0 {
+                device_history = self.start_device_history(capacity as usize);
+            }
+        }
+        if interval > 0 && start_tick % interval == 0 {
             self.sync_gpu_state()?;
             self.record_history(true)?;
         }
+        let mut stopped = false;
         for _ in 0..n_ticks {
             let previous = self.state_tick;
             self.advance_tick()?;
             if self.state_tick == previous {
-                self.sync_gpu_state()?;
-                return Ok((self.state_tick, true));
+                stopped = true;
+                break;
             }
-            if record_interval > 0 && self.state_tick % record_interval == 0 {
-                self.sync_gpu_state()?;
-                self.record_history(true)?;
+            if interval > 0 && self.state_tick % interval == 0 {
+                self.record_boundary(device_history)?;
             }
         }
+        if device_history {
+            self.flush_device_history(start_tick, interval)?;
+        }
         self.sync_gpu_state()?;
-        Ok((self.state_tick, false))
+        Ok((self.state_tick, stopped))
     }
 
     /// Capture one restorable boundary from the owned runtime.
@@ -1268,6 +1286,142 @@ impl SpatialSession {
     /// Never fails.
     #[cfg(not(feature = "gpu"))]
     fn sync_gpu_state(&mut self) -> PyResult<()> {
+        Ok(())
+    }
+
+    /// Try to stage this run's history rows on the device.
+    ///
+    /// Device staging applies only when the CUDA path is active, observation
+    /// (non-raw) history is bound, and the window fits in the measured free
+    /// memory. Failure is not an engine fallback: the run simply keeps the
+    /// host per-record projection path.
+    ///
+    /// ## Parameters
+    /// - `capacity`: Upper bound on the records this run will write.
+    ///
+    /// ## Returns
+    /// `true` when the device window is ready.
+    #[cfg(feature = "gpu")]
+    fn start_device_history(&mut self, capacity: usize) -> bool {
+        if self.gpu.is_none() {
+            return false;
+        }
+        let Some(shared) = self.history_store.clone() else {
+            return false;
+        };
+        let spec = {
+            let data = shared.lock().unwrap();
+            if data.raw || data.width <= 1 {
+                None
+            } else {
+                Some(crate::gpu::executor::HistorySpec {
+                    capacity,
+                    width: data.width - 1,
+                    dims: data.dimensions,
+                    mask: data.mask.clone(),
+                    selected: data.selected.clone(),
+                    collapse: data.collapse_age,
+                    aggregate: data.aggregate,
+                })
+            }
+        };
+        let Some(spec) = spec else {
+            return false;
+        };
+        let mut gpu = self.gpu.take().expect("device executor checked above");
+        let ready = gpu.configure_history(&spec).is_ok();
+        self.gpu = Some(gpu);
+        ready
+    }
+
+    /// CPU build of [`Self::start_device_history`]: never stages.
+    ///
+    /// ## Parameters
+    /// - `capacity`: Ignored.
+    ///
+    /// ## Returns
+    /// `false`.
+    #[cfg(not(feature = "gpu"))]
+    fn start_device_history(&mut self, _capacity: usize) -> bool {
+        false
+    }
+
+    /// Record one history boundary.
+    ///
+    /// With an active device window the row is projected on the device now and
+    /// downloaded once at the end of the run; otherwise the host state is
+    /// synced and projected immediately.
+    ///
+    /// ## Parameters
+    /// - `device_history`: Whether a device window is active.
+    ///
+    /// ## Errors
+    /// Propagates the device projection or host recording error.
+    fn record_boundary(&mut self, device_history: bool) -> PyResult<()> {
+        #[cfg(feature = "gpu")]
+        if device_history {
+            let mut gpu = self.gpu.take().expect("device history active");
+            let outcome = gpu.record_history_row();
+            self.gpu = Some(gpu);
+            return outcome.map_err(map_lifecycle_error);
+        }
+        let _ = device_history;
+        self.sync_gpu_state()?;
+        self.record_history(true)
+    }
+
+    /// Download and append the staged device history rows, then free them.
+    ///
+    /// The record ticks are reconstructed from the run's start, interval, and
+    /// the number of staged rows, so no per-row bookkeeping has to persist on
+    /// the device.
+    ///
+    /// ## Parameters
+    /// - `start_tick`: Session tick when the run began.
+    /// - `interval`: Record interval (`> 0` when a window was configured).
+    ///
+    /// ## Errors
+    /// Propagates the device download or host append error.
+    #[cfg(feature = "gpu")]
+    fn flush_device_history(&mut self, start_tick: i64, interval: i64) -> PyResult<()> {
+        if interval <= 0 {
+            return Ok(());
+        }
+        let Some(mut gpu) = self.gpu.take() else {
+            return Ok(());
+        };
+        let values = gpu.download_history_rows();
+        let width = gpu.history_width().unwrap_or(0);
+        gpu.clear_history();
+        self.gpu = Some(gpu);
+        let values = values.map_err(map_lifecycle_error)?;
+        if width == 0 {
+            return Ok(());
+        }
+        let Some(shared) = self.history_store.clone() else {
+            return Ok(());
+        };
+        let mut history = shared.lock().unwrap();
+        let mut tick = (start_tick / interval + 1) * interval;
+        for row in values.chunks_exact(width) {
+            let mut host_row = Vec::with_capacity(width + 1);
+            host_row.push(tick as f64);
+            host_row.extend(row.iter().map(|value| f64::from(*value)));
+            history.append_row(host_row, true)?;
+            tick += interval;
+        }
+        Ok(())
+    }
+
+    /// CPU build of [`Self::flush_device_history`]: nothing to flush.
+    ///
+    /// ## Parameters
+    /// - `start_tick`, `interval`: Ignored.
+    ///
+    /// ## Errors
+    /// Never fails.
+    #[cfg(not(feature = "gpu"))]
+    fn flush_device_history(&mut self, _start_tick: i64, _interval: i64) -> PyResult<()> {
         Ok(())
     }
 

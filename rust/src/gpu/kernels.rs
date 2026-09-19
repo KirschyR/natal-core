@@ -1649,6 +1649,68 @@ extern "C" __global__ void migration_stochastic_gather_male(
 }
 "#;
 
+/// Observation projection for device-side history rows.
+///
+/// This replicates `output::observation::project` for the batch-minor `ind`
+/// layout: one thread computes one output cell, accumulating genotype, then
+/// age, then deme in the same order as the host so the tolerance stays at the
+/// f32 arithmetic level. The row's tick column is added on the host, so the
+/// kernel only writes the projected values.
+const OBSERVATION_SOURCE: &str = r#"
+extern "C" __global__ void observation_project(
+    const float* ind,
+    const float* mask,
+    const int* selected,
+    int n_groups,
+    int plane,
+    int n_selected,
+    int n_sexes,
+    int n_ages,
+    int n_ztypes,
+    int n_batch,
+    int collapse,
+    int aggregate,
+    int out_d,
+    int out_a,
+    int row_offset,
+    float* out)
+{
+    int out_len = n_groups * out_d * n_sexes * out_a;
+    int v = blockIdx.x * blockDim.x + threadIdx.x;
+    if (v >= out_len) {
+        return;
+    }
+    int t = v;
+    int age_out = t % out_a;
+    t /= out_a;
+    int sex = t % n_sexes;
+    t /= n_sexes;
+    int destination = t % out_d;
+    t /= out_d;
+    int group = t;
+    int start_d = aggregate ? 0 : destination;
+    int end_d = aggregate ? n_selected : destination + 1;
+    int start_a = collapse ? 0 : age_out;
+    int end_a = collapse ? n_ages : age_out + 1;
+    float result = 0.0f;
+    for (int di = start_d; di < end_d; ++di) {
+        int deme = selected[di];
+        float deme_total = 0.0f;
+        for (int age = start_a; age < end_a; ++age) {
+            float genotype_total = 0.0f;
+            for (int g = 0; g < n_ztypes; ++g) {
+                int offset = (sex * n_ages + age) * n_ztypes + g;
+                genotype_total +=
+                    ind[((long long)offset) * n_batch + deme] * mask[group * plane + offset];
+            }
+            deme_total += genotype_total;
+        }
+        result += deme_total;
+    }
+    out[row_offset + v] = result;
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -1760,6 +1822,8 @@ pub struct Kernels {
     migration_stochastic_gather_sperm: CudaFunction,
     /// `migration_stochastic_gather_male(...)`.
     migration_stochastic_gather_male: CudaFunction,
+    /// `observation_project(...)`.
+    observation_project: CudaFunction,
 }
 
 impl Kernels {
@@ -1783,7 +1847,7 @@ impl Kernels {
             ..Default::default()
         };
         let source = format!(
-            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}\n{SAMPLING_SOURCE}"
+            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}\n{SAMPLING_SOURCE}\n{OBSERVATION_SOURCE}"
         );
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
@@ -1855,6 +1919,9 @@ impl Kernels {
             .map_err(|err| {
                 format!("loading kernel `migration_stochastic_gather_male` failed: {err}")
             })?;
+        let observation_project = module
+            .load_function("observation_project")
+            .map_err(|err| format!("loading kernel `observation_project` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -1875,6 +1942,7 @@ impl Kernels {
             migration_stochastic_gather_female,
             migration_stochastic_gather_sperm,
             migration_stochastic_gather_male,
+            observation_project,
         })
     }
 
@@ -2726,6 +2794,85 @@ impl Kernels {
         unsafe { male.launch(grid_cells) }
             .map(|_| ())
             .map_err(|err| format!("migration_stochastic_gather_male launch failed: {err}"))
+    }
+
+    /// Project the current device state into one history row.
+    ///
+    /// Mirrors `output::observation::project` for the batch-minor `ind` layout;
+    /// the caller appends the tick column on the host.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `ind`: Batch-minor individual state, `(2, A, Z, B)`.
+    /// - `mask`: Observation weights, `groups · S · A · Z`.
+    /// - `selected`: Deme indices to keep, length `n_selected`.
+    /// - `n_groups`, `plane`, `n_selected`, `n_sexes`, `n_ages`, `n_ztypes`,
+    ///   `n_batch`: Projection dimensions (`plane = S · A · Z`).
+    /// - `collapse`, `aggregate`: Reduction flags.
+    /// - `out_d`, `out_a`: Output deme/age extents.
+    /// - `row_offset`: Element offset of the destination row inside `out`.
+    /// - `out`: Destination buffer; the row is written at `row_offset`.
+    ///
+    /// ## Errors
+    /// Returns a description when a launch fails.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
+    pub fn observation_project(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &CudaSlice<f32>,
+        mask: &CudaSlice<f32>,
+        selected: &CudaSlice<i32>,
+        n_groups: usize,
+        plane: usize,
+        n_selected: usize,
+        n_sexes: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        n_batch: usize,
+        collapse: bool,
+        aggregate: bool,
+        out_d: usize,
+        out_a: usize,
+        row_offset: usize,
+        out: &mut CudaSlice<f32>,
+    ) -> Result<(), String> {
+        let out_len = n_groups * out_d * n_sexes * out_a;
+        if out_len == 0 {
+            return Ok(());
+        }
+        let n_groups_i = n_groups as i32;
+        let plane_i = plane as i32;
+        let n_selected_i = n_selected as i32;
+        let n_sexes_i = n_sexes as i32;
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let n_batch_i = n_batch as i32;
+        let collapse_i = collapse as i32;
+        let aggregate_i = aggregate as i32;
+        let out_d_i = out_d as i32;
+        let out_a_i = out_a as i32;
+        let row_offset_i = row_offset as i32;
+        let grid = LaunchConfig::for_num_elems(out_len as u32);
+        let mut builder = stream.launch_builder(&self.observation_project);
+        builder.arg(ind);
+        builder.arg(mask);
+        builder.arg(selected);
+        builder.arg(&n_groups_i);
+        builder.arg(&plane_i);
+        builder.arg(&n_selected_i);
+        builder.arg(&n_sexes_i);
+        builder.arg(&n_ages_i);
+        builder.arg(&n_ztypes_i);
+        builder.arg(&n_batch_i);
+        builder.arg(&collapse_i);
+        builder.arg(&aggregate_i);
+        builder.arg(&out_d_i);
+        builder.arg(&out_a_i);
+        builder.arg(&row_offset_i);
+        builder.arg(out);
+        unsafe { builder.launch(grid) }
+            .map(|_| ())
+            .map_err(|err| format!("observation_project launch failed: {err}"))
     }
 }
 

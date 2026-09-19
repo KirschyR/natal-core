@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 8/9/10 轮：§25 **APPROVED**（越界守卫）、§27 **APPROVED**（P6 ensemble）、§29 **NOT APPROVED**（零回传后 `run_tick` 读路径陈旧） |
-| 待回执 | §31（第 10 轮修复复核） |
-| 主 agent 处理 | §29 已修复：公共 `run_tick` 先完成 tick 再 `sync_gpu_state`，`run_steps` 改调 `advance_tick`；自测通过 |
-| 待 evaluator 动作 | 按 §30 复核修复目标，把结论写入 §31 |
+| 最近回执 | 第 11 轮：**APPROVED**（§31；§29 阻塞项已解除） |
+| 待回执 | §33（第 12 轮设备侧历史缓冲） |
+| 主 agent 处理 | 第 12 轮：D5 完整形态（观测模式设备投影 + 一次回传）已实现并自测 |
+| 待 evaluator 动作 | 按 §32 复核，把第 12 轮结论写入 §33 |
 
 ## 0. 一句话目标
 
@@ -819,6 +819,61 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 32. 第 12 轮交接 — 设备侧历史缓冲（D5 完整形态，观测模式）
+
+- 日期：2026-09-19
+- 背景：§31 APPROVED（第 10/11 轮）。按 `GPU_STAGE_SUMMARY.md` §11 推进「设备侧历史驻留」完整形态。
+- 风险分类：**高风险**（新增设备内核 + 历史记录时机 + 显存预算；涉及 Python/Rust 历史数据流，但不改数值公式与公开 Python API）。
+
+### 32.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | 新增 `OBSERVATION_SOURCE` 与 `observation_project` 内核（复刻 `output::observation::project`：基因型→年龄→deme 的累加顺序；行偏移写入）。Kernels 结构/加载新增该函数。 |
+| `rust/src/gpu/executor.rs` | 新增 `HistorySpec`、`DeviceHistory` 与 `configure_history` / `record_history_row` / `download_history_rows` / `history_width` / `clear_history`：设备侧投影行缓冲，`configure` 用实测可用显存做预算守卫。 |
+| `rust/src/sessions/spatial.rs` | `run_steps` 在**观测模式**历史下改走设备暂存：记录边界只做设备投影（不同步 host），运行结束一次下载并按 tick 回填 `HistoryStore`。新增 `start_device_history` / `record_boundary` / `flush_device_history`（含非 gpu 空实现）。**原始（raw）模式与不满足预算时保持原 host 逐记录路径**。 |
+| 测试 | `device_history_projection_matches_host_project`（4 种 collapse/aggregate 组合对照 host `project`）；`device_history_rejects_over_budget_and_empty_mask`（预算/空 mask/dims/selection/width/overflow/满窗/清空）；`spatial_device_history_stages_and_matches_cpu`（record_every 1/2，tick 序列与值对照 CPU）；`spatial_device_history_falls_back_for_raw_or_missing_window`（GPU 未启用/无 store/raw → 走 host）。 |
+
+### 32.2 行为与语义
+
+1. **仅观测模式设备暂存**：`HistoryData.raw == false` 且有非空观测 mask 时，记录行在设备上投影（宽度 = `groups·out_d·S·out_a`），运行期零逐记录回传；结束时一次下载。
+2. **raw 模式不变**：仍走 host 逐记录同步投影（全状态行；本就在显存预算表里属超限项）。
+3. **预算回退不是引擎回退**：设备窗口装不下（`ensure_memory_budget` 失败）或无法配置时，退回 host 逐记录路径，同一 CPU/GPU 系综与数值结果不变；已用 `start_device_history` 的返回值在测试中区分，避免“静默回退”掩盖缺陷。
+4. **tick 列在 host 追加**：设备内核不写 tick（避免 f32 整数精度问题），`flush` 按 `start/interval/rows` 重建记录 tick 并以 `append_row(continuation=true)` 写入。
+5. **公开 Python API 不变**：`History.ticks/values/...` 语义不变；`pop.run(n, record_every)` 行为一致。
+
+### 32.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **160 passed, 0 failed** |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3606 passed / bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | 聚合 **2098/2151 = 97.54%**；executor **916/946 = 96.8%**、kernels **98.0%**、probe 96.1%，逐文件 ≥95% |
+| 内核 L1 | `observation_project` vs host `project`，4 种 collapse/aggregate 组合，相对误差 ≤1.2e-6 |
+| 会话 E2E（Rust） | 观测历史 record_every=1 与 2：GPU 与 CPU tick 序列一致，值相对误差 ≤1e-4（实测约 1e-7 量级） |
+| Python E2E（重编扩展，4 deme） | `pop.run(4, record_every=1/2)`：GPU/CPU `history.ticks` 相同、`values` 形状一致，max rel diff **9.5e-8** |
+| 共享 GPU | 一次 instrumented 运行失败、重跑通过（环境噪声，非产品缺陷） |
+
+### 32.4 请 evaluator 独立核对
+
+- **投影内核正确性**：自建 mask/selected/collapse/aggregate 组合（含 groups>1、非 0/1 权重、selected 子集且乱序）对照 host `project`；确认累加顺序与 f32 容差合理。
+- **记录时机**：device 暂存行对应的确是**该记录 tick 的设备状态**；`flush` 重建的 tick 与 `run_steps` 的记录边界一致（含 start_tick 非 0、start_tick % interval != 0、跨多次 run 的 continuation）。
+- **回退路径**：raw / 预算不足 / 无法配置时确实走 host 逐记录路径，且不改变 GPU↔GPU 可复现性与 CPU 数值（同一引擎）。
+- **预算与显存**：`configure_history` 使用实测 free；`required > free` 显式 Err；确认无静默 CPU 回退。
+- **raw 语义**：raw 模式历史仍正确（本轮有意不改）。
+- **CPU 不变性 / 覆盖率 / 门禁**：同既往口径（注意覆盖率过滤排除 `/tests/`、`src/gpu/../../tests/...` 坑）。
+
+### 32.5 已知残余风险（非阻塞）
+
+- 设备历史窗口容量按 `n_ticks/interval` 上界分配，未按 `max_rows` 收缩；大 D×长 T 可能触发预算回退（host 路径仍可跑，仅失去零回传）。
+- GPU 会话 checkpoint/restore 仍不支持设备侧回滚（既有）。
+- 错误路径下设备窗口未即时释放（下次 `configure_history` 覆盖）。
+
+结论请追加为 **§33**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1460,3 +1515,51 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 
 第 10 轮的缓存与零回传提升了性能，但引入了公共单 tick 读路径的陈旧状态缺陷（已给出实际失败的回归测试）。
 **NOT APPROVED**，待主 agent 修复同步时机后回交复核。
+
+---
+
+## 31. 第 11 轮结论（evaluator 独立执行，2026-09-19，HEAD=`b9c1910`）
+
+### 31.1 裁定：**APPROVED**
+
+§29 阻塞项（零回传后公共单 tick 读路径陈旧）已解除；`run_steps` 的“运行期零逐 tick 回传”与历史正确性
+保持不变。修复方式与 §29.2 建议的第二方案一致。
+
+### 31.2 修复复核（独立运行）
+
+- **回归测试**（§29.2 的失败用例）：`cargo test --features gpu evaluator_single_tick_syncs_host_state`
+  → **ok**（修复前 `gpu 5 vs cpu 0`）。主 agent 未改动该测试的断言（无 `#[ignore]`）。
+- **`run_tick` 主体拆分**：`advance_tick`（不下载）承载原 tick 逻辑；公共 `run_tick` = `advance_tick()?`
+  + `sync_gpu_state()?`；`run_steps` 循环改调 `advance_tick`，保留记录边界/停止/结束处的同步。语义正确。
+- **Python 端到端**（独立重编 `maturin develop --features "gpu,extension-module"`，5×5 参考空间模型）：
+  - `backend.run_tick()` 后 `state_snapshot()`：tick `0→1`，host 数组已刷新，与 CPU 相对误差
+    `4.14e-7`（修复前该路径总量保持初始 112500）；
+  - `observe_current`（正确形状的 1-D mask）在 `run_tick` 后**发生变化**且与 CPU 相对误差 `3.59e-7`；
+  - `capture_checkpoint()` 返回 tick `1`（捕获的是 tick 后状态）；
+  - `pop.run(4, record_every=2)`：GPU/CPU 末态相对误差 `7.27e-7`，history tick 序列均为 `[0,2,4]`
+    → 多 tick 零回传与历史记录未回归。
+
+### 31.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | **156 passed, 0 failed** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU/numeric 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **1928/1980 = 97.37%**；逐文件均 ≥95%（executor 96.4%、kernels 98.0%、probe 96.1%，其余 100%） |
+
+### 31.4 残余风险（非阻塞，延续 §29.5）
+
+- CSR 缓存（含随机 `fwd_s`）常驻显存，未纳入 `GpuExecutor::new` 预算估算；超限时显式报错（非静默回退）。
+- GPU 会话 checkpoint/restore 仍不支持设备侧回滚；ecology 有意不缓存（每 tick 生效语义）。
+- 错误路径：`advance_tick` 失败时不再下载（host 维持上一一致状态），属可接受取舍。
+
+### 31.5 结论
+
+§29 阻塞项修复正确、无回归，其余质量门禁与覆盖率均达标。**APPROVED**（范围为当前 HEAD `b9c1910`
+与被审测试集；不声称任何历史基线失败消失）。

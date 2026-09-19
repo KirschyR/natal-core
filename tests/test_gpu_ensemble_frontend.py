@@ -1,0 +1,85 @@
+"""Frontend-level CUDA ensemble entry points.
+
+These tests exercise ``AgeStructuredPopulation.enable_gpu_ensemble`` /
+``run_gpu_ensemble``. They skip when the installed extension has no usable
+CUDA device so CPU-only hosts stay green.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pytest
+
+import natal as nt
+
+
+def _build_pop(name: str, *, stochastic: bool = True) -> nt.AgeStructuredPopulation:
+    """A small two-allele panmictic age-structured population."""
+    species = nt.Species.from_dict(
+        name=name,
+        structure={"chr1": {"loc": ["WT", "Dr"]}},
+        gamete_labels=["default"],
+    )
+    return (
+        nt.AgeStructuredPopulation.setup(
+            species=species, name=name, stochastic=stochastic, continuous_sampling=False
+        )
+        .age_structure(n_ages=4, new_adult_age=1)
+        .initial_state(
+            individual_count={
+                "female": {"WT|WT": [0.0, 50.0, 0.0, 0.0]},
+                "male": {"WT|WT": [0.0, 50.0, 0.0, 0.0]},
+            }
+        )
+        .reproduction(
+            female_age_based_mating_rate=[0.0, 1.0, 1.0, 0.0],
+            male_age_based_mating_rate=[0.0, 1.0, 1.0, 0.0],
+            eggs_per_female=8.0,
+        )
+        .survival(
+            female_age_based_survival=[1.0, 0.8, 0.6, 0.0],
+            male_age_based_survival=[1.0, 0.8, 0.6, 0.0],
+        )
+        .competition(juvenile_growth_mode="beverton_holt", carrying_capacity=500.0)
+        .build()
+    )
+
+
+def test_enable_gpu_ensemble_rejects_zero_replicates() -> None:
+    """``n_replicates`` must be positive even before any device work."""
+    pop = _build_pop("__gpu_ens_zero__")
+    with pytest.raises((RuntimeError, ValueError)):
+        pop.enable_gpu_ensemble(0)
+
+
+def test_run_gpu_ensemble_without_enable_raises() -> None:
+    """Running before enabling is an explicit error, not a silent CPU run."""
+    pop = _build_pop("__gpu_ens_missing__")
+    with pytest.raises(RuntimeError):
+        pop.run_gpu_ensemble(1)
+
+
+def test_gpu_ensemble_shapes_and_leaves_cpu_state_untouched() -> None:
+    """A successful ensemble returns stacked replicates without advancing CPU."""
+    pop = _build_pop("__gpu_ens_shapes__")
+    try:
+        pop.enable_gpu_ensemble(64)
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU ensemble unavailable: {exc}")
+
+    tick_before = pop.tick
+    state_before = pop.state.individual_count.copy()
+    tick, ind, sperm = pop.run_gpu_ensemble(3)
+    state = pop.state.individual_count
+    n_ages = state.shape[1]
+    n_ztypes = state.shape[2]
+
+    assert tick == 3
+    assert ind.shape == (64, 2, n_ages, n_ztypes)
+    assert sperm.shape == (64, n_ages, n_ztypes, n_ztypes)
+    assert np.isfinite(ind).all()
+    assert np.isfinite(sperm).all()
+    # The ensemble is a separate experiment: the population's own timeline
+    # and state are not advanced by it.
+    assert pop.tick == tick_before
+    np.testing.assert_array_equal(pop.state.individual_count, state_before)

@@ -133,6 +133,8 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         self._rust_run_active = False
         self._rust_lifecycle_backend: RustLifecycleBackend | None = None
         self._rust_backend_seed: int | None = None
+        # Replicate count of the last successful ``enable_gpu_ensemble`` call.
+        self._gpu_ensemble_replicates: int = 0
         # Structural changes (blueprint flags, modifier maps) rebuild the
         # session before the next run; value changes go straight to the
         # session through the writers and the run-boundary ecology flush.
@@ -999,6 +1001,73 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         return self.run(
             n_steps=1, record_every=self.record_every, clear_history_on_start=False
         )
+
+    def enable_gpu_ensemble(self, n_replicates: int) -> AgeStructuredPopulation:
+        """Enable the CUDA ensemble path for this panmictic population.
+
+        The ensemble copies the population's current state onto the device
+        batch axis and evolves ``n_replicates`` independent trajectories. The
+        population's own CPU state is not advanced by a subsequent
+        :meth:`run_gpu_ensemble`.
+
+        Args:
+            n_replicates: Number of independent replicate trajectories (>= 1).
+
+        Returns:
+            AgeStructuredPopulation: Self for chaining.
+
+        Raises:
+            RuntimeError: If the extension was built without GPU support, or
+                the model is ineligible (not panmictic, carries hooks, or uses
+                a custom growth curve). The device path never silently falls
+                back to the CPU.
+        """
+        if self._rust_lifecycle_backend is None:
+            self._initialize_session(seed=int(self._rust_backend_seed or 0))
+        else:
+            self._run_startup_sync()
+        backend = self._rust_lifecycle_backend
+        assert backend is not None
+        backend.enable_gpu_ensemble(int(n_replicates))
+        self._gpu_ensemble_replicates = int(n_replicates)
+        return self
+
+    def run_gpu_ensemble(
+        self, n_ticks: int
+    ) -> Tuple[int, NDArray[np.float64], NDArray[np.float64]]:
+        """Advance the enabled GPU ensemble and return its stacked final state.
+
+        Args:
+            n_ticks: Number of ticks to advance every replicate.
+
+        Returns:
+            ``(tick, individual_count, sperm_storage)`` where
+            ``individual_count`` has shape
+            ``(n_replicates, 2, n_ages, n_ztypes)`` and ``sperm_storage`` has
+            shape ``(n_replicates, n_ages, n_ztypes, n_ztypes)``. Same-seed
+            reruns are bit-reproducible device-side; CPU↔GPU are separate
+            ensembles and are only statistically comparable.
+
+        Raises:
+            RuntimeError: If :meth:`enable_gpu_ensemble` was not called first.
+        """
+        backend = self._rust_lifecycle_backend
+        if backend is None:
+            raise RuntimeError(
+                "run_gpu_ensemble requires enable_gpu_ensemble first"
+            )
+        tick, ind, sperm = backend.run_gpu_ensemble(int(n_ticks))
+        replicates = int(self._gpu_ensemble_replicates)
+        state = self._live_state().individual_count
+        n_ages = int(state.shape[1])
+        n_ztypes = int(state.shape[2])
+        ind_array = np.asarray(ind, dtype=np.float64).reshape(
+            replicates, 2, n_ages, n_ztypes
+        )
+        sperm_array = np.asarray(sperm, dtype=np.float64).reshape(
+            replicates, n_ages, n_ztypes, n_ztypes
+        )
+        return int(tick), ind_array, sperm_array
 
     def get_age_distribution(self, sex: str = "both") -> np.ndarray:
         """Return the age distribution for the requested sex.

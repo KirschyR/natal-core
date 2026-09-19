@@ -198,7 +198,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 - **设备侧 history 驻留（观测模式）已实现**：空间观测历史在设备上投影成行、运行期零逐记录回传、结束时一次下载回填
   `HistoryStore`；**raw 模式与设备窗口超预算时仍走 host 逐记录路径**（第 12 轮，§32，待复核）。
 - **迁移 CSR 已缓存**（`MigrationCache`，含随机 `fwd_*` scratch），只在 CSR 变化时重建；`migration_rate` 仍逐 tick 上传。
-- **无 frontend/population 级 ensemble 入口与文档**；ensemble 仅到 backend 层。
+- **frontend/population 级 ensemble 入口已提供**（`AgeStructuredPopulation.enable_gpu_ensemble` / `run_gpu_ensemble`，第 16 轮）；中英文档见 `docs/{zh,en}/4_simulation_engine.md` §11。
 - `survival_stochastic` 对非法状态 `n_virgins<-EPS` 静默夹 0，CPU 返回 `Err`（低危，未对齐）。
 - P6 性能：GPU 单位工作量约快 ~40×，但相对 16 核 `ProcessPoolExecutor` 墙面加速比仅 **2.4–3.3×**，未达数量级。
 
@@ -208,7 +208,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
   `cargo test --features gpu`（当前 **174**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
-  （跳过硬件）、`ruff`、`pyright`、`pytest`（3606）、`phase0_baseline.py --check`。
+  （跳过硬件）、`ruff`、`pyright`、`pytest`（3609）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
   `src/gpu/../../tests/...`），当前聚合 **96.94%**（executor 96.0%、kernels 97.4%）；新模块需 ≥95%。
@@ -243,7 +243,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 3. **停止门控**（D6）：无钩子模型的 `stop_if_*` 设备侧门控，消除主机同步。
 4. **`continuous_sampling` 支持**：已完成（第 14 轮，设备连续二项/多项/Poisson）。
 5. **离散世代 GPU 路径**：已完成（第 15 轮；Wright-Fisher 融合模式未覆盖）。
-6. **frontend/population 级 ensemble 入口 + 文档**（`demos/` 或 `docs/` 同步，遵守中英同步规则）。
+6. **frontend/population 级 ensemble 入口 + 文档**：已完成（第 16 轮）。
 7. 性能优化：CSR 缓存（第 10 轮）、观测历史设备投影（第 12 轮）已完成；剩余为 ecology 增量上传、融合 kernel、减少每 tick 启动。
 
 每完成一个阶段：跑全部门禁 → 独立审查（`EVALUATE.md` 交接 → 回执）→ 再进入下一阶段。

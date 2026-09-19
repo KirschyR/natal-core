@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 14 轮：**APPROVED**（§37；continuous_sampling 设备支持） |
-| 待回执 | §39（第 15 轮离散世代空间 GPU） |
-| 主 agent 处理 | 第 15 轮：离散世代空间 GPU 路径已实现并自测 |
-| 待 evaluator 动作 | 按 §38 复核，把第 15 轮结论写入 §39 |
+| 最近回执 | 第 15 轮：**APPROVED**（§39；离散世代空间 GPU 路径） |
+| 待回执 | §41（第 16 轮 frontend 级 ensemble 入口 + 文档） |
+| 主 agent 处理 | 第 16 轮：frontend ensemble 入口与中英文档已实现并自测 |
+| 待 evaluator 动作 | 按 §40 复核，把第 16 轮结论写入 §41 |
 
 ## 0. 一句话目标
 
@@ -1009,6 +1009,54 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 40. 第 16 轮交接 — frontend 级 ensemble 入口 + 文档
+
+- 日期：2026-09-19
+- 背景：§39 APPROVED。用户选择推进 `GPU_STAGE_SUMMARY §11` 第 6 项「frontend/Population 级 ensemble 入口 + 文档」。
+- 风险分类：**文档与格式修改 + 局部代码修改**（新增公开 Python 方法，不改科学模型与 Rust 数值；返回形状属新公开合同，故需复核）。
+
+### 40.1 改动清单
+
+| 文件 | 内容 |
+|---|---|
+| `src/natal/frontend/population/age_structured.py` | `AgeStructuredPopulation` 新增 `enable_gpu_ensemble(n_replicates)`（可链式；惰性建会话、拒绝不合格模型/无 gpu 扩展）与 `run_gpu_ensemble(n_ticks)`（返回 `(tick, individual_count, sperm_storage)`，形状 `(B,2,A,Z)` / `(B,A,Z,Z)`）；新增内部字段 `_gpu_ensemble_replicates`。后端 `RustLifecycleBackend` 的对应方法已存在。 |
+| `tests/test_gpu_ensemble_frontend.py` | 新增 3 个测试：`n_replicates=0` 拒绝、未 enable 先 run 报错、形状/有限性/不推进 CPU state；无 GPU 主机 `pytest.skip`。 |
+| `docs/en/4_simulation_engine.md` | 新增 §11「GPU Ensemble (CUDA, optional)」，原小结顺延为 §12。 |
+| `docs/zh/4_simulation_engine.md` | 同步新增 §11「GPU 多 replicate ensemble（CUDA，可选）」+ §12 小结。 |
+
+### 40.2 行为
+
+- 公开入口语义与 backend 一致：panmictic、无钩子、内置生长模式；不合格/无 gpu feature 显式 `RuntimeError`，不静默回退。
+- ensemble 是独立实验：`run_gpu_ensemble` 不推进种群自身 state/tick。
+- 同 seed 设备内逐位可复现；CPU↔GPU 仅统计可比（既有约定）。
+
+### 40.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `pytest -q`（全量） | **3609 passed, 0 failed**（含新增 3 个） |
+| `pytest tests/test_gpu_ensemble_frontend.py` | 3 passed |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `cargo test` / `cargo test --features gpu` | 67 / 174 passed（Rust 未改，回归确认） |
+| `check_rust.py` / `phase0_baseline --check` | EXIT=0 / bit-identical |
+| 端到端冒烟（重编扩展，B=200×10 tick） | `(10, (200,2,4,3), (200,4,3,3))`，全有限，`pop.tick` 不变 |
+
+### 40.4 请 evaluator 独立核对
+
+- **公开合同**：返回元组形状与文档一致；`run_gpu_ensemble` 不推进 CPU state/tick；先 enable 后 run 的顺序约束。
+- **不合格拒绝**：非 panmictic / 含钩子 / 自定义 growth / 无 gpu 扩展 → 显式 `RuntimeError`（非静默回退）；`n_replicates=0` 拒绝。
+- **文档中英同步**：两版 §11 内容一致、示例可运行、链接/编号正确。
+- **回归**：既有 Python 测试与 Rust 门禁不变。
+
+### 40.5 残余风险 / 说明
+
+- 未新增 `Population` 级 `enable_gpu`（单群体一步回传）入口；本轮只做 ensemble，文档亦如此表述。
+- 未提供 frontend ensemble 的 History 集成（返回裸数组）；如需与 `History` 打通可后续扩展。
+
+结论请追加为 **§41**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1878,3 +1926,59 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 
 连续抽样设备支持正确、与 host 统计等价、无回归，质量门禁与覆盖率达标。**APPROVED**（范围为当前 HEAD
 `2308114` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 39. 第 15 轮结论（evaluator 独立执行，2026-09-19，HEAD=`a62cb79`）
+
+### 39.1 裁定：**APPROVED**
+
+离散世代（二龄）空间设备路径与 host `kernels::discrete_generation` 逐分支一致；确定性端到端紧容差匹配，
+随机（离散与连续）分布等价，既有能力零回归。
+
+### 39.2 独立核对
+
+- **内核逐分支**（读 diff + host 对照）：
+  - `discrete_reproduction` 与 host `reproduction` + `mate_discrete` + `fertilize_discrete` 一致：
+    成年列 mating（`mating[1]`/`mating[3]`）、`effective_males`、`males_total==0||females_total==0` 提前返回
+    （不清 age0）、mating 行归一阈值 `1e-10`、`n_mating<=EPS` 跳过、离散 `round`/连续 `continuous_binomial`、
+    `pair_counts` 累加、`eggs_per_pair=epf·ff[gf]·ff[Z+gm]`、`p_reproduce=clamp01(reproduction_rates[adult])`、
+    `p_surv>=1-EPS`/`continuous_poisson`、性别/性染色体分配、age0 无条件写入。
+  - `discrete_survival` 与 host `survival`（`scaling_factor` + `recruit_juveniles` + viability）一致：
+    离散 `round`、`desired` 取整、`combined/total`、`viability[0..Z]`/`[2Z..3Z]` 行、`s_f=survival[0]`、
+    `s_m=survival[2]`（A=2）。
+  - `density_scaling` 新增 `discrete_actual`：模式 2–4 用 age0 总计数（host `scaling_factor`），模式 0/1 行为不变；
+    启动器参数顺序与内核签名一致。
+  - 生命周期顺序 reproduction→survival→aging；离散迁移复用既有 CSR 内核（sperm 面恒零）。
+- **确定性端到端**（evaluator 独立，Python，`demos/gpu_spatial/discrete` 参考模型 8 tick）：
+  `ind max_rel=3.70e-7`，CPU/GPU 总量均为 22500 → 与 host 一致。
+- **随机端到端**（K=200 seed×3 tick，离散采样）：GPU 启用且状态有限；总量
+  **CPU mean=22494.0 vs GPU mean=22502.6**（合并 5σ 容差 23.97，ratio 0.356）；
+  **方差比 0.927**（采样噪声内）。
+- **CPU 不变性**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；
+  `phase0` bit-identical。
+
+### 39.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu` | **174 passed, 0 failed**（含 4 个离散分布用例 + 空间离散会话用例） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2344/2418 = 96.94%**；逐文件均 ≥95%（executor 96.0%、kernels 97.4%、probe 96.1%，其余 100%） |
+
+### 39.4 非阻塞发现（低）
+
+- 离散 GPU 未覆盖 Wright-Fisher 融合路径（`run_wf_tick`）；空间离散 CPU 本就不使用它（已声明）。
+- `discrete_survival` 固定 64 线程块（寄存器约束），仅性能。
+- 细节差异（经校验无影响）：设备对 `male_adult_mating_rate` 与 `eggs_per_female` 做了 `clamp01`/负值归零，
+  而 host 离散对应处用原值；由于标量契约已验证在 `[0,1]`/非负，实际无差异。
+
+### 39.5 结论
+
+离散世代空间 GPU 路径正确、与 host 统计等价、确定性紧容差匹配、无回归，质量门禁与覆盖率达标。
+**APPROVED**（范围为当前 HEAD `a62cb79` 与被审测试集；不声称任何历史基线失败消失）。

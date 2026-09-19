@@ -274,7 +274,42 @@ state_flat = pop.export_state()
 pop.import_state(state_flat)
 ```
 
-## 11. Chapter Summary
+## 11. GPU Ensemble (CUDA, optional)
+
+`AgeStructuredPopulation` can evolve many independent replicates of a
+panmictic model on an NVIDIA GPU. The population's current state is copied onto
+the device batch axis, and every replicate draws from a disjoint counter-based
+random stream, so same-seed reruns are bit-reproducible on the device.
+
+```python
+pop = (...)  # a panmictic, hook-free age-structured model
+
+pop.enable_gpu_ensemble(n_replicates=2000)
+tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
+
+# individual_count: (n_replicates, 2, n_ages, n_ztypes)
+# sperm_storage:    (n_replicates, n_ages, n_ztypes, n_ztypes)
+```
+
+- **Eligibility**: panmictic (`n_demes == 1`), hook-free, built-in growth modes
+  (0–4). `enable_gpu_ensemble` raises `RuntimeError` when the model is
+  ineligible or the extension was built without the `gpu` cargo feature; the
+  device path never silently falls back to the CPU.
+- **Isolation**: the ensemble is a separate experiment. The population's own
+  state and tick are not advanced by `run_gpu_ensemble`; call `pop.run(...)`
+  to continue the CPU trajectory.
+- **Reproducibility**: identical seeds reproduce bit-for-bit on the device.
+  CPU and GPU are different random ensembles, so compare them statistically
+  (distributions / moments), not bit-for-bit.
+- **Performance**: per-replicate throughput on the GPU is far higher than one
+  CPU core, but the wall-clock speedup against a multi-process CPU baseline
+  depends on the model size and the host core count; benchmark on the target
+  machine.
+
+The lower-level `RustLifecycleBackend.enable_gpu_ensemble` /
+`run_gpu_ensemble` methods expose the same path for backend-only callers.
+
+## 12. Chapter Summary
 
 The execution mechanism of NATAL can be understood as a three-layer division of labor:
 

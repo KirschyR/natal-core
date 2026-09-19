@@ -409,6 +409,7 @@ fn stochastic_launchers_short_circuit_or_reject() {
     let zero_i = stream.alloc_zeros::<i32>(0).expect("alloc");
     let mut scratch_ind = stream.alloc_zeros::<f32>(0).expect("alloc");
     let mut scratch_sperm = stream.alloc_zeros::<f32>(0).expect("alloc");
+    let mut violation = stream.alloc_zeros::<i32>(1).expect("alloc");
 
     assert!(kernels
         .recruit_stochastic(&stream, &mut scratch_ind, &zero_f, 0, 4, 2, false, 1, 2, 3)
@@ -425,6 +426,7 @@ fn stochastic_launchers_short_circuit_or_reject() {
             2,
             1,
             false,
+            &mut violation,
             1,
             2,
             3,

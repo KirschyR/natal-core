@@ -3151,3 +3151,53 @@ fn restore_state_rejects_wrong_lengths() {
         .restore_state(&ind, &sperm, 2)
         .expect("valid restore");
 }
+
+#[test]
+fn stochastic_survival_rejects_negative_virgin_state() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 1usize;
+    let n_ages = 4usize;
+    let z = 2usize;
+    let rate = evaluator_rate(n_batch, n_ages);
+    let ecology = evaluator_migration_ecology(n_batch, n_ages, &rate);
+    let genetics = reproduction_genetics(n_ages, z);
+    let variants = vec![genetics];
+    let mut blueprint = dimension_blueprint(n_ages, z);
+    blueprint.stochastic = true;
+    blueprint.n_demes = n_batch;
+    blueprint.migration_indptr = vec![0; n_batch + 1];
+
+    let ind_stride = 2 * n_ages * z;
+    let sperm_stride = n_ages * z * z;
+
+    // A meaningfully negative virgin count (sperm far exceeds females).
+    let mut ind = vec![0.0f32; n_batch * ind_stride];
+    let mut sperm = vec![0.0f32; n_batch * sperm_stride];
+    let _ = &mut ind; // female age-0 stays zero
+    for gm in 0..z {
+        sperm[(0 * z + 0) * z + gm] = 10.0;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, z, &ind, &sperm).expect("exec");
+    executor.set_seed(1);
+    let error = executor
+        .survival_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect_err("negative virgins must be rejected");
+    assert!(error.contains("n_virgins"), "unexpected error: {error}");
+
+    // A sub-tolerance negative is f32 rounding noise and clamps silently.
+    let mut tiny_sperm = vec![0.0f32; n_batch * sperm_stride];
+    for gm in 0..z {
+        tiny_sperm[(0 * z + 0) * z + gm] = 5.0e-5;
+    }
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut tolerant =
+        GpuExecutor::new(context, n_batch, n_ages, z, &ind, &tiny_sperm).expect("exec");
+    tolerant.set_seed(1);
+    tolerant
+        .survival_tick(&blueprint, &ecology, &variants, &vec![0usize; n_batch])
+        .expect("rounding-noise negative must clamp");
+}

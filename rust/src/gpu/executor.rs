@@ -638,6 +638,7 @@ impl GpuExecutor {
                 key1,
                 recruit_site,
             )?;
+            let mut violation = DeviceBuffer::from_host(&stream, &[0i32])?;
             self.kernels.survival_stochastic(
                 &stream,
                 self.ind.slice_mut(),
@@ -649,10 +650,16 @@ impl GpuExecutor {
                 n_ztypes,
                 blueprint.new_adult_age,
                 blueprint.continuous_sampling,
+                violation.slice_mut(),
                 key0,
                 key1,
                 survival_site,
             )?;
+            // Surface a meaningfully negative virgin count instead of
+            // silently clamping it, matching the host's explicit error.
+            if violation.to_host(&stream)?.first().copied().unwrap_or(0) != 0 {
+                return Err("Invalid state: n_virgins < 0 in GPU stochastic survival".to_owned());
+            }
             return Ok(());
         }
         let mut factor = DeviceBuffer::from_host(&stream, &vec![0.0f32; n_batch])?;

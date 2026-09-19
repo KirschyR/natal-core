@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 17 轮：**APPROVED**（§43；移除每 tick 缩放同步） |
-| 待回执 | §45（第 18 轮 A1：GPU checkpoint 设备恢复） |
-| 主 agent 处理 | 第 18 轮：A1 已实现（完整设备恢复）并自测；下一项为 A2 |
-| 待 evaluator 动作 | 按 §44 复核，把第 18 轮结论写入 §45 |
+| 最近回执 | 第 18 轮：**APPROVED**（§45；A1 GPU checkpoint 设备恢复） |
+| 待回执 | §47（第 19 轮 A2：随机生存非法状态显式报错） |
+| 主 agent 处理 | 第 19 轮：A2 已实现并自测；下一项为 C10 |
+| 待 evaluator 动作 | 按 §46 复核，把第 19 轮结论写入 §47 |
 
 ## 0. 一句话目标
 
@@ -1147,6 +1147,50 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 46. 第 19 轮交接 — A2：随机生存显式拒绝非法状态
+
+- 日期：2026-09-19
+- 背景：§45 APPROVED（A1）。按 `GPU_STAGE_SUMMARY §11.2` 推进 **A2**（正确性、P2）。
+- 风险分类：**局部代码修改**（错误处理语义；不改科学公式与正常路径数值）。
+
+### 46.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `survival_stochastic` 新增 `int* violation` 输出与 `#define NATAL_VIRGIN_EPS 1e-3f`：当 `virgins < -NATAL_VIRGIN_EPS`（f32 容差）时置 `violation[0]=1`，随后仍夹 0 以保持后续算术有限。启动器新增 `violation` 参数。 |
+| `rust/src/gpu/executor.rs` | `survival_tick`（随机分支）分配 1 元素的 `violation` 缓冲、随内核传入，启动后回读；非 0 则返回显式 `Err`（`Invalid state: n_virgins < 0 ...`）。 |
+| 测试 | `stochastic_survival_rejects_negative_virgin_state`：构造 `n_f - total_sperm = -20` → `Err`；构造 `-1e-4`（f32 舍入噪声，在容差内）→ 夹 0 且 `Ok`。 |
+
+### 46.2 语义
+
+- 与 host 的差异：host 用 f64 `EPS=1e-10` 严格判负；设备为 f32，`1e-3` 容差内视为舍入噪声夹 0，超出则显式报错。**不再静默掩盖**真实非法状态。
+- 该改动在随机生存路径引入一次 4 字节 D2H 同步（仅为读取违规标志）；确定性路径不受影响。
+
+### 46.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **178 passed, 0 failed**（含 A2 用例） |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3611 passed / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2390/2464 = 97.00%**；executor 96.2%、kernels 97.5%、probe 96.1%，逐文件 ≥95% |
+
+### 46.4 请 evaluator 独立核对
+
+- **行为**：明显非法状态（virgins 显著为负）现在显式 `Err`；容差内负值仍夹 0（正常随机运行不回归，既有分布用例仍过）。
+- **阈值判定**：`1e-3f` 作为 f32 容差是否合理（对比 host `1e-10` f64），是否需要在文档/常量处更明确。
+- **性能影响**：随机生存每 tick 一次 4 字节 D2H；确认可接受或提出替代（如延后到下载边界检查）。
+- **CPU 不变性 / 门禁 / 覆盖率**同既往口径。
+
+### 46.5 残余风险
+
+- f32 容差与 host 严格判负存在精度层面的差异（不可避免）；已在代码注释与本交接说明。
+- 延迟到下载边界检查可免同步，但会延后报错时机、偏离 CPU 立即中止语义；本轮选择立即检查。
+
+结论请追加为 **§47**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2179,3 +2223,56 @@ D2H+H2D 往返。数值等价性成立，无回归、无门禁/覆盖率问题�
 
 缩放同步移除实现正确、等价性经 L3 与门禁独立确认，质量与覆盖率达标。**APPROVED**（范围为当前 HEAD
 `8ea1c5c` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 45. 第 18 轮结论（evaluator 独立执行，2026-09-19，HEAD=`7edff1b`）
+
+### 45.1 裁定：**APPROVED**
+
+GPU 会话 checkpoint 回滚现在同时回滚显存状态与设备 tick；恢复后重跑与参照**逐位一致**（空间与 age 两条
+会话路径），消除了“host 已回滚、设备从旧状态继续”的静默错误轨迹。
+
+### 45.2 独立核对
+
+- **实现逐分支**：
+  - `GpuExecutor::restore_state`：校验 `(B,2,A,Z)`/`(B,A,Z,Z)` 长度，`batch_to_inner` 转置后重传
+    `ind`/`sperm`，并把 `self.tick = tick`（counter-based RNG 以 tick 为基准，故可逐位续跑）；
+  - `spatial::restore_from_checkpoint` 与 `age_structured::restore_from_checkpoint`/`restore_state`：
+    host 回滚后调用设备恢复并 `clear_history()`；
+  - `age` 的 `restore_device_state` 把单群体状态平铺到执行器 batch 宽度（单群体=1、ensemble=B），
+    与 `enable_gpu_ensemble` 构造一致。
+- **会话级逐位回归（我运行）**：`cargo test --features gpu restore` → **3 passed**
+  （`restore_state_rejects_wrong_lengths`、`session_gpu_restore_device_state_rewinds`、
+  `spatial_gpu_restore_checkpoint_rewinds_device_state`），其中两个会话用例对
+  `state_ind`/`state_sperm` 做 `to_bits()` 逐位比较。
+- **Python 端到端（evaluator 独立，重编扩展）**：空间确定性模型 GPU 跑 4 tick 为参照；
+  另一实例跑 4 tick 后 `pop.restore_checkpoint(2)`，再跑 2 tick → 最终 `ind`/`sperm`
+  **与参照逐位相同**（`max_abs_diff=0.0`），`tick` 一致。
+- **CPU 不变性**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；
+  `phase0` bit-identical。
+
+### 45.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` / `cargo test --features gpu` | 67 / **177 passed, 0 failed** |
+| `cargo test --features gpu restore` | 3 passed |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3611 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2383/2457 = 96.99%**；逐文件均 ≥95%（executor 96.2%、kernels 97.4%、probe 96.1%，其余 100%） |
+
+### 45.4 残余风险（非阻塞，见 §44.5）
+
+- age 结构化设备分支本身不采集 checkpoint（GPU 运行无历史）；A1 覆盖“先有 checkpoint 再启用/回滚设备”。
+- `enable_gpu` 在已有 CPU tick 后启用时不会自动把设备 tick 设为 `state_tick`；A1 恢复会修正，
+  正常“先启用后运行”不受影响（后续可选清理）。
+- `restore_state` 的 `tick as u64`：`state_tick` 非负，无实际影响。
+
+### 45.5 结论
+
+A1 设备恢复正确、经会话级逐位用例与 Python 端到端逐位对照独立确认，质量与覆盖率达标。**APPROVED**
+（范围为当前 HEAD `7edff1b` 与被审测试集；不声称任何历史基线失败消失）。

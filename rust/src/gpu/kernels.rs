@@ -1107,6 +1107,12 @@ extern "C" __global__ void multinomial_seq(
 
 #define NATAL_MAX_Z 32
 
+// f32 tolerance for the virgin-count non-negativity check. The host uses a
+// 1e-10 f64 threshold; f32 rounding on fractional (continuous-sampling) counts
+// is coarser, so the device rejects only meaningfully negative states and
+// clamps the rounding noise.
+#define NATAL_VIRGIN_EPS 1e-3f
+
 __device__ __forceinline__ float natal_clamp01(float x) {
     if (x <= 0.0f) {
         return 0.0f;
@@ -1224,6 +1230,7 @@ extern "C" __global__ void survival_stochastic(
     int new_adult_age,
     const float* survival_rates,
     const float* viability,
+    int* violation,
     unsigned int key0,
     unsigned int key1,
     unsigned int site)
@@ -1257,6 +1264,12 @@ extern "C" __global__ void survival_stochastic(
     }
     float virgins = n_f_raw - total_sperm;
     if (virgins < 0.0f) {
+        if (virgins < -NATAL_VIRGIN_EPS) {
+            // The host errors on a meaningfully negative virgin count; record
+            // it so the executor can return an explicit failure instead of
+            // silently clamping a corrupted state.
+            violation[0] = 1;
+        }
         virgins = 0.0f;
     }
     float n_virgins = continuous ? virgins : roundf(virgins);
@@ -3101,6 +3114,7 @@ impl Kernels {
         n_ztypes: usize,
         new_adult_age: usize,
         continuous: bool,
+        violation: &mut CudaSlice<i32>,
         key0: u32,
         key1: u32,
         site: u32,
@@ -3125,6 +3139,7 @@ impl Kernels {
         launch.arg(&new_adult_i);
         launch.arg(survival_rates);
         launch.arg(viability);
+        launch.arg(&mut *violation);
         launch.arg(&key0);
         launch.arg(&key1);
         launch.arg(&site);

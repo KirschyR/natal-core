@@ -259,7 +259,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | ID | 类别 | 问题（简单说） | 影响 | 建议修法 | 风险 | 状态 |
 |---|---|---|---|---|---|---|
 | **A1** | 正确性 | ~~GPU 会话 restore 不回滚显存状态~~ | ~~静默错误轨迹~~ | 已按「完整设备恢复」实现：`GpuExecutor::restore_state` + 会话恢复时重传/回退设备 tick（第 18 轮，§44） | 中 | **已实现，待 §45 复核** |
-| **A2** | 正确性 | `survival_stochastic` 对 `n_virgins < -EPS` 静默夹 0，CPU 返回 `Err` | 非法状态被掩盖，CPU/GPU 行为分叉（低危） | 对齐 CPU，返回显式错误 | 低 | 未开始 |
+| **A2** | 正确性 | ~~`survival_stochastic` 静默夹 0~~ | ~~非法状态被掩盖~~ | 已实现：`violation` 标志 + f32 容差 `1e-3`，超出显式 `Err`（第 19 轮，§46） | 低 | **已实现，待 §47 复核** |
 | **A3** | 质量 | 设备历史 `flush` 的 boundary metadata（phase/execution）未按 tick 写 | stop/异常边界的历史元数据可能与 CPU 不同（GPU 无钩子→影响很小） | flush 时按 tick 写入 | 低 | 未开始 |
 | **C10** | 质量 | CSR 迁移缓存未纳入显存预算估算 | 显存不足在**首次迁移**才报错（非启用时），可能裸 OOM | 启用/`new` 时把缓存最坏字节计入预算守卫 | 低 | 未开始 |
 | **B4** | 完整性 | frontend 无单群体 `enable_gpu` 入口 | 用户无法通过 Population API 启用单群体 GPU + History | 新增 `enable_gpu()`/`gpu_status()` 前端入口并同步文档 | 低 | 未开始 |

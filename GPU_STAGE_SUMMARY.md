@@ -63,8 +63,9 @@ rust/**                  ④ 原生引擎（单 crate `natal-engine-core` → `_
 | 最新文档 | `8b84eeb` `d6f24a2` | 各轮交接/回执 |
 
 独立审查（`EVALUATE.md`）：P0–P3 第 3 轮 APPROVED；P5 第 4 轮 APPROVED；P4 第 6 轮 APPROVED（PTRS 修复后）；
-空间随机第 7 轮 APPROVED；**第 8 轮（越界守卫，§25）、第 9 轮（P6，§27）待回执**；第 10 轮
-（CSR 缓存 + 零逐 tick 回传，§28）已实现并自测，**待第 10 轮独立复核（§29）**。
+空间随机第 7 轮 APPROVED；第 8 轮（越界守卫，§25）APPROVED；第 9 轮（P6，§27）APPROVED；
+第 10 轮（CSR 缓存 + 零逐 tick 回传，§28）**NOT APPROVED**（§29：公共单 tick 读路径陈旧），
+已按 §30 修复（公共 `run_tick` 同步、`run_steps` 调 `advance_tick`），**待复核（§31）**。
 
 ---
 

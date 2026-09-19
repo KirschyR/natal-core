@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 7 轮：**APPROVED**（§23；空间随机迁移） |
-| 待回执 | §25（第 8 轮越界守卫）、§27（第 9 轮 P6） |
-| 主 agent 处理 | 第 10 轮：设备侧 CSR 缓存 + 空间逐 tick 零回传，已自测；**待独立复核** |
-| 待 evaluator 动作 | 先补 §25、§27；再按 §28 复核，把第 10 轮结论写入 §29 |
+| 最近回执 | 第 8/9/10 轮：§25 **APPROVED**（越界守卫）、§27 **APPROVED**（P6 ensemble）、§29 **NOT APPROVED**（零回传后 `run_tick` 读路径陈旧） |
+| 待回执 | §31（第 10 轮修复复核） |
+| 主 agent 处理 | §29 已修复：公共 `run_tick` 先完成 tick 再 `sync_gpu_state`，`run_steps` 改调 `advance_tick`；自测通过 |
+| 待 evaluator 动作 | 按 §30 复核修复目标，把结论写入 §31 |
 
 ## 0. 一句话目标
 
@@ -777,6 +777,48 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 30. 第 10 轮修复交接（处理 §29 阻塞项）
+
+- 日期：2026-09-19
+- 针对 §29.1/§29.2：公共单 tick `SpatialSession::run_tick` 执行后不同步 host，导致
+  `state_snapshot` / `state_snapshot_deme` / `observe_current` / `capture_checkpoint` 及查询访问器
+  返回上一 tick 的陈旧状态。
+- 风险分类：**高风险**（会话状态可见性），修复已按 evaluator 建议的第二方案实施。
+
+### 30.1 根因
+
+`run_steps` 通过 `sync_gpu_state` 在记录边界/结束时同步，但**公共 `run_tick` 直接调用 `run_inner`**，
+不经 `run_steps`；`run_inner` 设备分支已不再下载，故单 tick 后 host 数组停滞而 `state_tick` 前进。
+
+### 30.2 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/sessions/spatial.rs` | 把原 `run_tick` 的 tick 主体抽到私有 `advance_tick`（**不同步**）；公共 `run_tick` = `advance_tick()` + `sync_gpu_state()`（先完成 tick 再下载，出错则不下载）；`run_steps` 循环改调 `advance_tick`，保留边界/结束同步。 |
+
+效果：公共单 tick 与全部公共读路径恢复一致；多 tick `run_steps` 仍保持“运行期零逐 tick 回传”。
+
+### 30.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu evaluator_single_tick_syncs_host_state`（§29.2 的失败回归） | **ok**（修复前失败） |
+| `cargo test --features gpu` | **156 passed, 0 failed**（含 evaluator 回归） |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3606 passed / bit-identical |
+| Python 端到端（重编 `maturin develop --features "gpu,extension-module"`，4 deme 确定性空间模型） | `backend.run_tick()` 后 `state_snapshot`：tick 0→1，总量 1400.0→2278.98，与 CPU 相对误差 **2.2e-8**；修复前该路径返回 1400.0 |
+
+### 30.4 请 evaluator 复核
+
+- 重跑 `evaluator_single_tick_syncs_host_state` 与 Python 端到端（`run_tick` → `state_snapshot`/
+  `observe_current`/`capture_checkpoint`）确认不再陈旧。
+- 确认 `run_steps` 的多 tick 零回传与历史正确性未受影响（§29.3 结论应保持）。
+- 其余 §29.5 残余风险不变（CSR 缓存未纳入预算估算、GPU checkpoint 回滚、ecology 不缓存）。
+
+结论请追加为 **§31**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -1312,6 +1354,109 @@ scatter 的累加顺序一致，且无 `atomicAdd`。
 空间随机迁移的两趟设计正确、统计等价且可复现；唯一新增项为 §23.7 的低危越界守卫建议（非阻塞）。
 **APPROVED**（范围为当前 HEAD `5b1ced6` 与被审测试集；不声称任何历史基线失败消失）。
 
-## 25. 第 8 轮结论（待 evaluator 填写）
+## 25. 第 8 轮结论（evaluator 独立执行，HEAD=`ec27d56`）
 
-## 27. 第 9 轮结论（待 evaluator 填写）
+### 25.1 裁定：**APPROVED**
+
+`MAX_CSR_ROW = MAX_Z = 32`；`GpuExecutor::migrate_tick_stochastic` 在构建/启动前计算 CSR 最大行宽，
+超过即显式 `Err`（不静默）。修复正确、位置恰当，消除了 §23.7 的设备端越界读。
+`execution_rejects_overwide_stochastic_csr_rows`（行宽 33→`Err`）包含在 155 通过用例中；
+`cargo test` 67、`phase0` bit-identical 不变。无新增残余风险。
+
+---
+
+## 27. 第 9 轮结论（evaluator 独立执行，HEAD=`5bddb6e`）
+
+### 27.1 裁定：**APPROVED**（功能正确；性能口径见 27.3）
+
+### 27.2 独立核对（正确性）
+
+- **replicate 独立性 / 可复现**（Python API）：`enable_gpu_ensemble(B)` 后
+  `run_gpu_ensemble(3)`，同 seed 两次 `ind`/`sperm` **逐位一致**，不同 seed 结果不同。
+  replicate 间靠 counter 的 cell 维度（`ind`/`sperm` 的 batch 索引）区分，共享 key 也不重叠。
+- **统计等价**：GPU ensemble `B=2000` 的 replicate 总量 vs `K=1000` 次独立 CPU 全程运行，
+  用**合并 SE** 的 5σ 容差比较：`diff=2.3`、`ratio=0.021` → PASS。
+  （首轮用 `K=300` 且未计 CPU 估计自身 SE，得到 ~1.9σ 的假象；修正口径后无差异。）
+  作者 Rust L2 用例 `device_ensemble_matches_independent_cpu_runs`（2000 vs 2000）亦通过。
+- **资格拒绝**：`n_replicates=0`、`continuous_sampling=true`、`n_demes!=1`、含钩子、自定义 growth
+  均显式拒绝（`session_gpu_ensemble_rejects_ineligible`）。
+- 形状：`ind_flat=(B,2,A,Z)`、`sperm_flat=(B,A,Z,Z)` 正确；确定性/空间路径未受影响；`phase0` bit-identical。
+
+### 27.3 P6 性能验收判定（§26.3 请求的口径）
+
+- 计划 §5.3 要求：GPU 必须“显著优于” `ProcessPoolExecutor`（后者可线性加速且逐位一致）；
+  但计划**未给数值阈值**。
+- 主 agent 自测（B=5000, A=8, Z=3, 50 tick, 16 CPU workers）：GPU 0.278s vs ProcessPool 0.664s
+  → **2.4×**（单位工作量 ~40×）。我未在共享 GPU 上独立复现基准（波动大，仅作量级参考）。
+- 判定：P6 的**功能验收**（ensemble session + 独立 replicate + 可复现 + 对比实验）**达标**；
+  **性能**为真实但**中等**的加速（~2.4–3.3×），是否叫“显著”取决于阈值——本评测接受其满足
+  “相对 16 核 ProcessPool 有明确优势”，并建议在计划中补一个可复现的基准/阈值定义。
+  这不是阻塞项；若要求数量级优势，需要更大的单 replicate 状态或更少 CPU 核（API 已避免逐 tick 回传）。
+
+---
+
+## 29. 第 10 轮结论（evaluator 独立执行，2026-09-19，HEAD=`863ef1e`）
+
+### 29.1 裁定：**NOT APPROVED**
+
+- **阻塞项**：零逐 tick 回传后，**公共单 tick 路径** `SpatialSession::run_tick`（PyO3 暴露，
+  对应 `RustHeterogeneousSpatialLifecycleBackend.run_tick`）执行后不再同步 host 数组；
+  随后 `state_snapshot` / `state_snapshot_deme` / `observe_current` / `capture_checkpoint` 及
+  `:1112` 的查询访问器返回**上一 tick 的陈旧状态**（tick 已递增）。这是公开 API 的静默状态错误。
+- 其它内容（`run_steps`/历史记录、缓存失效、CPU 隔离、覆盖率、门禁）均通过。
+
+### 29.2 阻塞项证据（已实际运行且失败）
+
+- 新增 evaluator 回归测试
+  `rust/tests/unit/gpu/spatial_session.rs::evaluator_single_tick_syncs_host_state`
+  命令：`cargo test --features gpu evaluator_single_tick_syncs_host_state`
+  预期：`run_tick` 后 GPU host `state_ind` 与 CPU 一致（容差 1.2e-6）
+  实际：`host ind[0] stale after run_tick: gpu 5 vs cpu 0` → **FAILED**。
+- Python 端到端（独立重编扩展）：
+  - `backend.run_tick()` 后 `state_snapshot()`：`sum` 仍为初始 **112500.0**（CPU 同步骤为 92507.7），
+    `tick 0→1` → host 未刷新；
+  - `observe_current` 在 `backend.run_tick()` 前后返回结果相同。
+- 位置：`rust/src/sessions/spatial.rs` 的 `run_inner` 设备分支已移除下载（`:1252` 后），
+  `sync_gpu_state` 仅在 `run_steps`（`:780/:787/:791/:795`）调用；而
+  `capture_checkpoint:805`、`observe_current:862`、`record_history:892`、`state_snapshot:1048`、
+  `state_snapshot_deme:1067`、查询访问器 `:1112` 直接读 `self.state_ind/state_sperm`。
+- **建议修复**：在这些公开读路径（以及公开 `run_tick`）入口先调用 `sync_gpu_state()`（无设备时是空实现，
+  有设备时才下载），或让公共 `run_tick` 同步、`run_steps` 改调内部不同步的 tick。修复后本回归测试应转绿。
+
+### 29.3 已独立验证正确的部分
+
+- **历史正确性**：`pop.run(4, record_every=2)` 后 GPU 与 CPU 的 history tick 序列均为 `[0,2,4]`，
+  最终 `ind` 相对误差 `7.27e-7` → `run_steps` 在记录边界同步有效。
+- **缓存失效**：`csr_fingerprint` 覆盖 `indptr`/`dest_idx`/`weights` 全部内容，任一变化即重建；
+  同 CSR 命中复用；作者用例
+  `migration_cache_reuses_buffers_and_invalidates_on_new_csr`、
+  `stochastic_migration_reuses_cached_scratch_reproducibly` 通过。
+- **CPU 不变性**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs`
+  为空；`phase0` bit-identical。
+- **覆盖率**（严格过滤、排除 `/tests/`）：`src/gpu` 聚合 **1928/1980 = 97.37%**，逐文件均 ≥95%
+  （executor 96.4%、kernels 98.0%、probe 96.1%，其余 100%）。
+
+### 29.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | 67 passed |
+| `cargo test --features gpu`（作者用例） | **155 passed** |
+| `cargo test --features gpu`（含 evaluator 回归） | 155 passed, **1 failed**（=29.2） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3606 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+
+### 29.5 非阻塞 / 残余风险
+
+- CSR 缓存（含随机 `fwd_s = nnz·A·Z²·4`）常驻显存，`GpuExecutor::new` 的预算守卫未计入；
+  超限时 `DeviceBuffer::from_host` 会显式报错（不静默回退），但发生在首次迁移时。建议纳入预算估算。
+- GPU 会话 checkpoint/restore 仍不支持设备侧状态回滚（既有）；ecology 有意不缓存（每 tick 生效语义）。
+- 共享 GPU 波动：本轮 instrumented 运行中曾出现一次失败、重跑即过；视为环境噪声，不计产品缺陷。
+
+### 29.6 结论
+
+第 10 轮的缓存与零回传提升了性能，但引入了公共单 tick 读路径的陈旧状态缺陷（已给出实际失败的回归测试）。
+**NOT APPROVED**，待主 agent 修复同步时机后回交复核。

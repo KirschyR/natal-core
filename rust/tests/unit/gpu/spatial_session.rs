@@ -346,3 +346,49 @@ fn spatial_stochastic_session_device_tick_runs() {
     assert!(session.state_ind.iter().all(|value| value.is_finite()));
     assert!(session.state_sperm.iter().all(|value| value.is_finite()));
 }
+
+/// Regression: the public single-tick `run_tick` must leave the host session
+/// arrays consistent with the completed tick. With the zero-copy-back design,
+/// the device path advances on the GPU but never refreshes `state_ind`, so a
+/// subsequent `state_snapshot`/`observe_current`/`capture_checkpoint` returns
+/// the *pre-tick* state under an advanced tick.
+#[test]
+fn evaluator_single_tick_syncs_host_state() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    let mut cpu = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.enable_gpu().expect("enable gpu");
+    assert_eq!(gpu.gpu_status(), "enabled");
+
+    gpu.run_tick().expect("gpu run_tick");
+    cpu.run_tick().expect("cpu run_tick");
+    assert_eq!(gpu.state_tick, cpu.state_tick);
+
+    for (index, (got, want)) in gpu.state_ind.iter().zip(cpu.state_ind.iter()).enumerate() {
+        let got = *got as f32;
+        let want = *want as f32;
+        let tolerance = 1.2e-6f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "host ind[{index}] stale after run_tick: gpu {got} vs cpu {want}"
+        );
+    }
+}

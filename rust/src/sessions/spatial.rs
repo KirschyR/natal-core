@@ -734,41 +734,25 @@ impl SpatialSession {
     /// Returns ``PyRuntimeError`` for shape mismatches or kernel errors,
     /// ``PyValueError`` when an in-run ``Op.set_param`` value fails the
     /// bounds gate.
+    /// Run one complete tick for all demes and refresh the host state.
+    ///
+    /// The public single-tick entry point always leaves `state_ind` /
+    /// `state_sperm` consistent with the returned tick, because callers read
+    /// those arrays directly (snapshots, observations, checkpoints). The
+    /// multi-tick `run_steps` instead drives [`Self::advance_tick`] and syncs
+    /// only at history boundaries and at the end, so a long device run does
+    /// not transfer state every tick.
+    ///
+    /// ## Returns
+    /// The tick value after the call (see [`Self::advance_tick`]).
+    ///
+    /// ## Errors
+    /// Propagates the tick error, or the device download error on the GPU
+    /// path.
     fn run_tick(&mut self) -> PyResult<i64> {
-        self.execution.begin()?;
-        let before_tick = self.state_tick;
-        let journal_start = self.eco_journal.len();
-        let outcome = self.run_inner();
-        if let Some(shared) = &self.history_store {
-            let store = shared.lock().unwrap();
-            for (deme, tick, parameter, old, new, phase) in self.eco_journal.drain(journal_start..)
-            {
-                if let Some(log) = store.extra_logs.get(deme) {
-                    log.lock()
-                        .unwrap()
-                        .push(crate::output::parameter_log::LogEntry::from_phase(
-                            (
-                                tick,
-                                crate::generated::ecology_parameters::ECO_PARAM_COLUMNS[parameter]
-                                    .to_owned(),
-                                old,
-                                new,
-                            ),
-                            phase,
-                            deme,
-                        ));
-                }
-            }
-        }
-        self.execution = match &outcome {
-            Ok(value) if value == &before_tick => crate::sessions::status::ExecutionStatus::Stopped,
-            Ok(_) => {
-                self.phase = 0;
-                crate::sessions::status::ExecutionStatus::Ready
-            }
-            Err(_) => crate::sessions::status::ExecutionStatus::Failed,
-        };
-        outcome
+        let tick = self.advance_tick()?;
+        self.sync_gpu_state()?;
+        Ok(tick)
     }
 
     /// Advance and retain spatial boundaries entirely inside the session.
@@ -782,7 +766,7 @@ impl SpatialSession {
         }
         for _ in 0..n_ticks {
             let previous = self.state_tick;
-            self.run_tick()?;
+            self.advance_tick()?;
             if self.state_tick == previous {
                 self.sync_gpu_state()?;
                 return Ok((self.state_tick, true));
@@ -1285,6 +1269,59 @@ impl SpatialSession {
     #[cfg(not(feature = "gpu"))]
     fn sync_gpu_state(&mut self) -> PyResult<()> {
         Ok(())
+    }
+
+    /// Advance one tick without refreshing the host session arrays.
+    ///
+    /// This is the shared body of the public single-tick entry
+    /// ([`Self::run_tick`], which syncs afterwards) and the multi-tick
+    /// `run_steps` loop (which syncs only at history boundaries and at the
+    /// end). Keeping the device download out of this method is what makes the
+    /// per-tick copy-back amortized.
+    ///
+    /// ## Returns
+    /// The tick value after the call: `tick + 1` on a completed tick, the
+    /// unchanged tick when a hook stopped the run.
+    ///
+    /// ## Errors
+    /// Returns `PyRuntimeError` for shape mismatches or kernel errors,
+    /// `PyValueError` when an in-run `Op.set_param` value fails the bounds
+    /// gate.
+    fn advance_tick(&mut self) -> PyResult<i64> {
+        self.execution.begin()?;
+        let before_tick = self.state_tick;
+        let journal_start = self.eco_journal.len();
+        let outcome = self.run_inner();
+        if let Some(shared) = &self.history_store {
+            let store = shared.lock().unwrap();
+            for (deme, tick, parameter, old, new, phase) in self.eco_journal.drain(journal_start..)
+            {
+                if let Some(log) = store.extra_logs.get(deme) {
+                    log.lock()
+                        .unwrap()
+                        .push(crate::output::parameter_log::LogEntry::from_phase(
+                            (
+                                tick,
+                                crate::generated::ecology_parameters::ECO_PARAM_COLUMNS[parameter]
+                                    .to_owned(),
+                                old,
+                                new,
+                            ),
+                            phase,
+                            deme,
+                        ));
+                }
+            }
+        }
+        self.execution = match &outcome {
+            Ok(value) if value == &before_tick => crate::sessions::status::ExecutionStatus::Stopped,
+            Ok(_) => {
+                self.phase = 0;
+                crate::sessions::status::ExecutionStatus::Ready
+            }
+            Err(_) => crate::sessions::status::ExecutionStatus::Failed,
+        };
+        outcome
     }
 
     fn run_inner(&mut self) -> PyResult<i64> {

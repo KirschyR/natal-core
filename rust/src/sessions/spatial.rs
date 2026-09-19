@@ -848,6 +848,22 @@ impl SpatialSession {
             .map(|words| SessionRng::from_state_words(*words))
             .collect();
         self.ecology = checkpoint.ecology.clone();
+        // A GPU-backed session keeps its authoritative state on the device:
+        // re-upload the checkpoint and rewind the device tick so the next
+        // device tick continues from this boundary. Any staged device history
+        // rows belong to the abandoned timeline and are dropped.
+        #[cfg(feature = "gpu")]
+        if let Some(mut gpu) = self.gpu.take() {
+            let ind_host: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
+            let sperm_host: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
+            let outcome = (|| -> Result<(), String> {
+                gpu.restore_state(&ind_host, &sperm_host, self.state_tick as u64)?;
+                gpu.clear_history();
+                Ok(())
+            })();
+            self.gpu = Some(gpu);
+            outcome.map_err(map_lifecycle_error)?;
+        }
         // Future checkpoints are invalid once the timeline rewinds.
         self.checkpoints.truncate(index + 1);
         Ok(Some(self.state_tick))

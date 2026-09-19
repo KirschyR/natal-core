@@ -1526,6 +1526,57 @@ impl GpuExecutor {
         self.history = None;
     }
 
+    /// Replace the device state and tick counter from a host checkpoint.
+    ///
+    /// Rolls a GPU-backed session back to a recorded checkpoint so the device
+    /// state matches the restored host state. The counter-based RNG is keyed
+    /// by the restored tick, so the device reproduces the checkpointed
+    /// trajectory from that point. The migration cache is graph-static and
+    /// stays valid.
+    ///
+    /// ## Parameters
+    /// - `ind_host`: Batch-major individual counts, `(B, 2, A, Z)`.
+    /// - `sperm_host`: Batch-major stored sperm, `(B, A, Z, Z)`.
+    /// - `tick`: Device tick counter to restore.
+    ///
+    /// ## Returns
+    /// `Ok(())` after both planes are resident again.
+    ///
+    /// ## Errors
+    /// Returns a description when the host slices have the wrong length or an
+    /// upload fails.
+    pub fn restore_state(
+        &mut self,
+        ind_host: &[f32],
+        sperm_host: &[f32],
+        tick: u64,
+    ) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        let expected_ind = 2 * n_ages * n_ztypes * n_batch;
+        let expected_sperm = n_ages * n_ztypes * n_ztypes * n_batch;
+        if ind_host.len() != expected_ind {
+            return Err(format!(
+                "restore_state individual state needs {expected_ind} elements, got {}",
+                ind_host.len()
+            ));
+        }
+        if sperm_host.len() != expected_sperm {
+            return Err(format!(
+                "restore_state sperm state needs {expected_sperm} elements, got {}",
+                sperm_host.len()
+            ));
+        }
+        let stream = self.context.stream();
+        let ind_inner = batch_to_inner(ind_host, &[2, n_ages, n_ztypes], n_batch)?;
+        let sperm_inner = batch_to_inner(sperm_host, &[n_ages, n_ztypes, n_ztypes], n_batch)?;
+        self.ind = DeviceBuffer::from_host(&stream, &ind_inner)?;
+        self.sperm = DeviceBuffer::from_host(&stream, &sperm_inner)?;
+        self.tick = tick;
+        Ok(())
+    }
+
     /// Copy the individual state back in the batch-major CPU layout.
     ///
     /// ## Returns

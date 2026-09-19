@@ -924,6 +924,9 @@ impl AgeStructuredSession {
         words.copy_from_slice(&rng_words);
         self.rng = SessionRng::from_state_words(words);
         self.params = params;
+        // Keep the optional device state in step with the restored host state.
+        #[cfg(feature = "gpu")]
+        self.restore_device_state(tick)?;
         Ok(tick)
     }
 
@@ -982,6 +985,11 @@ impl AgeStructuredSession {
         self.rng = SessionRng::from_state_words(cp.rng_words);
         self.params
             .ecology_restore_words(&self.blueprint, &cp.eco_scalars, &cp.eco_vectors)?;
+        // A GPU-backed session keeps its authoritative state on the device:
+        // re-upload the checkpoint and rewind the device tick so the next
+        // device tick continues from this boundary.
+        #[cfg(feature = "gpu")]
+        self.restore_device_state(cp.tick)?;
         Ok(Some((cp.tick, ecology_snapshot(py, &self.params)?)))
     }
 
@@ -1352,6 +1360,42 @@ impl AgeStructuredSession {
             #[cfg(feature = "gpu")]
             gpu: None,
         }
+    }
+
+    /// Roll the optional device executor back to the current host state.
+    ///
+    /// Called after any host-side checkpoint restore so the device state and
+    /// tick counter match the restored host state. The executor's batch axis
+    /// is `1` for a single population and `B` for an ensemble, so the
+    /// single-population host state is tiled to that width.
+    ///
+    /// ## Parameters
+    /// - `tick`: Tick value to install on the device.
+    ///
+    /// ## Errors
+    /// Returns the device restore error.
+    #[cfg(feature = "gpu")]
+    fn restore_device_state(&mut self, tick: i64) -> PyResult<()> {
+        if let Some(mut gpu) = self.gpu.take() {
+            let n_batch = gpu.n_batch();
+            let single_ind: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
+            let single_sperm: Vec<f32> =
+                self.state_sperm.iter().map(|value| *value as f32).collect();
+            let ind_host: Vec<f32> = (0..n_batch)
+                .flat_map(|_| single_ind.iter().copied())
+                .collect();
+            let sperm_host: Vec<f32> = (0..n_batch)
+                .flat_map(|_| single_sperm.iter().copied())
+                .collect();
+            let outcome = (|| -> Result<(), String> {
+                gpu.restore_state(&ind_host, &sperm_host, tick as u64)?;
+                gpu.clear_history();
+                Ok(())
+            })();
+            self.gpu = Some(gpu);
+            outcome.map_err(map_lifecycle_error)?;
+        }
+        Ok(())
     }
 
     /// Execute `n_ticks` deterministic ticks on the device, then copy the

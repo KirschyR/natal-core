@@ -300,3 +300,64 @@ fn session_accepts_continuous_sampling() {
         assert_eq!(ensemble.gpu_status(), "enabled");
     });
 }
+
+#[test]
+fn session_gpu_restore_device_state_rewinds() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let mut restored = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        restored.enable_gpu().expect("enable restored");
+        restored.run(py, 1, 0, None, 0).expect("restored tick 1");
+        let tick1_ind = restored.state_ind.clone();
+        let tick1_sperm = restored.state_sperm.clone();
+        restored.run(py, 1, 0, None, 0).expect("restored tick 2");
+        assert_eq!(restored.state_tick, 2);
+
+        // Simulate a host checkpoint restore, then rewind the device too.
+        restored.state_ind = tick1_ind;
+        restored.state_sperm = tick1_sperm;
+        restored.state_tick = 1;
+        restored
+            .restore_device_state(1)
+            .expect("device state restore");
+        restored.run(py, 1, 0, None, 0).expect("restored rerun");
+
+        let mut reference = make_session(blueprint, params, genetics, ind, sperm);
+        reference.enable_gpu().expect("enable reference");
+        reference.run(py, 2, 0, None, 0).expect("reference tick 2");
+
+        assert_eq!(restored.state_tick, reference.state_tick);
+        for (index, (got, want)) in restored
+            .state_ind
+            .iter()
+            .zip(reference.state_ind.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "device state diverged after restore at ind[{index}]: {got} vs {want}"
+            );
+        }
+        for (index, (got, want)) in restored
+            .state_sperm
+            .iter()
+            .zip(reference.state_sperm.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                got.to_bits(),
+                want.to_bits(),
+                "device state diverged after restore at sperm[{index}]: {got} vs {want}"
+            );
+        }
+    });
+}

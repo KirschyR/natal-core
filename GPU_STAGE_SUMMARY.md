@@ -202,6 +202,8 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 - `survival_stochastic` 对非法状态 `n_virgins<-EPS` 静默夹 0，CPU 返回 `Err`（低危，未对齐）。
 - P6 性能：GPU 单位工作量约快 ~40×，但相对 16 核 `ProcessPoolExecutor` 墙面加速比仅 **2.4–3.3×**，未达数量级。
 
+> 上述未完成项的编号、优先级、建议修法与验收口径统一见 **§11.2**。
+
 ---
 
 ## 9. 测试与门禁
@@ -235,18 +237,54 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 ---
 
-## 11. 下一步计划（建议顺序）
+## 11. 计划与推进路线
 
-1. **等 §33 回执**（第 12 轮）。P6 若判定“加速比不足”，需与用户确认阈值；可换更大单 replicate
-   状态、更少 CPU 核、或更多 tick 重测。
-2. **设备侧历史缓冲**（D5）：观测模式已完成（第 12 轮）；后续可把 raw 模式也搬到设备，并按 `max_rows` 收缩窗口。
-3. **停止门控**（D6）：无钩子模型的 `stop_if_*` 设备侧门控，消除主机同步。
-4. **`continuous_sampling` 支持**：已完成（第 14 轮，设备连续二项/多项/Poisson）。
-5. **离散世代 GPU 路径**：已完成（第 15 轮；Wright-Fisher 融合模式未覆盖）。
-6. **frontend/population 级 ensemble 入口 + 文档**：已完成（第 16 轮）。
-7. 性能优化：CSR 缓存（第 10 轮）、观测历史设备投影（第 12 轮）、移除每 tick 缩放同步（第 17 轮）已完成。大 B 全 tick 基准显示瓶颈在计算侧而非传输；ecology 缓存收益有限，进一步优化需内核重构/占用率剖析（需空闲 GPU，另立任务）。
+> 本节是接手者的**唯一执行清单**。每完成一项：跑全部门禁 → 独立审查（`EVALUATE.md` 交接 → 回执）
+> → 再进入下一项。高风险项（改科学公式/随机分布/状态恢复/公开 API/Python-Rust 交换）必须独立复核。
 
-每完成一个阶段：跑全部门禁 → 独立审查（`EVALUATE.md` 交接 → 回执）→ 再进入下一阶段。
+### 11.1 已完成路线
+
+| 项 | 内容 | 状态 |
+|---|---|---|
+| P0–P6 | 探针/布局/executor/确定性内核/随机内核/迁移/ensemble | 全部 APPROVED |
+| 历史 | 观测模式设备侧历史投影 + 一次回传（§32） | APPROVED |
+| 缓存 | CSR 静态缓存 + 空间逐 tick 零回传（§28） | APPROVED |
+| 连续采样 | 设备连续二项/多项/Poisson（§36） | APPROVED |
+| 离散世代 | 空间离散设备生命周期（§38） | APPROVED |
+| frontend | `enable_gpu_ensemble`/`run_gpu_ensemble` + 中英文档（§40） | APPROVED |
+| 性能 | 移除每 tick 缩放 D2H 同步（§42） | APPROVED |
+
+### 11.2 未完成项计划表（按建议优先级）
+
+| ID | 类别 | 问题（简单说） | 影响 | 建议修法 | 风险 | 状态 |
+|---|---|---|---|---|---|---|
+| **A1** | 正确性 | ~~GPU 会话 restore 不回滚显存状态~~ | ~~静默错误轨迹~~ | 已按「完整设备恢复」实现：`GpuExecutor::restore_state` + 会话恢复时重传/回退设备 tick（第 18 轮，§44） | 中 | **已实现，待 §45 复核** |
+| **A2** | 正确性 | `survival_stochastic` 对 `n_virgins < -EPS` 静默夹 0，CPU 返回 `Err` | 非法状态被掩盖，CPU/GPU 行为分叉（低危） | 对齐 CPU，返回显式错误 | 低 | 未开始 |
+| **A3** | 质量 | 设备历史 `flush` 的 boundary metadata（phase/execution）未按 tick 写 | stop/异常边界的历史元数据可能与 CPU 不同（GPU 无钩子→影响很小） | flush 时按 tick 写入 | 低 | 未开始 |
+| **C10** | 质量 | CSR 迁移缓存未纳入显存预算估算 | 显存不足在**首次迁移**才报错（非启用时），可能裸 OOM | 启用/`new` 时把缓存最坏字节计入预算守卫 | 低 | 未开始 |
+| **B4** | 完整性 | frontend 无单群体 `enable_gpu` 入口 | 用户无法通过 Population API 启用单群体 GPU + History | 新增 `enable_gpu()`/`gpu_status()` 前端入口并同步文档 | 低 | 未开始 |
+| **B5** | 完整性 | ensemble 返回裸数组，未接 `History` | ensemble 结果不能复用 observation/history | 返回结果对象或提供 History 转换 | 低-中 | 未开始 |
+| **B6** | 性能/内存 | raw 历史不走设备驻留；设备窗口未按 `max_rows` 收缩 | raw 逐记录同步；大 D×长 T 超预算回退 host | raw 设备暂存 + `capacity=min(records, max_rows)`（GPU 无 stop，安全） | 中 | 未开始 |
+| **C8** | 一致性 | 设备连续采样阈值未统一到 host `EPS=1e-10` | 极小窗口分支差异，统计已验证等价；仅可维护性 | 统一常量 | 低 | 未开始 |
+| **C11** | 质量 | `run_gpu_ensemble` 在 `_gpu_ensemble_replicates==0` 时 reshape 失败 | 误用路径（frontend 无单群体入口，实际不可达） | 前置校验并给明确 `RuntimeError` | 低 | 未开始 |
+| **C9** | 一致性 | `male_adult_mating_rate`/`eggs_per_female` clamp 差异 | 契约范围内无差异 | 可选对齐或注释说明 | 低 | 已记录，可不做 |
+| **B7** | 完整性 | Wright-Fisher 融合模式未设备化 | 空间离散 CPU 不用它；非空间离散无 GPU 入口 | 按需实现 | 中 | 低优先 |
+| **D6** | 设计 | hooks/停止门控设备侧未做 | 含钩子（含 `stop_if_*`）模型完全不可用 GPU | 需移植 CSR 钩子解释器（计划已排除） | 极高 | **阻塞（设计取舍）** |
+| **E12** | 性能 | 深层性能优化未做（debug 基准受宿主机重建/上传主导） | 大 B 计算侧瓶颈 | release + 空闲卡剖析 → 缓存恒定张量 / 复用 scratch / 内核重构 | 高（内核重构） | 待空闲卡 |
+| **E13** | 验收 | P6 相对 16 核 `ProcessPool` 仅 2.4–3.3×，阈值未定 | “显著优于”是否达标无口径 | 用户定阈值或换更大模型/更少核重测 | 低 | **待用户口径** |
+
+### 11.3 建议推进顺序
+
+1. **A1**（正确性、静默错误）→ **A2** → **C10**：先消灭正确性/显式失败缺口。
+2. **B4** → **B5**：补齐用户可见入口与结果集成。
+3. **B6** → **C8** → **C11** → **A3**：性能/内存与一致性收尾。
+4. **D6** 保持阻塞；**B7** 低优先；**E12/E13** 需空闲 GPU 与用户口径，另行启动。
+
+### 11.4 验收口径（按类别）
+
+- 正确性/完整性（A/B/C）：针对性测试 + `phase0` bit-identical + L3 对照；公开 API/状态类改动走独立复核。
+- 文档类：`docs/zh` 与 `docs/en` 同步、示例可运行。
+- 性能类：`maturin develop --release` + 空闲 GPU + 前后 `nvidia-smi` 快照，给出可复现基准。
 
 ---
 

@@ -917,3 +917,72 @@ fn spatial_discrete_stochastic_device_tick_runs() {
     assert!(session.state_ind.iter().all(|value| value.is_finite()));
     assert!(session.state_sperm.iter().all(|value| value.is_finite()));
 }
+
+#[test]
+fn spatial_gpu_restore_checkpoint_rewinds_device_state() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    // Raw rows are [tick, ind..., sperm...].
+    let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
+    let make = || {
+        let mut session = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        session.enable_gpu().expect("enable gpu");
+        session.history_store = Some(HistoryData::transient(raw_width, dims, true));
+        session
+    };
+    let mut restored = make();
+    let mut reference = make();
+
+    // Both run one tick; `restored` then advances to tick 2 and back to 1.
+    restored.run_steps(1, 1).expect("restored tick 1");
+    reference.run_steps(1, 1).expect("reference tick 1");
+    restored.run_steps(1, 1).expect("restored tick 2");
+    assert_eq!(restored.state_tick, 2);
+    let outcome = restored
+        .restore_from_checkpoint(1)
+        .expect("restore checkpoint");
+    assert_eq!(outcome, Some(1), "checkpoint at tick 1 must exist");
+    assert_eq!(restored.state_tick, 1);
+
+    // Advance both two ticks from tick 1 and compare the full device state.
+    restored.run_steps(2, 1).expect("restored rerun");
+    reference.run_steps(2, 1).expect("reference rerun");
+    assert_eq!(restored.state_tick, reference.state_tick);
+    assert_eq!(restored.state_ind.len(), reference.state_ind.len());
+    for (index, (got, want)) in restored
+        .state_ind
+        .iter()
+        .zip(reference.state_ind.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "device state diverged after restore at ind[{index}]: {got} vs {want}"
+        );
+    }
+    for (index, (got, want)) in restored
+        .state_sperm
+        .iter()
+        .zip(reference.state_sperm.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "device state diverged after restore at sperm[{index}]: {got} vs {want}"
+        );
+    }
+}

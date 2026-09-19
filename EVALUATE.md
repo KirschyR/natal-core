@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 16 轮：**APPROVED**（§41；frontend ensemble 入口 + 文档） |
-| 待回执 | §43（第 17 轮性能优化：移除每 tick 缩放同步） |
-| 主 agent 处理 | 第 17 轮：确定性 survival 的每 tick 缩放 D2H 已移除，自测通过 |
-| 待 evaluator 动作 | 按 §42 复核，把第 17 轮结论写入 §43 |
+| 最近回执 | 第 17 轮：**APPROVED**（§43；移除每 tick 缩放同步） |
+| 待回执 | §45（第 18 轮 A1：GPU checkpoint 设备恢复） |
+| 主 agent 处理 | 第 18 轮：A1 已实现（完整设备恢复）并自测；下一项为 A2 |
+| 待 evaluator 动作 | 按 §44 复核，把第 18 轮结论写入 §45 |
 
 ## 0. 一句话目标
 
@@ -1099,6 +1099,54 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 44. 第 18 轮交接 — A1：GPU 会话 checkpoint 回滚（完整设备恢复）
+
+- 日期：2026-09-19
+- 背景：§43 APPROVED。按 `GPU_STAGE_SUMMARY §11.2` 计划表推进 **A1**（正确性、P1）。用户选择「完整设备恢复」方案。
+- 风险分类：**高风险**（状态恢复：把 checkpoint 重新上传到显存并回退设备 tick/RNG 基准）。
+
+### 44.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增 `GpuExecutor::restore_state(ind_host, sperm_host, tick)`：按 batch-major 校验长度、转置为 batch-minor 重新上传 `ind`/`sperm`，并把设备 tick 计数器设为 `tick`（counter-based RNG 以 tick 为基准，故同 seed 可从该边界逐位续跑）。 |
+| `rust/src/sessions/spatial.rs` | `restore_from_checkpoint`：host 状态回滚后，若设备执行器存在则调用 `restore_state` 并把设备 tick 回退到 checkpoint.tick，同时 `clear_history()` 丢弃被放弃时间线的设备历史行。 |
+| `rust/src/sessions/age_structured.rs` | 新增私有 `restore_device_state(tick)`（把单群体状态按执行器 batch 宽度平铺——单群体=1、ensemble=B——重新上传）；在 `restore_from_checkpoint` 与手动 `restore_state` 两条恢复路径末尾调用。 |
+| 测试 | `spatial_gpu_restore_checkpoint_rewinds_device_state`（raw checkpoint 恢复后设备重跑与参照逐位一致）；`session_gpu_restore_device_state_rewinds`（age：设备恢复后重跑与参照逐位一致）；`restore_state_rejects_wrong_lengths`（长度校验分支）。 |
+
+### 44.2 行为
+
+- GPU 会话的 checkpoint 回滚现在**同时回滚显存状态与设备 tick**：不再出现“host 已回滚、设备从旧状态继续”的静默错误轨迹。
+- ensemble 执行器（batch=B）在恢复时把单群体状态平铺到 B，与 `enable_gpu_ensemble` 的构造方式一致。
+- 设备历史窗口在恢复时清空，避免跨时间线的陈旧记录。
+- 迁移缓存与 CSR 无关状态保持有效；CPU 数值路径零改动。
+
+### 44.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **177 passed, 0 failed**（含 3 个 A1 用例） |
+| `cargo test`（默认） / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3611 passed / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2383/2457 = 96.99%**；executor 96.2%、kernels 97.4%、probe 96.1%，逐文件 ≥95% |
+| 回归测试 | GPU/CPU 重跑在恢复边界后**逐位一致**（bit-for-bit） |
+
+### 44.4 请 evaluator 独立核对
+
+- **正确性**：raw checkpoint 恢复后，GPU 重跑轨迹与“从未越过该 tick”的参照逐位一致（空间与 age 两条会话路径）；确定性/随机均适用（同 seed、同 tick）。
+- **无静默错误**：恢复后设备 tick = checkpoint.tick；设备历史窗口被清空；不再有 host/设备状态错配。
+- **边界**：`restore_state` 长度不匹配显式报错；ensemble（B>1）平铺正确；已声明的限制（age GPU 运行本身不采集 checkpoint）不变。
+- **CPU 不变性 / 门禁 / 覆盖率**同既往口径。
+
+### 44.5 残余风险
+
+- age 结构化设备分支本身不采集 checkpoint（既有：GPU 运行无历史），本条主要覆盖“先有 checkpoint 再启用/回滚设备”的场景；该既有局限未变。
+- `enable_gpu` 在已有 CPU tick 之后启用时不会自动把设备 tick 设为 `state_tick`（A1 恢复会修正；但正常“先启用后运行”路径不受影响）——记为后续可选清理项。
+
+结论请追加为 **§45**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2080,3 +2128,54 @@ evaluator 补充 2 个针对性用例（`test_enable_gpu_ensemble_lazily_initial
 
 frontend ensemble 入口与文档满足公开合同、隔离性、可复现与同步要求；门禁全绿、Python 新增行覆盖率 100%。
 **APPROVED**（范围为当前 HEAD `1211add` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 43. 第 17 轮结论（evaluator 独立执行，2026-09-19，HEAD=`8ea1c5c`）
+
+### 43.1 裁定：**APPROVED**
+
+`density_scaling_device` 把缩放因子留在设备，`survival_tick` / `discrete_survival_tick` 不再做
+D2H+H2D 往返。数值等价性成立，无回归、无门禁/覆盖率问题。
+
+### 43.2 独立核对
+
+- **等价性（读 diff）**：`density_scaling_device` 与旧 `density_scaling_impl` 使用同一缩放内核、同一输入，
+  只是不再 `to_host`；`density_scaling_impl` 改为 `density_scaling_device(...)?.to_host(...)`，
+  公开 `density_scaling` 主机返回值语义不变。`survival_tick`/`discrete_survival_tick` 直接复用设备
+  `DeviceBuffer`，下游 `recruit_factor`/`recruit_stochastic`/`discrete_survival` 读取同一数据。
+- **无残留同步**：设备 survival 路径不再出现缩放因子的 `to_host`/`from_host`。
+- **确定性 L3（evaluator 独立，重编扩展）**：
+  - panmictic 确定性 5 tick：`ind max_rel=1.680e-7`（与 §17/§31 完全相同）；
+  - 空间确定性 5×5、25 tick：`max_rel=9.140e-7 / 9.149e-7`（与 §23/§31 完全相同）。
+- **CPU 数值不变**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；
+  `phase0` bit-identical。
+
+### 43.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` / `cargo test --features gpu` | 67 / **174 passed, 0 failed** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3611 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2352/2426 = 96.95%**；逐文件均 ≥95%（executor 96.0%、kernels 97.4%、probe 96.1%，其余 100%） |
+
+### 43.4 性能结论（§42.3 请求的口径）
+
+- 该改动方向正确、零风险：确定性 survival 每 tick 少一次 D2H+H2D，与「逐 tick 不回传」目标一致。
+- 主 agent 的临时全 tick 基准显示瓶颈在**计算侧**而非传输/同步（stage 拆分 repro≈surv≈10.6ms，
+  传输量级远小），且受共享 GPU 影响仅定性。evaluator 认同：**传输类优化在大 B 下收益有限**；
+  更深的内核/占用率剖析应作为独立任务在空闲卡上做。本轮交付的同步移除本身无争议，予以接受。
+
+### 43.5 残余风险（非阻塞）
+
+- 大 B 基准受共享 GPU 时间片影响，性能数字仅定性；未做更深优化。
+- 既有残余（设备窗口未按 max_rows 收缩、raw 不走设备历史、GPU checkpoint 回滚等）不变。
+
+### 43.6 结论
+
+缩放同步移除实现正确、等价性经 L3 与门禁独立确认，质量与覆盖率达标。**APPROVED**（范围为当前 HEAD
+`8ea1c5c` 与被审测试集；不声称任何历史基线失败消失）。

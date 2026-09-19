@@ -3127,3 +3127,27 @@ fn device_discrete_survival_matches_host_distribution() {
 fn device_discrete_survival_continuous_matches_host_distribution() {
     discrete_survival_case(true);
 }
+
+#[test]
+fn restore_state_rejects_wrong_lengths() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 3usize;
+    let n_ages = 4usize;
+    let z = 2usize;
+    let (ind, sperm) = populated_state(n_batch, n_ages, z);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, n_batch, n_ages, z, &ind, &sperm).expect("executor");
+    assert!(executor
+        .restore_state(&ind[..ind.len() - 1], &sperm, 0)
+        .is_err());
+    assert!(executor
+        .restore_state(&ind, &sperm[..sperm.len() - 1], 0)
+        .is_err());
+    executor
+        .restore_state(&ind, &sperm, 2)
+        .expect("valid restore");
+}

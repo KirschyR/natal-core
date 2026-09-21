@@ -1178,3 +1178,166 @@ fn spatial_gpu_restore_checkpoint_rewinds_device_state() {
         );
     }
 }
+
+/// Evaluator: raw device history with non-zero start ticks and multi-run
+/// continuation must reconstruct ticks exactly like the host raw path.
+#[test]
+fn evaluator_raw_device_history_start_tick_and_continuation() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
+    let sequences: [&[(i64, i64)]; 3] = [&[(1, 0), (5, 2)], &[(2, 3), (4, 2)], &[(3, 1)]];
+    for sequence in sequences {
+        let mut gpu = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        gpu.enable_gpu().expect("enable gpu");
+        gpu.history_store = Some(raw_history(dims, raw_width, None));
+        assert!(
+            gpu.start_device_history(8),
+            "raw device staging must be available for {sequence:?}"
+        );
+        let mut cpu = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        cpu.history_store = Some(raw_history(dims, raw_width, None));
+        for &(n, interval) in sequence {
+            gpu.run_steps(n, interval).expect("gpu run_steps");
+            cpu.run_steps(n, interval).expect("cpu run_steps");
+        }
+        assert_history_close(
+            history_snapshot(gpu.history_store.as_ref().unwrap()),
+            history_snapshot(cpu.history_store.as_ref().unwrap()),
+            &format!("raw continuation {sequence:?}"),
+        );
+    }
+}
+
+/// Evaluator: a `max_rows` ring must keep the newest boundaries even when the
+/// run starts at a non-zero tick.
+#[test]
+fn evaluator_raw_device_history_ring_nonzero_start() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.enable_gpu().expect("enable gpu");
+    gpu.history_store = Some(raw_history(dims, raw_width, Some(2)));
+    // Advance to tick 1 first, then record every tick up to tick 6 with a
+    // 2-row ring: the survivors are ticks 5 and 6.
+    gpu.run_steps(1, 0).expect("advance");
+    assert!(gpu.start_device_history(6), "raw ring must be available");
+    gpu.run_steps(5, 1).expect("gpu run_steps");
+
+    let mut cpu = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    cpu.history_store = Some(raw_history(dims, raw_width, Some(2)));
+    cpu.run_steps(1, 0).expect("advance");
+    cpu.run_steps(5, 1).expect("cpu run_steps");
+
+    let (g_flat, g_width, g_ticks) = history_snapshot(gpu.history_store.as_ref().unwrap());
+    let (c_flat, c_width, c_ticks) = history_snapshot(cpu.history_store.as_ref().unwrap());
+    assert_eq!(g_ticks, c_ticks, "ring survivor ticks");
+    assert_eq!(g_ticks, vec![5, 6], "ring keeps the newest boundaries");
+    assert_history_close(
+        (g_flat, g_width, g_ticks),
+        (c_flat, c_width, c_ticks),
+        "raw ring non-zero start",
+    );
+}
+
+/// Evaluator: checkpoints reconstructed from device raw rows must restore a
+/// GPU session bit-for-bit after a mid-run rewind.
+#[test]
+fn evaluator_raw_device_checkpoint_restore_is_bit_exact() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
+    let make = || {
+        let mut session = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        session.enable_gpu().expect("enable gpu");
+        session.history_store = Some(raw_history(dims, raw_width, None));
+        session
+    };
+    let mut restored = make();
+    let mut reference = make();
+
+    restored.run_steps(5, 1).expect("restored to tick 5");
+    reference.run_steps(5, 1).expect("reference to tick 5");
+    assert_eq!(restored.state_tick, 5);
+    let outcome = restored
+        .restore_from_checkpoint(3)
+        .expect("restore checkpoint 3");
+    assert_eq!(outcome, Some(3), "checkpoint at tick 3 must exist");
+    assert_eq!(restored.state_tick, 3);
+
+    restored.run_steps(2, 1).expect("restored rerun");
+    reference.run_steps(0, 0).expect("no-op");
+    assert_eq!(restored.state_tick, reference.state_tick);
+    for (index, (got, want)) in restored
+        .state_ind
+        .iter()
+        .zip(reference.state_ind.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "device state diverged after raw-history restore at ind[{index}]: {got} vs {want}"
+        );
+    }
+    for (index, (got, want)) in restored
+        .state_sperm
+        .iter()
+        .zip(reference.state_sperm.iter())
+        .enumerate()
+    {
+        assert_eq!(
+            got.to_bits(),
+            want.to_bits(),
+            "device state diverged after raw-history restore at sperm[{index}]: {got} vs {want}"
+        );
+    }
+}

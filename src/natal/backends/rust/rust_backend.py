@@ -241,9 +241,11 @@ class RustLifecycleBackend:
         """Enable the optional CUDA device path for this session.
 
         The extension must be built with the ``gpu`` cargo feature and the
-        model must be hook-free, deterministic, and panmictic. Raises when the
-        device path is unavailable or the model is ineligible; it never
-        silently falls back to the CPU.
+        model must be deterministic and panmictic. Deterministic declarative
+        hooks (SCALE/SET/ADD/SUBTRACT/KILL/CONVERT) run on the device;
+        stochastic hooks, stop-gating, ``set_param``, and Python callbacks are
+        rejected until later phases. Raises when the device path is unavailable
+        or the model is ineligible; it never silently falls back to the CPU.
 
         Raises:
             RuntimeError: The installed extension has no GPU support.

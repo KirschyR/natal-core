@@ -193,7 +193,10 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 8. 已知限制 / 未做项
 
 - **`continuous_sampling=true`**：**已支持**（第 14 轮）：设备连续二项/多项/Poisson 采样，生存/繁殖/迁移随机阶段均可用。
-- **hooks/停止门控**：含 Python 回调或声明式钩子的模型当前一律设备拒绝；声明式钩子设备化由 **P7** 规划承接（D6 停止门控在 P7.2）。
+- **hooks/停止门控**：**P7.1 已实现**——确定性 panmictic 模型上的声明式确定性钩子
+  （SCALE/SET/ADD/SUBTRACT/KILL/CONVERT，含 RPN 条件与 selector）在设备上按 `first → reproduction →
+  early → survival → late → aging` 事件点执行；随机钩子（SAMPLE）、`STOP_IF_*`、`SET_PARAM` 与
+  Python 回调仍显式拒绝（分别由 P7.3 / P7.2 / P7.3 承接）。
 - **离散世代 GPU**：空间离散已支持（第 15 轮）；未覆盖 Wright-Fisher 融合模式。
 - **设备侧 history 驻留已实现（B6）**：空间观测历史在设备上投影成行、运行期零逐记录回传、结束时一次下载回填
   `HistoryStore`；**raw 模式同样设备暂存**（设备原生布局，flush 时转置回 batch-major），且设备窗口按
@@ -211,11 +214,11 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **184**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
-  （跳过硬件）、`ruff`、`pyright`、`pytest`（3615）、`phase0_baseline.py --check`。
+  `cargo test --features gpu`（当前 **188**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  （跳过硬件）、`ruff`、`pyright`、`pytest`（3619）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
-  `src/gpu/../../tests/...`），当前聚合 **97.00%**（executor 96.3%、kernels 97.5%、probe 96.1%）；新模块需 ≥95%。
+  `src/gpu/../../tests/...`），当前聚合 **96.75%**（executor 96.0%、kernels 97.2%、probe 96.1%）；新模块需 ≥95%。
 - 高风险改动必须由独立 evaluator 复核（走 `EVALUATE.md`，用 `adversarial-review` 技能）。
 
 ---
@@ -260,10 +263,11 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | C10 | 迁移缓存纳入启用时显存预算（§50） | APPROVED（§51） |
 | B4 | frontend 单群体 `enable_gpu` + 文档（§52） | APPROVED（§53） |
 | B5 | ensemble 结果接入 Observation（§54） | APPROVED（§55） |
-| B6 | raw 历史设备驻留 + 窗口按 `max_rows` 环形收缩（§56） | **已实现，待 §57 复核** |
-| C8 | 设备连续采样阈值统一到 `NATAL_EPS=1e-10`（§56） | **已实现，待 §57 复核** |
-| C11 | `run_gpu_ensemble` 误用前置显式报错（§56） | **已实现，待 §57 复核** |
-| A3 | 设备 flush 按 tick 写 boundary metadata（随 B6，§56） | **已实现，待 §57 复核** |
+| B6 | raw 历史设备驻留 + 窗口按 `max_rows` 环形收缩（§56） | APPROVED（§57） |
+| C8 | 设备连续采样阈值统一到 `NATAL_EPS=1e-10`（§56） | APPROVED（§57） |
+| C11 | `run_gpu_ensemble` 误用前置显式报错（§56） | APPROVED（§57） |
+| A3 | 设备 flush 按 tick 写 boundary metadata（随 B6，§56） | APPROVED（§57） |
+| P7.1 | 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格（§58） | **已实现，待 §59 复核** |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -276,12 +280,12 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | **B4** | 完整性 | ~~frontend 无单群体 `enable_gpu` 入口~~ | ~~无法通过 Population API 启用单群体 GPU~~ | 已实现：`enable_gpu()`/`gpu_status()` + 中英文档 §11.1（第 22 轮，§52） | 低 | **APPROVED（§53）** |
 | **B5** | 完整性 | ~~ensemble 返回裸数组，未接 Observation~~ | ~~不能复用 observation/history 选择器~~ | 已实现：`observe_gpu_ensemble` 逐 replicate 经 `Observation` 投影（第 23 轮，§54） | 低-中 | **APPROVED（§55）** |
 | **B6** | 性能/内存 | ~~raw 历史不走设备驻留；设备窗口未按 `max_rows` 收缩~~ | ~~raw 逐记录同步；大 D×长 T 超预算回退 host~~ | 已实现：raw 行设备暂存（设备原生布局，flush 转置）+ 环形窗口 `capacity=min(records, max_rows)`（第 24 轮，§56） | 中 | **已实现，待 §57 复核** |
-| **C8** | 一致性 | ~~设备连续采样阈值未统一到 host `EPS=1e-10`~~ | ~~极小窗口分支差异~~ | 已实现：新增 `NATAL_EPS 1e-10f`，连续二项/多项/Poisson 全部改用（第 24 轮，§56） | 低 | **已实现，待 §57 复核** |
-| **C11** | 质量 | ~~`run_gpu_ensemble` 在 `_gpu_ensemble_replicates==0` 时 reshape 失败~~ | ~~误用路径产生困惑报错~~ | 已实现：前置 `replicates < 1` 显式 `RuntimeError`（第 24 轮，§56） | 低 | **已实现，待 §57 复核** |
+| **C8** | 一致性 | ~~设备连续采样阈值未统一到 host `EPS=1e-10`~~ | ~~极小窗口分支差异~~ | 已实现：新增 `NATAL_EPS 1e-10f`，连续二项/多项/Poisson 全部改用（第 24 轮，§56） | 低 | **APPROVED（§57）** |
+| **C11** | 质量 | ~~`run_gpu_ensemble` 在 `_gpu_ensemble_replicates==0` 时 reshape 失败~~ | ~~误用路径产生困惑报错~~ | 已实现：前置 `replicates < 1` 显式 `RuntimeError`（第 24 轮，§56） | 低 | **APPROVED（§57）** |
 | **C9** | 一致性 | `male_adult_mating_rate`/`eggs_per_female` clamp 差异 | 契约范围内无差异 | 可选对齐或注释说明 | 低 | 已记录，可不做 |
 | **B7** | 完整性 | Wright-Fisher 融合模式未设备化 | 空间离散 CPU 不用它；非空间离散无 GPU 入口 | 按需实现 | 中 | 低优先 |
-| **D6** | 设计 | hooks/停止门控设备侧未做 | 含 `stop_if_*` 的模型不可用 GPU | **由 P7 承接**（用户选定声明式钩子）：设备侧解释器 + 停止门控 | 高 | 规划中（P7.2） |
-| **P7** | 完整性 | GPU 不支持声明式钩子插入点（`first/early/late/finish`） | 含声明式钩子的模型无法上 GPU | 设备侧声明式解释器，分 P7.1–P7.4（见 §11.5）；Python 回调仍显式拒绝 | 高 | 规划中（用户已选声明式） |
+| **D6** | 设计 | hooks/停止门控设备侧未做 | 含 `stop_if_*` 的模型不可用 GPU | **由 P7 承接**（用户选定声明式钩子）：设备侧解释器 + 停止门控 | 高 | P7.1 已完成确定性 opcode；**P7.2** 停止门控未开始 |
+| **P7** | 完整性 | GPU 不支持声明式钩子插入点（`first/early/late/finish`） | 含声明式钩子的模型无法上 GPU | 设备侧声明式解释器，分 P7.1–P7.4（见 §11.5）；Python 回调仍显式拒绝 | 高 | **P7.1 已实现待复核（§58）**；P7.2–P7.4 未开始 |
 | **E12** | 性能 | 深层性能优化未做（debug 基准受宿主机重建/上传主导） | 大 B 计算侧瓶颈 | release + 空闲卡剖析 → 缓存恒定张量 / 复用 scratch / 内核重构 | 高（内核重构） | 待空闲卡 |
 | **E13** | 验收 | P6 相对 16 核 `ProcessPool` 仅 2.4–3.3×，阈值未定 | “显著优于”是否达标无口径 | 用户定阈值或换更大模型/更少核重测 | 低 | **待用户口径** |
 
@@ -289,8 +293,9 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 1. **A1**（正确性、静默错误）→ **A2** → **C10**：先消灭正确性/显式失败缺口。
 2. **B4** → **B5**：补齐用户可见入口与结果集成。
-3. **B6** → **C8** → **C11** → **A3**（均已实现，待 §57 复核）：性能/内存与一致性收尾。
-4. **P7**（设备侧声明式钩子，含 D6）：大特性，按 §11.5 分阶段（P7.1→P7.4）；**B7** 低优先；**E12/E13** 需空闲 GPU 与用户口径。
+3. **B6** → **C8** → **C11** → **A3**（APPROVED，§57）：性能/内存与一致性收尾已完成。
+4. **P7**（设备侧声明式钩子，含 D6）：大特性，按 §11.5 分阶段（P7.1→P7.4）；**P7.1 已实现待复核（§58）**；
+   **B7** 低优先；**E12/E13** 需空闲 GPU 与用户口径。
 
 ### 11.4 验收口径（按类别）
 
@@ -306,13 +311,13 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 现状（依据）：
 - `HookProgram`（`rust/src/hooks/interpreter.rs`）是完整 CSR 字节码：`op_types`（SCALE/SET/ADD/SUBTRACT/KILL/SAMPLE/STOP_IF_*/SET_PARAM/CONVERT）、selector（`zidx/age/sex/deme`）、RPN 条件、`OP_SET_PARAM` 的 RPN 栈机 + wire bounds。
-- GPU 会话当前对 `n_hooks != 0` 或任何 `python_callbacks` 一律拒绝。
+- GPU 会话原对 `n_hooks != 0` 或任何 `python_callbacks` 一律拒绝；**P7.1 起改为按 opcode 放开**。
 
 分阶段（每阶段：全门禁 → 独立复核）：
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P7.1** | 设备侧 opcode 解释器：上传 CSR 数据并执行 SCALE/SET/ADD/SUBTRACT/KILL/CONVERT（含 RPN 条件与 selector/wire bounds）；**同时按 opcode 放开资格**（仅无 Python 回调且只用已支持 opcode 的模型；其余显式拒绝） | 确定性 L2/L3 与 CPU 一致（相对误差档）；事件顺序/优先级一致；未支持 opcode/回调解仍 `Err` |
+| **P7.1** | 设备侧 opcode 解释器：上传 CSR 数据并执行 SCALE/SET/ADD/SUBTRACT/KILL/CONVERT（含 RPN 条件与 selector/wire bounds）；**同时按 opcode 放开资格**（仅无 Python 回调且只用已支持 opcode 的确定性模型；其余显式拒绝）。**已实现（§58）待复核** | 确定性 L2/L3 与 CPU 一致（相对误差档）；事件顺序/优先级一致；未支持 opcode/回调解仍 `Err` |
 | **P7.2** | 设备侧 `STOP_IF_*` 门控（D6）：设备侧归约出 stop 标志，host 按需读取；停止点与 CPU 一致；放开 STOP_IF_* 资格 | 含 `stop_if_*` 模型的停止 tick 与 CPU 一致；零逐 tick 同步 |
 | **P7.3** | `OP_SET_PARAM` 同 tick 可见性 + `SAMPLE` 的设备 RNG site 对齐；放开二者资格 | later-stage 读取已更新参数；随机 op 可复现/统计等价 |
 | **P7.4** | 空间（per-deme selector + 调度）与 ensemble 集成 | 空间/多 B 的声明式钩子与 CPU 一致 |
@@ -328,17 +333,18 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 ### 11.6 接手状态快照（2026-09-21，上下文切换）
 
-- **分支/HEAD**：`feat/gpu-merge-test`；HEAD=`e5766ef`（B5 已提交）。B6/C8/C11/A3 与文档更新为**未提交工作树改动**。
-- **最近回执**：§55（B5）**APPROVED**。
-- **待回执**：**§57**（B6 raw 设备驻留 + `max_rows` 环形窗口；C8 阈值统一；C11 前置报错；A3 boundary metadata，随 B6）——
-  均已实现并自测，**未批准**。
-- **后续未开始**：**P7**（设备侧声明式钩子，含 D6；§11.5，P7.1–P7.4）为下一大项；**B7** 低优先；
-  **E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
-- **P7**：声明式钩子设备化已规划（§11.5），用户选择**先收尾小项**；小项现已收尾，P7.1 尚**未开始**。
-- **门禁基线（B6/C8/C11/A3 自测）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **184**、
-  `ruff`/`pyright` 通过、`pytest` **3615**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **97.00%**。
-- **B6 要点**：`DeviceHistory` 支持 raw（设备原生布局，flush 转置）与环形窗口；`HistorySpec` 增 `raw`/`raw_sperm`/`wrap`；
-  session `start_device_history` 放开 raw 并按 `max_rows` 收缩，`flush_device_history` 转置 raw、重建 checkpoint、写 boundary metadata。
+- **分支/HEAD**：`feat/gpu-merge-test`；B6/C8/C11/A3 已由用户提交为 `a7e930e` 并 §57 APPROVED；
+  P7.1 与文档更新为**未提交工作树改动**（另有 evaluator 在 §57 加的 3 个 `spatial_session.rs` 用例未提交）。
+- **最近回执**：§57（B6/C8/C11/A3）**APPROVED**。
+- **待回执**：**§59**（P7.1 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格）——已实现并自测，**未批准**。
+- **后续未开始**：**P7.2**（`STOP_IF_*` 门控）→ **P7.3**（`SET_PARAM` 可见性 + `SAMPLE` RNG）→ **P7.4**
+  （空间/ensemble）；**B7** 低优先；**E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
+- **门禁基线（P7.1 自测）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **188**、
+  `ruff`/`pyright` 通过、`pytest` **3619**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **96.75%**。
+- **P7.1 要点**：`gpu/kernels.rs` 新增 `HOOK_SOURCE`/`apply_hook_event` 与 `HookEventBuffers`；`GpuExecutor`
+  增 `configure_hooks`/`run_hook_event`，`tick` 按 `first→reproduction→early→survival→late→aging` 插入事件；
+  age `enable_gpu` 改为按 opcode 放开（拒 Python 回调、SAMPLE/STOP_IF_*/SET_PARAM、随机模型）；
+  新测试 `session_device_hooks_match_cpu`（Rust L3 对照）与 `tests/test_gpu_hooks_frontend.py`。
 - **证据入口**：每轮交接/回执在 `EVALUATE.md`（主 agent 交接区在前、evaluator 回执区在后；只追加不改写）。
 - **CPU 底线**：`rust/src/kernels`、`rust/src/model`、`src/natal/contracts`、`rust/src/lib.rs` 数值语义零改动；
   `phase0_baseline.py --check` 必须始终 bit-identical。

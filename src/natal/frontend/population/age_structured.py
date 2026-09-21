@@ -1018,8 +1018,8 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
 
         Raises:
             RuntimeError: If the extension was built without GPU support, or
-                the model is ineligible (not panmictic, carries hooks, or uses
-                a custom growth curve).
+                the model is ineligible (not panmictic, carries an unsupported
+                hook, or uses a custom growth curve).
         """
         if self._rust_lifecycle_backend is None:
             self._initialize_session(seed=int(self._rust_backend_seed or 0))

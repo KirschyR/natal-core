@@ -60,6 +60,8 @@ pub struct GpuExecutor {
     migration_cache: Option<MigrationCache>,
     /// Device-staged observation history rows for the current run, if any.
     history: Option<DeviceHistory>,
+    /// Device-uploaded declarative hook program, if any (P7.1).
+    hooks: Option<DeviceHooks>,
 }
 
 /// Device-resident static buffers for one migration CSR.
@@ -181,6 +183,57 @@ struct DeviceHistory {
     buffer: DeviceBuffer<f32>,
 }
 
+/// Device-uploaded declarative hook program (P7.1).
+///
+/// The CSR arrays are uploaded once when a hook-bearing model is enabled; the
+/// event interpreter walks them on every event launch.
+struct DeviceHooks {
+    /// Per-event hook slot ranges, `n_events + 1`.
+    hook_offsets: DeviceBuffer<i32>,
+    /// Per-hook op ranges, `n_hooks + 1`.
+    op_offsets: DeviceBuffer<i32>,
+    /// Opcode per operation.
+    op_types: DeviceBuffer<i32>,
+    /// Per-op genotype selector ranges.
+    zidx_offsets: DeviceBuffer<i32>,
+    /// Genotype selector entries.
+    zidx_data: DeviceBuffer<i32>,
+    /// Per-op age selector ranges.
+    age_offsets: DeviceBuffer<i32>,
+    /// Age selector entries.
+    age_data: DeviceBuffer<i32>,
+    /// Flattened `[female, male]` sex masks per op.
+    sex_masks: DeviceBuffer<i32>,
+    /// Scalar parameter per op.
+    params: DeviceBuffer<f32>,
+    /// Per-op condition token ranges.
+    condition_offsets: DeviceBuffer<i32>,
+    /// Condition token types.
+    condition_types: DeviceBuffer<i32>,
+    /// Condition token parameters.
+    condition_params: DeviceBuffer<i32>,
+    /// Per-hook deme selector type.
+    deme_selector_types: DeviceBuffer<i32>,
+    /// Per-hook deme selector ranges.
+    deme_selector_offsets: DeviceBuffer<i32>,
+    /// Deme selector entries.
+    deme_selector_data: DeviceBuffer<i32>,
+    /// Per-op convert source ztype (`-1` when not a convert).
+    convert_source_z: DeviceBuffer<i32>,
+    /// Per-op convert target ztype (`-1` when not a convert).
+    convert_target_z: DeviceBuffer<i32>,
+}
+
+/// Narrow an `i64` CSR column to the device `i32` width.
+fn to_i32_vec(values: &[i64]) -> Result<Vec<i32>, String> {
+    values
+        .iter()
+        .map(|value| {
+            i32::try_from(*value).map_err(|_| format!("hook CSR value {value} does not fit in i32"))
+        })
+        .collect()
+}
+
 impl GpuExecutor {
     /// Upload the initial state and load the kernels.
     ///
@@ -248,6 +301,7 @@ impl GpuExecutor {
             tick: 0,
             migration_cache: None,
             history: None,
+            hooks: None,
         })
     }
 
@@ -257,6 +311,128 @@ impl GpuExecutor {
     /// - `seed`: Session seed; the two Philox key words are its halves.
     pub fn set_seed(&mut self, seed: u64) {
         self.seed = seed;
+    }
+
+    /// Upload a declarative hook program for device-side event execution.
+    ///
+    /// A program with no hooks clears any uploaded program. The session is
+    /// responsible for rejecting unsupported opcodes and Python callbacks
+    /// before calling this.
+    ///
+    /// ## Parameters
+    /// - `program`: The session's declarative hook program.
+    ///
+    /// ## Returns
+    /// `Ok(())` when the CSR arrays are resident (or the program is empty).
+    ///
+    /// ## Errors
+    /// Returns a description when a CSR value does not fit `i32` or an upload
+    /// fails.
+    pub fn configure_hooks(
+        &mut self,
+        program: &crate::hooks::interpreter::HookProgram,
+    ) -> Result<(), String> {
+        if program.n_hooks == 0 {
+            self.hooks = None;
+            return Ok(());
+        }
+        let stream = self.context.stream();
+        let sex_masks: Vec<i32> = program
+            .sex_masks
+            .iter()
+            .map(|value| i32::from(*value))
+            .collect();
+        let params: Vec<f32> = program.params.iter().map(|value| *value as f32).collect();
+        self.hooks = Some(DeviceHooks {
+            hook_offsets: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.hook_offsets)?)?,
+            op_offsets: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.op_offsets)?)?,
+            op_types: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.op_types)?)?,
+            zidx_offsets: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.zidx_offsets)?)?,
+            zidx_data: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.zidx_data)?)?,
+            age_offsets: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.age_offsets)?)?,
+            age_data: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.age_data)?)?,
+            sex_masks: DeviceBuffer::from_host(&stream, &sex_masks)?,
+            params: DeviceBuffer::from_host(&stream, &params)?,
+            condition_offsets: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.condition_offsets)?,
+            )?,
+            condition_types: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.condition_types)?,
+            )?,
+            condition_params: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.condition_params)?,
+            )?,
+            deme_selector_types: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.deme_selector_types)?,
+            )?,
+            deme_selector_offsets: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.deme_selector_offsets)?,
+            )?,
+            deme_selector_data: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.deme_selector_data)?,
+            )?,
+            convert_source_z: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.convert_source_z)?,
+            )?,
+            convert_target_z: DeviceBuffer::from_host(
+                &stream,
+                &to_i32_vec(&program.convert_target_z)?,
+            )?,
+        });
+        Ok(())
+    }
+
+    /// Apply one declarative hook event on the device.
+    ///
+    /// A no-op when no hook program is uploaded.
+    ///
+    /// ## Parameters
+    /// - `event_id`: Lifecycle event index (first/early/late/finish).
+    ///
+    /// ## Errors
+    /// Returns a description when the launch fails.
+    pub fn run_hook_event(&mut self, event_id: usize) -> Result<(), String> {
+        let Some(hooks) = self.hooks.as_ref() else {
+            return Ok(());
+        };
+        let stream = self.context.stream();
+        let buffers = crate::gpu::kernels::HookEventBuffers {
+            hook_offsets: hooks.hook_offsets.slice(),
+            op_offsets: hooks.op_offsets.slice(),
+            op_types: hooks.op_types.slice(),
+            zidx_offsets: hooks.zidx_offsets.slice(),
+            zidx_data: hooks.zidx_data.slice(),
+            age_offsets: hooks.age_offsets.slice(),
+            age_data: hooks.age_data.slice(),
+            sex_masks: hooks.sex_masks.slice(),
+            params: hooks.params.slice(),
+            condition_offsets: hooks.condition_offsets.slice(),
+            condition_types: hooks.condition_types.slice(),
+            condition_params: hooks.condition_params.slice(),
+            deme_selector_types: hooks.deme_selector_types.slice(),
+            deme_selector_offsets: hooks.deme_selector_offsets.slice(),
+            deme_selector_data: hooks.deme_selector_data.slice(),
+            convert_source_z: hooks.convert_source_z.slice(),
+            convert_target_z: hooks.convert_target_z.slice(),
+        };
+        self.kernels.apply_hook_event(
+            &stream,
+            self.ind.slice_mut(),
+            self.sperm.slice_mut(),
+            &buffers,
+            self.n_ages,
+            self.n_ztypes,
+            self.n_batch,
+            event_id,
+            self.tick,
+        )
     }
 
     /// Build an executor running `n_replicates` independent copies of one
@@ -965,9 +1141,10 @@ impl GpuExecutor {
 
     /// Run one full deterministic age-structured tick on the device.
     ///
-    /// The stage order mirrors `kernels::age_structured::run_tick` for a
-    /// hook-free, deterministic model: reproduction → survival → aging. No
-    /// data crosses the host boundary between stages.
+    /// The stage order mirrors `kernels::age_structured::run_tick`: the
+    /// `first`/`early`/`late` hook events bracket reproduction, survival, and
+    /// aging. Hook events are no-ops when no program is uploaded. No data
+    /// crosses the host boundary between stages.
     ///
     /// ## Parameters
     /// - `blueprint`: Dimensions, `new_adult_age`, and sex-chromosome flags.
@@ -987,8 +1164,11 @@ impl GpuExecutor {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
     ) -> Result<(), String> {
+        self.run_hook_event(0)?;
         self.reproduction_tick(blueprint, ecology, variants, deme_variants)?;
+        self.run_hook_event(1)?;
         self.survival_tick(blueprint, ecology, variants, deme_variants)?;
+        self.run_hook_event(2)?;
         self.age_tick()?;
         self.tick = self.tick.wrapping_add(1);
         Ok(())

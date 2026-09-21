@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 23 轮：**APPROVED**（§55；B5 ensemble 读值接入 Observation） |
-| 待回执 | §57（第 24 轮 B6/C8/C11/A3：raw 设备历史 + `max_rows` 环形窗口、阈值统一、前置报错、boundary metadata） |
-| 主 agent 处理 | 第 24 轮：B6/C8/C11/A3 已实现并自测；下一大项为 P7 |
-| 待 evaluator 动作 | 按 §56 复核，把第 24 轮结论写入 §57 |
+| 最近回执 | 第 24 轮：**APPROVED**（§57；B6 raw 设备历史 + max_rows 环、C8 阈值统一、C11 前置报错、A3 metadata） |
+| 待回执 | §59（第 25 轮 P7.1：设备侧确定性声明式钩子解释器 + 按 opcode 放开资格） |
+| 主 agent 处理 | 第 25 轮：P7.1 已实现并自测；P7.2 起未开始 |
+| 待 evaluator 动作 | 按 §58 复核，把第 25 轮结论写入 §59 |
 
 ## 0. 一句话目标
 
@@ -1418,6 +1418,82 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 58. 第 25 轮交接 — P7.1：设备侧确定性声明式钩子解释器 + 按 opcode 放开资格
+
+- 日期：2026-09-21
+- 背景：§57 APPROVED（B6/C8/C11/A3）。按 `GPU_STAGE_SUMMARY §11.5` 启动 **P7.1**。
+- 风险分类：**高风险**（钩子会改写 `ind/sperm`、影响后续阶段与结果；跨 CPU/GPU 解释器移植）。
+
+### 58.1 范围（P7.1）
+
+- 仅 **确定性、panmictic**（`n_demes == 1`、`blueprint.stochastic == false`）的年龄结构模型。
+- 支持 opcode：**SCALE / SET / ADD / SUBTRACT / KILL / CONVERT**（含 RPN 条件、`zidx/age/sex/deme` selector、
+  wire bounds）。
+- 显式拒绝：任何 **Python 回调**；**SAMPLE / STOP_IF_\* / SET_PARAM**（P7.3 / P7.2 / P7.3）；
+  随机模型上的钩子（P7.3）；空间/ensemble 钩子仍拒绝（P7.4）；`finish` 事件设备侧不触发（仅 host `trigger_event`）。
+- 守住 §11.5 的硬规则：**资格随解释器落地按 opcode 放开**，绝不允许 `n_hooks>0` 而不执行。
+
+### 58.2 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | 新增 `HOOK_SOURCE`（`apply_hook_event` 内核 + `hook_clamp01`/`hook_atomic_condition`/`hook_eval_condition`/`hook_deme_matches`）；`Kernels` 增字段、`load` 增编译/加载、新增 `HookEventBuffers` 与启动器。内核逐字移植 `execute_event` 的确定性分支：sex→age→ztype 选择、目标公式、女性 sperm 缩放、确定性 CONVERT（无 RNG）。 |
+| `rust/src/gpu/executor.rs` | 新增 `DeviceHooks`、`to_i32_vec`、`GpuExecutor::configure_hooks`（上传 CSR）与 `run_hook_event`；`GpuExecutor` 增 `hooks` 字段；`tick` 增 `first`/`early`/`late` 事件插入（`run_hook_event(0/1/2)`）。 |
+| `rust/src/hooks/interpreter.rs` | 新增 `DEVICE_SUPPORTED_OPS` 与（gpu-gated）`first_unsupported_device_op` / `has_python_callbacks`。 |
+| `rust/src/sessions/age_structured.rs` | `enable_gpu` 资格改为按 opcode：拒 Python 回调、拒不支持 opcode、拒随机模型；构造执行器后 `configure_hooks(&self.hooks)`。`enable_gpu_ensemble`/空间仍要求 hook-free。 |
+| Python 文档 | `rust_backend.py`、`frontend/population/age_structured.py`、Rust `enable_gpu` docstring、`docs/{en,zh}/4_simulation_engine.md §11.1`：把「hook-free」改为「确定性 + 支持的确定性声明式钩子」。 |
+| 测试 | Rust `session_device_hooks_match_cpu`（SCALE + 条件 SET + CONVERT，4 tick L3 对照 CPU）；更新 `session_enable_gpu_rejects_ineligible_models`（不支持 opcode / 随机模型 / 回调三分支）；Python `tests/test_gpu_hooks_frontend.py`（4 用例：可运行、与 CPU 对照、stop_if 拒绝、随机模型拒绝）。 |
+
+### 58.3 行为
+
+- 事件顺序与 CPU 一致：`first → reproduction → early → survival → late → aging`；`first/early/late` 的设备钩子
+  在对应阶段前后执行，`self.tick` 在整 tick 结束后递增（条件用 tick 与 CPU 相同）。
+- CSR 槽顺序即 priority 顺序（编译期已排好），设备按槽序执行；selector/条件语义与 CPU 相同。
+- f32 设备算术 vs f64 CPU：确定性结果落在相对误差档（测试用 `1.2e-5` 相对容差）。
+- 无钩子模型：`hooks` 为 `None`，`run_hook_event` 为 no-op，既有路径零变化。
+
+### 58.4 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **188 passed, 0 failed**（含新增 1 个 L3 对照；§57 evaluator 3 个用例仍在） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | **3619 passed**（含 `test_gpu_hooks_frontend.py` 4 passed） |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`，lcov DA 合并） | 聚合 **2676/2766 = 96.75%**；executor 96.0%、kernels 97.2%、probe 96.1%，其余 100% |
+| CPU 不变性 | `rust/src/kernels`、`rust/src/model`、`src/natal/contracts` 工作树零改动；`lib.rs` 仅既有 `#[cfg(gpu)] mod gpu;` |
+
+### 58.5 请 evaluator 独立核对
+
+- **L2/L3 一致性（重点）**：自造确定性 panmictic 模型，逐 opcode（SCALE/SET/ADD/SUBTRACT/KILL/CONVERT）
+  与 CPU 对照；覆盖：
+  - 事件位置 `first`/`early`/`late` 与多 hook 的 priority 顺序；
+  - 条件 RPN（tick 原子条件 + AND/OR/NOT；空条件恒真）；
+  - selector（sex female/male/both、age 子集与越界、zidx 子集与越界、deme selector 0–3）；
+  - 女性槽的 sperm 缩放与 virgins 语义（`target>=current` 不缩放；`current<=0` 清零；否则按 `target/current`）；
+  - CONVERT 有/无 sperm 两种守恒（male 计数、sperm 桶、virgin 余量）；
+  - 多 tick 后整状态与 CPU 的相对误差在档内；确认不是「两边都没执行钩子」——请比较 hook-free 运行以证明钩子确实生效。
+- **资格**：不支持的 opcode（SAMPLE/STOP_IF_*/SET_PARAM）、Python 回调、随机模型均**显式** `Err`；
+  `enable_gpu_ensemble` 与空间路径仍要求 hook-free；合法确定性钩子模型 `enable_gpu` 成功且不静默 host 回退。
+- **一致性风险点（请证伪）**：
+  1. 设备 tick 与 session `state_tick`：若在已有 CPU tick 之后 `enable_gpu`，设备 tick 从 0 起，条件钩子的 tick 会错位
+     （既有「启用后不同步」限制）。请确认正常「先启用后运行」路径不受影响，并记录该限制。
+  2. `set_hook_program`/`clear_hook_program` 在 `enable_gpu` 之后调用不会重新上传设备 CSR（潜在静默 desync）。
+     请确认 Python 前端正常流程不会触发，并评估是否需加保护（当前记为残余风险）。
+- **CPU 不变性 / 门禁 / 覆盖率 / Python 新增行**同既往口径；覆盖须按绝对路径过滤 `rust/src/gpu/**` 并排除 `/tests/`。
+
+### 58.6 残余风险（非阻塞）
+
+- 如上 §58.5 的 tick 错位与 set/clear 后设备 CSR 未刷新两点。
+- 设备解释器仅确定性 panmictic；空间/ensemble/discrete/`finish` 未覆盖（P7.4）。
+- 条件栈固定深度 128（编译期程序远小于此；超限返回不匹配）。
+- 确定性 CONVERT 在设备按 `n*prob` 逐元素相乘，与 CPU f64 同序但有 f32 舍入（相对误差档）。
+
+结论请追加为 **§59**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2780,3 +2856,72 @@ B4 单群体公开入口与文档满足合同、同步与覆盖要求；门禁�
 
 B5 ensemble→Observation 投影正确、与既有选择器一致、文档同步、覆盖率 100%。**APPROVED**（范围为当前 HEAD
 `e5766ef` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 57. 第 24 轮结论（evaluator 独立执行，2026-09-21，HEAD=`a7e930e`）
+
+### 57.1 裁定：**APPROVED**
+
+B6（raw 设备历史 + `max_rows` 环 + checkpoint 重建）、C8（连续采样阈值统一）、C11（前置报错）、
+A3（boundary metadata）均通过独立复核；CPU 数值路径零改动，门禁与覆盖率达标。
+
+### 57.2 B6（高风险：raw 历史 / 环 / checkpoint 重建）
+
+- **独立新增 3 个 evaluator 用例并全部通过**：
+  - `evaluator_raw_device_history_start_tick_and_continuation`：序列 `[(1,0),(5,2)]`、`[(2,3),(4,2)]`、
+    `[(3,1)]`（非零起点 + 跨 run_steps continuation），GPU 与 CPU raw `HistoryStore` 的 width/tick 序列/值一致
+    （断言 `start_device_history` 为真，排除静默 host 回退）；
+  - `evaluator_raw_device_history_ring_nonzero_start`：起点 tick 1、`max_rows=2`、记录 tick 2..6 →
+    保留 `[5,6]`，与 CPU ring 一致；
+  - `evaluator_raw_device_checkpoint_restore_is_bit_exact`：raw 设备运行 5 tick 后
+    `restore_from_checkpoint(3)` 再跑 2 tick，与参照 GPU 运行 **逐位一致**（ind/sperm `to_bits()`）。
+- **环逻辑核对**：`position = rows<capacity ? (head+rows)%capacity : head`；写后 `rows<capacity` 则 `rows++`
+  否则 `head=(head+1)%capacity`；`download_history_rows` 以 head 起按环时序输出；`history_dropped=written-rows`；
+  flush 起始 tick `(start_tick/interval + 1 + dropped)*interval`。均正确。
+- **raw 行布局**：设备原生 batch-minor `ind`(2·A·Z·B)+`sperm`(A·Z²·B)，flush 经 `batch_to_outer` 转回
+  batch-major；`raw_sperm = !discrete`，离散无 sperm 面。作者用例 `spatial_device_history_raw_*` 通过。
+
+### 57.3 C8（连续采样阈值统一）
+
+- `NATAL_EPS=1e-10f` 替换 `1e-12f`/`1e-7f`，对应 host `rng::EPS=1e-10`；`1.0f+NATAL_EPS` 在 f32 回绕为
+  `1.0f`（注释已说明），行为可解释。
+- 独立复跑连续分布/阶段用例：`cargo test --features gpu continuous_matches_host`（5 passed）、
+  全部 evaluator 用例（`evaluator_` 25 passed，含 gamma/poisson/binomial 分布与随机迁移/生存/繁殖）。
+
+### 57.4 C11 / A3
+
+- **C11**（独立 Python）：单群体 `enable_gpu()` 后 `run_gpu_ensemble(1)` →
+  `RuntimeError: run_gpu_ensemble requires enable_gpu_ensemble first`（不再 reshape 报错）；正常
+  `enable_gpu_ensemble(8)` → `run_gpu_ensemble(1)` 形状 `(8,2,4,3)`。
+- **A3**（读代码）：flush 后对 `history.boundaries.back_mut()` 写 `phase`/`execution.name()`，与 host
+  `record_history` 的边界 metadata 写法一致。
+
+### 57.5 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` / `cargo test --features gpu` | 67 / **187 passed, 0 failed**（作者 184 + evaluator 3） |
+| `cargo test --features gpu history` | 10 passed |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3615 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU/numeric 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2520/2598 = 97.00%**；逐文件均 ≥95%（executor 96.3%、kernels 97.5%、probe 96.1%，其余 100%） |
+
+### 57.6 残余风险（非阻塞）
+
+- **重建 checkpoint 的 `rng_words` 为 run 起始值**：设备不消耗 host `SessionRng`，故 flush 时 `self.rngs`
+  仍为起始状态；所有重建 checkpoint 携带同一 host RNG 起点。对 GPU 路径无影响（设备用 counter-based RNG，
+  由 tick 决定），但若用户“GPU 回滚后切回 CPU 续跑”会与 host 逐 tick 捕获语义不同——混用引擎本就不支持。
+- **ring 跨 run_steps 淘汰时未同步裁剪检查点**：设备窗口已按 `max_rows` 收缩，但 flush 后若 host store 再淘汰
+  更旧行，未执行 `checkpoints.retain(tick >= earliest)`；指向已淘汰 tick 的陈旧 checkpoint 在极端情况下仍可被
+  `restore_from_checkpoint` 命中（host 路径会 `None`）。低。
+- 每次 `run_steps` 的对齐起始边界仍走 host（一次 D2H）；设备中途报错时未 flush 的行不生成 checkpoint（已声明）。
+
+### 57.7 结论
+
+第 24 轮四项改动正确、经独立用例与门禁确认，质量与覆盖率达标。**APPROVED**（范围为当前 HEAD `a7e930e`
+与被审测试集；不声称任何历史基线失败消失）。

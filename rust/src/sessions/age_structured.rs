@@ -274,10 +274,13 @@ impl AgeStructuredSession {
 
     /// Enable the optional CUDA bypass for this session.
     ///
-    /// The device path currently covers hook-free, deterministic, panmictic
-    /// age-structured models. The current state is uploaded once; subsequent
-    /// ``run`` calls execute the whole tick on the device and copy the final
-    /// state back. Refuses explicitly (never silently falls back to CPU).
+    /// The device path currently covers deterministic, panmictic age-structured
+    /// models. Deterministic declarative hooks (SCALE/SET/ADD/SUBTRACT/KILL/
+    /// CONVERT) execute on the device at the same event points as the CPU
+    /// engine; stochastic hooks, stop-gating, `set_param`, and Python callbacks
+    /// are rejected. The current state is uploaded once; subsequent ``run``
+    /// calls execute the whole tick on the device and copy the final state
+    /// back. Refuses explicitly (never silently falls back to CPU).
     ///
     /// ## Errors
     /// Returns ``PyValueError`` when the model is ineligible, or a runtime
@@ -289,14 +292,21 @@ impl AgeStructuredSession {
                 "GPU path currently supports panmictic models only",
             ));
         }
-        if self.hooks.n_hooks != 0
-            || self
-                .hooks
-                .python_callbacks
-                .iter()
-                .any(|callbacks| !callbacks.is_empty())
-        {
-            return Err(PyValueError::new_err("GPU path requires a hook-free model"));
+        if self.hooks.has_python_callbacks() {
+            return Err(PyValueError::new_err(
+                "GPU path does not support Python hook callbacks",
+            ));
+        }
+        if let Some(opcode) = self.hooks.first_unsupported_device_op() {
+            return Err(PyValueError::new_err(format!(
+                "GPU path does not support hook opcode {opcode}; supported opcodes \
+                 are SCALE, SET, ADD, SUBTRACT, KILL, CONVERT"
+            )));
+        }
+        if self.hooks.n_hooks != 0 && self.blueprint.stochastic {
+            return Err(PyValueError::new_err(
+                "GPU hooks require a deterministic model",
+            ));
         }
         if self
             .params
@@ -323,6 +333,9 @@ impl AgeStructuredSession {
         executor.set_seed(self.seed);
         executor
             .ensure_migration_budget(&self.blueprint)
+            .map_err(map_lifecycle_error)?;
+        executor
+            .configure_hooks(&self.hooks)
             .map_err(map_lifecycle_error)?;
         self.gpu = Some(executor);
         Ok(())

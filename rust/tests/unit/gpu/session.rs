@@ -11,6 +11,7 @@ use pyo3::Python;
 
 use super::AgeStructuredSession;
 use crate::gpu::hardware_required;
+use crate::hooks::interpreter::HookProgram;
 use crate::model::blueprint::Blueprint;
 use crate::model::ecology::EcologyParams;
 use crate::model::genetics::GeneticsTensors;
@@ -222,7 +223,24 @@ fn session_enable_gpu_rejects_ineligible_models() {
         let (blueprint, params, genetics) = fixture();
         let mut hooked = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
         hooked.hooks.n_hooks = 1;
-        assert!(hooked.enable_gpu().is_err(), "hooks must reject");
+        // SAMPLE (5) is reserved for P7.3; the device interpreter rejects it.
+        hooked.hooks.op_types = vec![5];
+        assert!(
+            hooked.enable_gpu().is_err(),
+            "unsupported hook opcode must reject"
+        );
+
+        // A supported opcode still rejects on a stochastic model until P7.3
+        // aligns device RNG with the host hook sampler.
+        let (mut blueprint, params, genetics) = fixture();
+        blueprint.stochastic = true;
+        let mut stochastic = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+        stochastic.hooks.n_hooks = 1;
+        stochastic.hooks.op_types = vec![0];
+        assert!(
+            stochastic.enable_gpu().is_err(),
+            "hooks require a deterministic model"
+        );
 
         // A callback-carrying program is rejected even with no declarative
         // hooks (`n_hooks == 0`), exercising the Python-callback arm.
@@ -357,6 +375,103 @@ fn session_gpu_restore_device_state_rewinds() {
                 got.to_bits(),
                 want.to_bits(),
                 "device state diverged after restore at sperm[{index}]: {got} vs {want}"
+            );
+        }
+    });
+}
+
+/// A deterministic hook program exercising SCALE, a tick condition, and CONVERT.
+///
+/// Slot order by event is: event 0 `SCALE(0.5)` over all cells; event 1
+/// `SET(2.0)` over all cells guarded by `tick >= 1`; event 2 `CONVERT(z0→z1)`
+/// with probability 0.25.
+///
+/// ## Returns
+/// A hook program sized for the 2-sex, 4-age, 2-ztype fixture.
+fn device_hook_program() -> HookProgram {
+    let n_events = 4usize;
+    let mut program = HookProgram::default();
+    program.n_events = n_events as i64;
+    program.n_hooks = 3;
+    program.hook_offsets = vec![0, 1, 2, 3, 3];
+    program.op_offsets = vec![0, 1, 2, 3];
+    program.op_types = vec![0, 1, 11];
+    program.zidx_offsets = vec![0, 2, 4, 6];
+    program.zidx_data = vec![0, 1, 0, 1, 0, 1];
+    program.age_offsets = vec![0, 4, 8, 12];
+    program.age_data = vec![0, 1, 2, 3, 0, 1, 2, 3, 0, 1, 2, 3];
+    program.sex_masks = vec![true; 6];
+    program.params = vec![0.5, 2.0, 0.25];
+    program.condition_offsets = vec![0, 0, 1, 1];
+    program.condition_types = vec![3];
+    program.condition_params = vec![1];
+    program.deme_selector_types = vec![0, 0, 0];
+    program.deme_selector_offsets = vec![0, 0, 0, 0];
+    program.convert_source_z = vec![-1, -1, 0];
+    program.convert_target_z = vec![-1, -1, 1];
+    program
+}
+
+#[test]
+fn session_device_hooks_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        let mut gpu_session = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu_session.hooks = device_hook_program();
+        gpu_session
+            .enable_gpu()
+            .expect("enable_gpu accepts supported hooks");
+        let (tick, _history, stopped) = gpu_session
+            .run_inner(py, 4, 0, None, 0)
+            .expect("device hook run");
+        assert_eq!(tick, 4);
+        assert!(!stopped);
+
+        let mut cpu_session = make_session(blueprint, params, genetics, ind, sperm);
+        cpu_session.hooks = device_hook_program();
+        cpu_session
+            .run_inner(py, 4, 0, None, 0)
+            .expect("cpu hook run");
+
+        for (index, (got, want)) in gpu_session
+            .state_ind
+            .iter()
+            .zip(cpu_session.state_ind.iter())
+            .enumerate()
+        {
+            let want = *want as f32;
+            let got = *got as f32;
+            let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "ind[{index}]: device {got} vs host {want}"
+            );
+        }
+        for (index, (got, want)) in gpu_session
+            .state_sperm
+            .iter()
+            .zip(cpu_session.state_sperm.iter())
+            .enumerate()
+        {
+            let want = *want as f32;
+            let got = *got as f32;
+            let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "sperm[{index}]: device {got} vs host {want}"
             );
         }
     });

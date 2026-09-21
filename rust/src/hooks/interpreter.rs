@@ -52,6 +52,14 @@ pub use crate::generated::ecology_parameters::N_ECO_PARAMS;
 /// (e.g. session deserialization flagging programs with param writes).
 pub const OP_SET_PARAM_PUBLIC: i64 = 10;
 
+/// Opcodes the P7.1 device hook interpreter implements.
+///
+/// Deliberately only the deterministic state mutations: `SAMPLE`,
+/// `STOP_IF_*`, and `SET_PARAM` stay host-only until P7.2/P7.3.
+#[cfg(feature = "gpu")]
+pub const DEVICE_SUPPORTED_OPS: [i64; 6] =
+    [OP_SCALE, OP_SET, OP_ADD, OP_SUBTRACT, OP_KILL, OP_CONVERT];
+
 /// One audited ``OP_SET_PARAM`` transition handed to the session:
 /// ``(tick, param_id, old, new)``, recorded only when the committed value
 /// actually changed.  Spatial sessions wrap rows with the deme id (see
@@ -855,6 +863,30 @@ fn convert_count(
 }
 
 impl HookProgram {
+    /// Return the first opcode the P7.1 device interpreter cannot run.
+    ///
+    /// ## Returns
+    /// `Some(opcode)` for the first unsupported operation, or `None` when every
+    /// op is device-supported.
+    #[cfg(feature = "gpu")]
+    pub fn first_unsupported_device_op(&self) -> Option<i64> {
+        self.op_types
+            .iter()
+            .copied()
+            .find(|op| !DEVICE_SUPPORTED_OPS.contains(op))
+    }
+
+    /// Whether any lifecycle event has a Python callback installed.
+    ///
+    /// ## Returns
+    /// `true` when at least one event carries a Python callable.
+    #[cfg(feature = "gpu")]
+    pub fn has_python_callbacks(&self) -> bool {
+        self.python_callbacks
+            .iter()
+            .any(|callbacks| !callbacks.is_empty())
+    }
+
     /// Execute all hooks for one lifecycle event in cross-type priority order.
     ///
     /// The hook slots of an event were serialized in one stable priority

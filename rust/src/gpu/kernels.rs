@@ -2241,6 +2241,284 @@ extern "C" __global__ void discrete_survival(
 }
 "#;
 
+/// Device opcode interpreter for declarative hooks (P7.1).
+///
+/// Faithful port of the deterministic branch of
+/// `crate::hooks::interpreter::HookProgram::execute_event` for
+/// `SCALE`/`SET`/`ADD`/`SUBTRACT`/`KILL` (`0..=4`) and `CONVERT` (`11`). One
+/// thread owns one batch element and walks the event's CSR slots in the same
+/// priority order the CPU uses; conditions and selectors are evaluated exactly
+/// as on the host. Stochastic opcodes (`SAMPLE`, `STOP_IF_*`, `SET_PARAM`) are
+/// rejected at eligibility, so no RNG is needed here.
+const HOOK_SOURCE: &str = r#"
+__device__ __forceinline__ float hook_clamp01(float x)
+{
+    if (x <= 0.0f) {
+        return 0.0f;
+    } else if (x >= 1.0f) {
+        return 1.0f;
+    }
+    return x;
+}
+
+__device__ __forceinline__ int hook_atomic_condition(int type, int param, long long tick)
+{
+    if (type == 0) {
+        return 1;
+    }
+    if (type == 1) {
+        return tick == (long long)param;
+    }
+    if (type == 2) {
+        return param > 0 && (tick % (long long)param) == 0;
+    }
+    if (type == 3) {
+        return tick >= (long long)param;
+    }
+    if (type == 4) {
+        return tick < (long long)param;
+    }
+    if (type == 5) {
+        return tick <= (long long)param;
+    }
+    if (type == 6) {
+        return tick > (long long)param;
+    }
+    return type < 100;
+}
+
+__device__ __forceinline__ int hook_eval_condition(
+    const int* types,
+    const int* params,
+    int start,
+    int end,
+    long long tick)
+{
+    if (end <= start) {
+        return 1;
+    }
+    int stack[128];
+    int depth = 0;
+    for (int idx = start; idx < end; ++idx) {
+        int type = types[idx];
+        int param = params[idx];
+        if (type <= 6) {
+            if (depth >= 128) {
+                return 0;
+            }
+            stack[depth++] = hook_atomic_condition(type, param, tick);
+            continue;
+        }
+        if (type == 102) {
+            if (depth < 1) {
+                return 0;
+            }
+            stack[depth - 1] = stack[depth - 1] ? 0 : 1;
+            continue;
+        }
+        if (type == 100) {
+            if (depth < 2) {
+                return 0;
+            }
+            int rhs = stack[--depth];
+            int lhs = stack[--depth];
+            stack[depth++] = (lhs != 0 && rhs != 0) ? 1 : 0;
+            continue;
+        }
+        if (type == 101) {
+            if (depth < 2) {
+                return 0;
+            }
+            int rhs = stack[--depth];
+            int lhs = stack[--depth];
+            stack[depth++] = (lhs != 0 || rhs != 0) ? 1 : 0;
+            continue;
+        }
+        return 0;
+    }
+    return depth == 1 && stack[0] != 0;
+}
+
+__device__ __forceinline__ int hook_deme_matches(
+    const int* selector_types,
+    const int* selector_offsets,
+    const int* selector_data,
+    int hook,
+    int deme)
+{
+    int sel_type = selector_types[hook];
+    int start = selector_offsets[hook];
+    int end = selector_offsets[hook + 1];
+    if (sel_type == 0) {
+        return 1;
+    }
+    if (sel_type == 1) {
+        return start < end && selector_data[start] == deme;
+    }
+    if (sel_type == 2) {
+        if (start + 1 < end) {
+            int lo = selector_data[start];
+            int hi = selector_data[start + 1];
+            return deme >= lo && deme < hi;
+        }
+        return 0;
+    }
+    if (sel_type == 3) {
+        for (int idx = start; idx < end; ++idx) {
+            if (selector_data[idx] == deme) {
+                return 1;
+            }
+        }
+        return 0;
+    }
+    return 1;
+}
+
+extern "C" __global__ void apply_hook_event(
+    float* ind,
+    float* sperm,
+    const int* hook_offsets,
+    const int* op_offsets,
+    const int* op_types,
+    const int* zidx_offsets,
+    const int* zidx_data,
+    const int* age_offsets,
+    const int* age_data,
+    const int* sex_masks,
+    const float* params,
+    const int* condition_offsets,
+    const int* condition_types,
+    const int* condition_params,
+    const int* deme_selector_types,
+    const int* deme_selector_offsets,
+    const int* deme_selector_data,
+    const int* convert_source_z,
+    const int* convert_target_z,
+    int n_ages,
+    int n_ztypes,
+    int n_batch,
+    int event_id,
+    long long tick)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    int hook_start = hook_offsets[event_id];
+    int hook_end = hook_offsets[event_id + 1];
+    for (int hook = hook_start; hook < hook_end; ++hook) {
+        if (!hook_deme_matches(
+                deme_selector_types, deme_selector_offsets, deme_selector_data, hook, b)) {
+            continue;
+        }
+        int op_start = op_offsets[hook];
+        int op_end = op_offsets[hook + 1];
+        for (int op = op_start; op < op_end; ++op) {
+            int cond_start = condition_offsets[op];
+            int cond_end = condition_offsets[op + 1];
+            if (!hook_eval_condition(
+                    condition_types, condition_params, cond_start, cond_end, tick)) {
+                continue;
+            }
+            int op_type = op_types[op];
+            float param = params[op];
+            int zs = zidx_offsets[op];
+            int ze = zidx_offsets[op + 1];
+            int as = age_offsets[op];
+            int ae = age_offsets[op + 1];
+            if (op_type <= 4) {
+                for (int sex = 0; sex < 2; ++sex) {
+                    if (!sex_masks[op * 2 + sex]) {
+                        continue;
+                    }
+                    for (int ap = as; ap < ae; ++ap) {
+                        int age = age_data[ap];
+                        if (age < 0 || age >= n_ages) {
+                            continue;
+                        }
+                        for (int zp = zs; zp < ze; ++zp) {
+                            int z = zidx_data[zp];
+                            if (z < 0 || z >= n_ztypes) {
+                                continue;
+                            }
+                            int flat = ((sex * n_ages + age) * n_ztypes + z) * n_batch + b;
+                            float current = ind[flat];
+                            float target;
+                            if (op_type == 0) {
+                                target = fmaxf(current * param, 0.0f);
+                            } else if (op_type == 1) {
+                                target = fmaxf(param, 0.0f);
+                            } else if (op_type == 2) {
+                                target = fmaxf(current + param, 0.0f);
+                            } else if (op_type == 3) {
+                                target = fmaxf(current - param, 0.0f);
+                            } else {
+                                target = fmaxf(current * (1.0f - param), 0.0f);
+                            }
+                            if (sex == 0) {
+                                if (target >= current) {
+                                    ind[flat] = target;
+                                } else if (current <= 0.0f) {
+                                    ind[flat] = 0.0f;
+                                    for (int mz = 0; mz < n_ztypes; ++mz) {
+                                        int sflat =
+                                            ((age * n_ztypes + z) * n_ztypes + mz) * n_batch + b;
+                                        sperm[sflat] = 0.0f;
+                                    }
+                                } else {
+                                    float p = hook_clamp01(target / current);
+                                    ind[flat] = target;
+                                    for (int mz = 0; mz < n_ztypes; ++mz) {
+                                        int sflat =
+                                            ((age * n_ztypes + z) * n_ztypes + mz) * n_batch + b;
+                                        sperm[sflat] *= p;
+                                    }
+                                }
+                            } else {
+                                ind[flat] = target;
+                            }
+                        }
+                    }
+                }
+            } else if (op_type == 11) {
+                int src_z = convert_source_z[op];
+                int dst_z = convert_target_z[op];
+                if (src_z < 0 || src_z >= n_ztypes || dst_z < 0 || dst_z >= n_ztypes) {
+                    continue;
+                }
+                for (int age = 0; age < n_ages; ++age) {
+                    int male = ((1 * n_ages + age) * n_ztypes + src_z) * n_batch + b;
+                    float moved_male = ind[male] * param;
+                    ind[male] -= moved_male;
+                    ind[((1 * n_ages + age) * n_ztypes + dst_z) * n_batch + b] += moved_male;
+
+                    float sperm_row_sum = 0.0f;
+                    for (int mz = 0; mz < n_ztypes; ++mz) {
+                        sperm_row_sum +=
+                            sperm[((age * n_ztypes + src_z) * n_ztypes + mz) * n_batch + b];
+                    }
+                    float moved_mated = 0.0f;
+                    for (int mz = 0; mz < n_ztypes; ++mz) {
+                        int bucket = ((age * n_ztypes + src_z) * n_ztypes + mz) * n_batch + b;
+                        float moved_bucket = sperm[bucket] * param;
+                        sperm[bucket] -= moved_bucket;
+                        sperm[((age * n_ztypes + dst_z) * n_ztypes + mz) * n_batch + b] +=
+                            moved_bucket;
+                        moved_mated += moved_bucket;
+                    }
+                    int src_female = ((0 * n_ages + age) * n_ztypes + src_z) * n_batch + b;
+                    float virgins = fmaxf(ind[src_female] - sperm_row_sum, 0.0f);
+                    float moved_virgin = virgins * param;
+                    ind[src_female] -= moved_mated + moved_virgin;
+                    ind[((0 * n_ages + age) * n_ztypes + dst_z) * n_batch + b] +=
+                        moved_mated + moved_virgin;
+                }
+            }
+        }
+    }
+}
+"#;
+
 /// Device arguments for [`Kernels::density_scaling`].
 ///
 /// The per-deme ecology columns are uploaded as flat batch-major arrays; all
@@ -2358,6 +2636,8 @@ pub struct Kernels {
     discrete_reproduction: CudaFunction,
     /// `discrete_survival(...)`.
     discrete_survival: CudaFunction,
+    /// `apply_hook_event(...)`.
+    apply_hook_event: CudaFunction,
 }
 
 impl Kernels {
@@ -2381,7 +2661,7 @@ impl Kernels {
             ..Default::default()
         };
         let source = format!(
-            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}\n{SAMPLING_SOURCE}\n{OBSERVATION_SOURCE}\n{DISCRETE_SOURCE}"
+            "{AGING_SOURCE}\n{DENSITY_SOURCE}\n{SURVIVAL_SOURCE}\n{REPRODUCTION_SOURCE}\n{MIGRATION_SOURCE}\n{RNG_SOURCE}\n{SAMPLING_SOURCE}\n{OBSERVATION_SOURCE}\n{DISCRETE_SOURCE}\n{HOOK_SOURCE}"
         );
         let ptx = compile_ptx_with_opts(source, opts)
             .map_err(|err| format!("NVRTC compilation failed: {err}"))?;
@@ -2462,6 +2742,9 @@ impl Kernels {
         let discrete_survival = module
             .load_function("discrete_survival")
             .map_err(|err| format!("loading kernel `discrete_survival` failed: {err}"))?;
+        let apply_hook_event = module
+            .load_function("apply_hook_event")
+            .map_err(|err| format!("loading kernel `apply_hook_event` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -2485,6 +2768,7 @@ impl Kernels {
             observation_project,
             discrete_reproduction,
             discrete_survival,
+            apply_hook_event,
         })
     }
 
@@ -3552,6 +3836,123 @@ impl Kernels {
             .map(|_| ())
             .map_err(|err| format!("discrete_survival launch failed: {err}"))
     }
+
+    /// Apply one declarative hook event to the device state (P7.1).
+    ///
+    /// One thread per batch element walks the event's CSR slots in priority
+    /// order, evaluating conditions and selectors exactly like the CPU
+    /// interpreter. Only deterministic opcodes are eligible, so no RNG is
+    /// involved.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `ind`: Batch-minor individual counts, `(2, A, Z, B)`.
+    /// - `sperm`: Batch-minor stored sperm, `(A, Z, Z, B)`.
+    /// - `buffers`: Uploaded CSR arrays for the hook program.
+    /// - `n_ages`, `n_ztypes`, `n_batch`: Model dimensions.
+    /// - `event_id`: Lifecycle event index (first/early/late/finish).
+    /// - `tick`: Session tick used by the condition program.
+    ///
+    /// ## Errors
+    /// Returns a description when the launch fails.
+    #[allow(clippy::too_many_arguments)] // Mirrors the CSR arrays the kernel reads.
+    pub fn apply_hook_event(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &mut CudaSlice<f32>,
+        sperm: &mut CudaSlice<f32>,
+        buffers: &HookEventBuffers<'_>,
+        n_ages: usize,
+        n_ztypes: usize,
+        n_batch: usize,
+        event_id: usize,
+        tick: u64,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        if n_ztypes > MAX_Z {
+            return Err(format!(
+                "apply_hook_event supports at most {MAX_Z} zygote types, got {n_ztypes}"
+            ));
+        }
+        let n_ages_i = n_ages as i32;
+        let n_ztypes_i = n_ztypes as i32;
+        let n_batch_i = n_batch as i32;
+        let event_i = event_id as i32;
+        let tick_i = tick as i64;
+        let config = LaunchConfig {
+            grid_dim: ((n_batch as u32).div_ceil(64), 1, 1),
+            block_dim: (64, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut launch = stream.launch_builder(&self.apply_hook_event);
+        launch.arg(&mut *ind);
+        launch.arg(&mut *sperm);
+        launch.arg(buffers.hook_offsets);
+        launch.arg(buffers.op_offsets);
+        launch.arg(buffers.op_types);
+        launch.arg(buffers.zidx_offsets);
+        launch.arg(buffers.zidx_data);
+        launch.arg(buffers.age_offsets);
+        launch.arg(buffers.age_data);
+        launch.arg(buffers.sex_masks);
+        launch.arg(buffers.params);
+        launch.arg(buffers.condition_offsets);
+        launch.arg(buffers.condition_types);
+        launch.arg(buffers.condition_params);
+        launch.arg(buffers.deme_selector_types);
+        launch.arg(buffers.deme_selector_offsets);
+        launch.arg(buffers.deme_selector_data);
+        launch.arg(buffers.convert_source_z);
+        launch.arg(buffers.convert_target_z);
+        launch.arg(&n_ages_i);
+        launch.arg(&n_ztypes_i);
+        launch.arg(&n_batch_i);
+        launch.arg(&event_i);
+        launch.arg(&tick_i);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("apply_hook_event launch failed: {err}"))
+    }
+}
+
+/// Device CSR arrays for [`Kernels::apply_hook_event`].
+pub struct HookEventBuffers<'a> {
+    /// Per-event hook slot ranges, `n_events + 1`.
+    pub hook_offsets: &'a CudaSlice<i32>,
+    /// Per-hook op ranges, `n_hooks + 1`.
+    pub op_offsets: &'a CudaSlice<i32>,
+    /// Opcode per operation.
+    pub op_types: &'a CudaSlice<i32>,
+    /// Per-op genotype selector ranges.
+    pub zidx_offsets: &'a CudaSlice<i32>,
+    /// Genotype selector entries.
+    pub zidx_data: &'a CudaSlice<i32>,
+    /// Per-op age selector ranges.
+    pub age_offsets: &'a CudaSlice<i32>,
+    /// Age selector entries.
+    pub age_data: &'a CudaSlice<i32>,
+    /// Flattened `[female, male]` sex masks per op.
+    pub sex_masks: &'a CudaSlice<i32>,
+    /// Scalar parameter per op.
+    pub params: &'a CudaSlice<f32>,
+    /// Per-op condition token ranges.
+    pub condition_offsets: &'a CudaSlice<i32>,
+    /// Condition token types.
+    pub condition_types: &'a CudaSlice<i32>,
+    /// Condition token parameters.
+    pub condition_params: &'a CudaSlice<i32>,
+    /// Per-hook deme selector type.
+    pub deme_selector_types: &'a CudaSlice<i32>,
+    /// Per-hook deme selector ranges.
+    pub deme_selector_offsets: &'a CudaSlice<i32>,
+    /// Deme selector entries.
+    pub deme_selector_data: &'a CudaSlice<i32>,
+    /// Per-op convert source ztype (`-1` when not a convert).
+    pub convert_source_z: &'a CudaSlice<i32>,
+    /// Per-op convert target ztype (`-1` when not a convert).
+    pub convert_target_z: &'a CudaSlice<i32>,
 }
 
 #[cfg(test)]

@@ -274,7 +274,31 @@ state_flat = pop.export_state()
 pop.import_state(state_flat)
 ```
 
-## 11. GPU Ensemble (CUDA, optional)
+## 11. GPU acceleration (CUDA, optional)
+
+### 11.1 Single-population device path
+
+`AgeStructuredPopulation.enable_gpu()` moves the owned state onto the device;
+subsequent `run(...)` calls then advance it on the GPU.
+
+```python
+pop = (...)  # a panmictic, hook-free age-structured model
+
+pop.enable_gpu()
+print(pop.gpu_status())  # "enabled"
+pop.run(100)
+```
+
+- **Eligibility**: panmictic (`n_demes == 1`), hook-free, built-in growth modes
+  (0–4). `enable_gpu` raises `RuntimeError` when the model is ineligible or the
+  extension was built without the `gpu` cargo feature; the device path never
+  silently falls back to the CPU.
+- **No history on the device path**: the age-structured device run copies the
+  final state back but does **not** record history and ignores `record_every`.
+  Use the CPU path (leave the GPU disabled) or the ensemble below when history
+  or observations are needed.
+
+### 11.2 GPU ensemble
 
 `AgeStructuredPopulation` can evolve many independent replicates of a
 panmictic model on an NVIDIA GPU. The population's current state is copied onto
@@ -291,10 +315,8 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 # sperm_storage:    (n_replicates, n_ages, n_ztypes, n_ztypes)
 ```
 
-- **Eligibility**: panmictic (`n_demes == 1`), hook-free, built-in growth modes
-  (0–4). `enable_gpu_ensemble` raises `RuntimeError` when the model is
-  ineligible or the extension was built without the `gpu` cargo feature; the
-  device path never silently falls back to the CPU.
+- **Eligibility**: same as 11.1. `enable_gpu_ensemble` raises `RuntimeError`
+  when the model is ineligible or the extension lacks GPU support.
 - **Isolation**: the ensemble is a separate experiment. The population's own
   state and tick are not advanced by `run_gpu_ensemble`; call `pop.run(...)`
   to continue the CPU trajectory.
@@ -306,8 +328,9 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
   depends on the model size and the host core count; benchmark on the target
   machine.
 
-The lower-level `RustLifecycleBackend.enable_gpu_ensemble` /
-`run_gpu_ensemble` methods expose the same path for backend-only callers.
+The lower-level `RustLifecycleBackend.enable_gpu` / `gpu_status` /
+`enable_gpu_ensemble` / `run_gpu_ensemble` methods expose the same paths for
+backend-only callers.
 
 ## 12. Chapter Summary
 

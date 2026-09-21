@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 20 轮：**APPROVED**（§49；A2 尺度相关容差修复） |
-| 待回执 | §51（第 21 轮 C10：迁移缓存纳入显存预算） |
-| 主 agent 处理 | 第 21 轮：C10 已实现并自测；下一项为 B4 |
-| 待 evaluator 动作 | 按 §50 复核，把第 21 轮结论写入 §51 |
+| 最近回执 | 第 21 轮：**APPROVED**（§51；C10 迁移缓存纳入启用时显存预算） |
+| 待回执 | §53（第 22 轮 B4：frontend 单群体 enable_gpu + 文档） |
+| 主 agent 处理 | 第 22 轮：B4 已实现并自测；下一项为 B5 |
+| 待 evaluator 动作 | 按 §52 复核，把第 22 轮结论写入 §53 |
 
 ## 0. 一句话目标
 
@@ -1268,6 +1268,50 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 52. 第 22 轮交接 — B4：frontend 单群体 `enable_gpu` 入口 + 文档
+
+- 日期：2026-09-21
+- 背景：§51 APPROVED（C10）。按 `GPU_STAGE_SUMMARY §11.3` 推进 **B4**（完整性、P4）。
+- 风险分类：**文档与格式修改 + 局部代码修改**（新增公开 Python 方法；不改 Rust 数值与设备语义）。
+
+### 52.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `src/natal/frontend/population/age_structured.py` | `AgeStructuredPopulation` 新增 `enable_gpu()`（惰性建会话/同步后透传 `RustLifecycleBackend.enable_gpu`，可链式）与 `gpu_status()`（未建会话返回 `disabled`，否则透传后端 `enabled`/`disabled`/`unavailable`）。 |
+| `tests/test_gpu_ensemble_frontend.py` | 新增 `test_single_population_gpu_path_runs`：`gpu_status()` 初始 `disabled` → `enable_gpu()` → `enabled` → `run(3)` 正常；无 GPU 主机 `pytest.skip`。 |
+| `docs/en/4_simulation_engine.md` / `docs/zh/4_simulation_engine.md` | §11 改为「GPU 加速」并分 11.1 单群体 `enable_gpu` / 11.2 ensemble；明确**设备路径不记录历史、忽略 `record_every`**，需要历史时用 CPU 或 ensemble。 |
+
+### 52.2 行为
+
+- 公开入口语义与后端一致：panmictic、无钩子、内置生长模式；不合格/无 gpu feature 显式 `RuntimeError`，不静默回退。
+- 明确记录既有局限：年龄结构设备分支**无历史**、`record_every` 被忽略（文档警告 + 方法 docstring）。
+
+### 52.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `pytest -q`（全量） | **3612 passed**（含新增 1 个） |
+| `pytest tests/test_gpu_ensemble_frontend.py` | 6 passed |
+| `ruff` / `pyright` | 通过 / 0 errors |
+| `check_rust.py` / `phase0_baseline --check` | EXIT=0 / bit-identical（Rust 未改） |
+| 端到端冒烟（重编扩展） | `enable_gpu()` → `gpu_status()=="enabled"` → `run(3)` 状态有限、tick=3 |
+
+### 52.4 请 evaluator 独立核对
+
+- **公开合同**：`enable_gpu`/`gpu_status` 语义；启用后 `run` 确实走设备分支；不合格/无 GPU 显式报错。
+- **文档中英同步**：两版 §11 内容对应、示例使用真实公开 API、编号/链接正确；「无历史」局限表述准确。
+- **回归**：既有 Python/Rust 门禁不变；`phase0` bit-identical。
+
+### 52.5 残余风险
+
+- 设备路径无历史仍为既有局限；本轮仅在公开入口暴露并**明确文档化**，未改变行为。
+- 若用户启用 GPU 后 `run(..., record_every>0)`，仍会静默无历史（文档已警告）；是否改为运行期显式告警可另立小项。
+
+结论请追加为 **§53**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2460,3 +2504,51 @@ A2 的“显式拒绝非法状态”方向正确，但固定 `1e-3f` 容差会�
 
 A2 尺度相关容差修复正确、无回归，边界经独立数值与 GPU 验证，质量与覆盖率达标。**APPROVED**
 （范围为当前 HEAD `691728b` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 51. 第 21 轮结论（evaluator 独立执行，2026-09-21，HEAD=`86f5cbd`）
+
+### 51.1 裁定：**APPROVED**
+
+C10 把惰性迁移缓存的显存占用纳入**启用时**预算守卫；公式与实际上传缓冲一一对应，溢出显式 `Err`，
+不匹配 CSR 跳过。正常空间/年龄/ensemble 模型启用与逐 tick 结果零回归。
+
+### 51.2 独立核对
+
+- **公式一致性**（逐字段比对 `migration_cache_bytes` 与 `build_migration_cache` 的 12 个设备缓冲）：
+  `indptr`+`rev_indptr`（i32, 2·(B+1)）、`rev_src`+`dest`+`rev_entry`（i32, 3·nnz）、
+  `rev_weight`+`weights`（f32, 2·nnz）、`row_sum`（f32, B）、`fwd_f`+`fwd_m`（f32, 2·nnz·A·Z）、
+  `fwd_s`（f32, nnz·A·Z²）——完全匹配，无遗漏或高估。
+- **算术安全**：全程 `checked_mul/checked_add`，溢出返回显式 `Err`（测试 `migration_cache_bytes(usize::MAX,…)`
+  → `Err`）。
+- **触发时机与不误伤**：`ensure_migration_budget` 在 age `enable_gpu`/`enable_gpu_ensemble` 与
+  spatial `enable_gpu` 中于构造执行器后调用（超预算即启用时报错）；`migration_indptr.len() != n_batch+1`
+  时跳过（panmictic/无 CSR 不受影响）。测试用例覆盖“匹配接受 / 不匹配跳过”。
+- **回归**：空间确定性 L3（5×5、25 tick，重编扩展）→ `max_rel=9.140e-7 / 9.149e-7`，与 §23/§31/§43 完全相同。
+- **CPU 不变性**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；
+  `phase0` bit-identical。
+
+### 51.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` / `cargo test --features gpu` | 67 / **180 passed, 0 failed** |
+| `cargo test --features gpu migration_cache_budget_is_checked_at_enable` | passed |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3611 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2447/2522 = 97.03%**；逐文件均 ≥95%（executor 96.3%、kernels 97.5%、probe 96.1%，其余 100%） |
+
+### 51.4 残余风险（非阻塞，见 §50.5）
+
+- 预算为启用时**检查**而非预留；共享 GPU 上首次迁移前若显存被邻居挤占，仍可能在 `DeviceBuffer::from_host`
+  处显式失败（不静默回退）。可接受。
+- 其他既有残余（设备窗口未按 max_rows 收缩、raw 不走设备历史、随机生存每 tick 4 字节 D2H 等）不变。
+
+### 51.5 结论
+
+C10 预算纳入正确、算术安全、无回归，质量与覆盖率达标。**APPROVED**（范围为当前 HEAD `86f5cbd`
+与被审测试集；不声称任何历史基线失败消失）。

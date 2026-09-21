@@ -102,3 +102,17 @@ def test_run_gpu_ensemble_missing_backend_raises() -> None:
     pop._rust_lifecycle_backend = None  # pyright: ignore[reportPrivateUsage]
     with pytest.raises(RuntimeError, match="enable_gpu_ensemble"):
         pop.run_gpu_ensemble(1)
+
+
+def test_single_population_gpu_path_runs() -> None:
+    """``enable_gpu`` / ``gpu_status`` expose the single-population device path."""
+    pop = _build_pop("__gpu_single__")
+    assert pop.gpu_status() == "disabled"
+    try:
+        pop.enable_gpu()
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU unavailable: {exc}")
+    assert pop.gpu_status() == "enabled"
+    pop.run(3)
+    assert pop.tick == 3
+    assert np.isfinite(pop.state.individual_count).all()

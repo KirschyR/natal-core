@@ -1002,6 +1002,46 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
             n_steps=1, record_every=self.record_every, clear_history_on_start=False
         )
 
+    def enable_gpu(self) -> AgeStructuredPopulation:
+        """Enable the optional CUDA device path for this panmictic population.
+
+        Once enabled, subsequent :meth:`run` calls advance the owned state on
+        the device. The device path never silently falls back to the CPU.
+
+        .. warning::
+            The age-structured device path does **not** record history and
+            ignores ``record_every``; use the CPU path or
+            :meth:`enable_gpu_ensemble` when history is needed.
+
+        Returns:
+            AgeStructuredPopulation: Self for chaining.
+
+        Raises:
+            RuntimeError: If the extension was built without GPU support, or
+                the model is ineligible (not panmictic, carries hooks, or uses
+                a custom growth curve).
+        """
+        if self._rust_lifecycle_backend is None:
+            self._initialize_session(seed=int(self._rust_backend_seed or 0))
+        else:
+            self._run_startup_sync()
+        backend = self._rust_lifecycle_backend
+        assert backend is not None
+        backend.enable_gpu()
+        return self
+
+    def gpu_status(self) -> str:
+        """Return the device-path status for this population.
+
+        Returns:
+            ``"enabled"``, ``"disabled"``, or ``"unavailable"`` when the
+            extension was built without the ``gpu`` feature.
+        """
+        backend = self._rust_lifecycle_backend
+        if backend is None:
+            return "disabled"
+        return backend.gpu_status()
+
     def enable_gpu_ensemble(self, n_replicates: int) -> AgeStructuredPopulation:
         """Enable the CUDA ensemble path for this panmictic population.
 

@@ -267,7 +267,27 @@ state_flat = pop.export_state()
 pop.import_state(state_flat)
 ```
 
-## 11. GPU 多 replicate ensemble（CUDA，可选）
+## 11. GPU 加速（CUDA，可选）
+
+### 11.1 单群体设备路径
+
+`AgeStructuredPopulation.enable_gpu()` 把种群状态搬到设备；之后的 `run(...)` 会在 GPU 上推进。
+
+```python
+pop = (...)  # 一个 panmictic、无钩子的年龄结构模型
+
+pop.enable_gpu()
+print(pop.gpu_status())  # "enabled"
+pop.run(100)
+```
+
+- **适用条件**：panmictic（`n_demes == 1`）、无钩子、内置生长模式（0–4）。
+  模型不合格或扩展未带 `gpu` feature 时，`enable_gpu` 抛 `RuntimeError`；
+  设备路径**绝不静默回退 CPU**。
+- **设备路径不记录历史**：年龄结构设备分支只回传最终状态，**不记录 history，且忽略
+  `record_every`**。需要历史/观测时请用 CPU 路径（不启用 GPU）或下面的 ensemble。
+
+### 11.2 GPU 多 replicate ensemble
 
 `AgeStructuredPopulation` 可以把一个 panmictic 模型的多条独立 replicate 放到
 NVIDIA GPU 上同时演化。种群当前状态被复制到设备 batch 轴，每条 replicate 使用互不相交的
@@ -283,9 +303,8 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 # sperm_storage:    (n_replicates, n_ages, n_ztypes, n_ztypes)
 ```
 
-- **适用条件**：panmictic（`n_demes == 1`）、无钩子、内置生长模式（0–4）。
-  模型不合格或扩展未带 `gpu` feature 时，`enable_gpu_ensemble` 抛 `RuntimeError`；
-  设备路径**绝不静默回退 CPU**。
+- **适用条件**：同 11.1。模型不合格或扩展未带 `gpu` feature 时，`enable_gpu_ensemble`
+  抛 `RuntimeError`。
 - **隔离性**：ensemble 是独立实验，`run_gpu_ensemble` **不会**推进种群自身的 state/tick；
   要继续 CPU 轨迹请调用 `pop.run(...)`。
 - **可复现性**：同 seed 在设备上逐位复现。CPU 与 GPU 是两个不同随机系综，只能做
@@ -293,7 +312,8 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 - **性能**：GPU 的“单位 replicate 吞吐”远高于单核 CPU，但相对多进程 CPU 基线的墙面加速比
   取决于模型规模与本机核数；请在目标机器上实测。
 
-更低层的 `RustLifecycleBackend.enable_gpu_ensemble` / `run_gpu_ensemble` 提供同一条路径。
+更低层的 `RustLifecycleBackend.enable_gpu` / `gpu_status` / `enable_gpu_ensemble` /
+`run_gpu_ensemble` 提供同一条路径。
 
 ## 12. 小结
 

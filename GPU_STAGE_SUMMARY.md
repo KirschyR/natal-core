@@ -262,7 +262,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | **A2** | 正确性 | ~~`survival_stochastic` 静默夹 0~~ | ~~非法状态被掩盖~~ | 已实现：`violation` 标志 + f32 容差 `1e-3`，超出显式 `Err`（第 19 轮，§46） | 低 | **已实现，待 §47 复核** |
 | **A3** | 质量 | 设备历史 `flush` 的 boundary metadata（phase/execution）未按 tick 写 | stop/异常边界的历史元数据可能与 CPU 不同（GPU 无钩子→影响很小） | flush 时按 tick 写入 | 低 | 未开始 |
 | **C10** | 质量 | ~~CSR 迁移缓存未纳入显存预算估算~~ | ~~首次迁移才报错~~ | 已实现：`migration_cache_bytes` + `ensure_migration_budget`，启用时校验（第 21 轮，§50） | 低 | **已实现，待 §51 复核** |
-| **B4** | 完整性 | frontend 无单群体 `enable_gpu` 入口 | 用户无法通过 Population API 启用单群体 GPU + History | 新增 `enable_gpu()`/`gpu_status()` 前端入口并同步文档 | 低 | 未开始 |
+| **B4** | 完整性 | ~~frontend 无单群体 `enable_gpu` 入口~~ | ~~无法通过 Population API 启用单群体 GPU~~ | 已实现：`enable_gpu()`/`gpu_status()` + 中英文档 §11.1（第 22 轮，§52） | 低 | **已实现，待 §53 复核** |
 | **B5** | 完整性 | ensemble 返回裸数组，未接 `History` | ensemble 结果不能复用 observation/history | 返回结果对象或提供 History 转换 | 低-中 | 未开始 |
 | **B6** | 性能/内存 | raw 历史不走设备驻留；设备窗口未按 `max_rows` 收缩 | raw 逐记录同步；大 D×长 T 超预算回退 host | raw 设备暂存 + `capacity=min(records, max_rows)`（GPU 无 stop，安全） | 中 | 未开始 |
 | **C8** | 一致性 | 设备连续采样阈值未统一到 host `EPS=1e-10` | 极小窗口分支差异，统计已验证等价；仅可维护性 | 统一常量 | 低 | 未开始 |

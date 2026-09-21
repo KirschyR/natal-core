@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 19 轮：**NOT APPROVED**（§47；固定 `1e-3f` 容差对大规模有效状态误报） |
-| 待回执 | §49（第 19 轮 A2 修复复核） |
-| 主 agent 处理 | A2 已按尺度相关容差修复并自测；下一项为 C10 |
-| 待 evaluator 动作 | 按 §48 复核修复目标，把结论写入 §49 |
+| 最近回执 | 第 20 轮：**APPROVED**（§49；A2 尺度相关容差修复） |
+| 待回执 | §51（第 21 轮 C10：迁移缓存纳入显存预算） |
+| 主 agent 处理 | 第 21 轮：C10 已实现并自测；下一项为 B4 |
+| 待 evaluator 动作 | 按 §50 复核，把第 21 轮结论写入 §51 |
 
 ## 0. 一句话目标
 
@@ -1225,6 +1225,49 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 50. 第 21 轮交接 — C10：迁移缓存纳入显存预算
+
+- 日期：2026-09-20
+- 背景：§49 APPROVED（A2 修复）。按 `GPU_STAGE_SUMMARY §11.2` 推进 **C10**（质量、P3）。
+- 风险分类：**局部代码修改**（预算守卫；不改数值与正常路径）。
+
+### 50.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增自由函数 `migration_cache_bytes(n_batch, n_ages, n_ztypes, nnz)`（全程 `checked_*`，溢出显式 `Err`）与公开方法 `GpuExecutor::ensure_migration_budget(blueprint)`：CSR 行指针数与 batch 匹配时，按实测可用显存校验惰性迁移缓存的最坏字节数；不匹配则跳过（无迁移计划）。 |
+| `rust/src/sessions/{spatial,age_structured}.rs` | 在 `enable_gpu`（空间/年龄）与 `enable_gpu_ensemble`（年龄，panmictic 无 CSR → 跳过）中，构造执行器后调用 `ensure_migration_budget`，使超预算在**启用时**报错。 |
+| 测试 | `migration_cache_budget_is_checked_at_enable`：尺寸助手正值 / 溢出 `Err`；执行器接受匹配 CSR、跳过不匹配 CSR。 |
+
+### 50.2 行为
+
+- 显存不足现在于 `enable_gpu` 阶段显式失败，而非首次迁移时的裸分配错误（仍不静默回退 CPU）。
+- 预算公式含前向/反向 CSR 数组、`row_sum` 与随机路径的 `fwd_f/fwd_s/fwd_m` scratch。
+- panmictic（无空间迁移）与 CSR 不匹配的情形不受影响。
+
+### 50.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **180 passed, 0 failed**（含 C10 用例） |
+| `cargo test` / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | 67 / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0_baseline --check` | 通过 / 0 errors / 3611 passed / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2447/2522 = 97.03%**；executor 96.3%、kernels 97.5%、probe 96.1%，每文件 ≥95% |
+
+### 50.4 请 evaluator 独立核对
+
+- **预算正确性**：`migration_cache_bytes` 与 `build_migration_cache` 实际分配一致（含 scratch）；溢出显式 `Err`；启用时即触发而非首次迁移。
+- **不误伤**：panmictic/CSR 不匹配时跳过；正常空间模型启用与各 tick 结果零回归。
+- **CPU 不变性 / 门禁 / 覆盖率**同既往口径。
+
+### 50.5 残余风险
+
+- 预算按 CSR 最坏尺寸预留；与实测可用显存竞争时仍是启用时检查、运行中不再复核（共享 GPU 上可能被邻居挤占）——既有性质。
+
+结论请追加为 **§51**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2370,3 +2413,50 @@ A1 设备恢复正确、经会话级逐位用例与 Python 端到端逐位对照
 
 A2 的“显式拒绝非法状态”方向正确，但固定 `1e-3f` 容差会在较大规模下**误伤有效状态并中止运行**；
 已给出实际失败的回归测试与尺度相关容差的修复建议。**NOT APPROVED**，待主 agent 修复后回交复核。
+
+---
+
+## 49. 第 20 轮结论（evaluator 独立执行，2026-09-20，HEAD=`691728b`）
+
+### 49.1 裁定：**APPROVED**
+
+§47 阻塞项（固定 `1e-3f` 容差误伤大规模有效状态）已解除：容差改为**尺度相关**
+`tol = 8·(|n_f_raw| + |total_sperm|)·f32_eps + 1e-9`，经独立数值与 GPU 复核，有效状态不再误报、
+真实非法状态仍被拒绝。
+
+### 49.2 修复复核（独立运行）
+
+- 原失败回归 `cargo test --features gpu evaluator_valid_large_virgin_state_is_not_rejected`
+  → **ok**（修复前 `Err("Invalid state: n_virgins < 0 ...")`）。
+- 作者 A2 用例 `stochastic_survival_rejects_negative_virgin_state`（`-20 → Err`）→ ok。
+- **容差边界数值搜索**（独立）：在 `female ∈ {1e4,1e5,1e6,1e7,2²⁴−1,2²⁴}`、`Z ∈ {2,4,8,16,32}`
+  上对有效状态（数学 `stored ≤ female`）寻找最大 `drift / tolerance`，得 **0.164**（最坏
+  `female=1e5,Z=32`）——远小于 1，无误报风险，`8·eps` 系数约 6× 余量。
+  真实非法状态仍拒绝：`-20@1e5,Z4 → tol 0.19`、`-100@2²⁴,Z32 → tol 32`、`-0.5@1e4,Z2 → tol 0.019`。
+- 读 diff：`survival_stochastic` 在 `virgins < 0` 时用 `fabsf(n_f_raw)+fabsf(total_sperm)` 计算容差，
+  仅 `virgins < -tol` 置 violation，否则夹 0；常量 `NATAL_VIRGIN_EPS_ABS=1e-9f`、`NATAL_F32_EPS=1.19209290e-7f`。
+- **CPU 不变性**：`git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；
+  `phase0` bit-identical。
+
+### 49.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` / `cargo test --features gpu` | 67 / **179 passed, 0 failed** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | 3611 passed |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 严格过滤 `rust/src/gpu/**` 覆盖率 | **2390/2464 = 97.00%**；逐文件均 ≥95%（executor 96.2%、kernels 97.5%、probe 96.1%，其余 100%） |
+
+### 49.4 残余风险（非阻塞）
+
+- 随机生存每 tick 仍有一次 4 字节 D2H（读 violation）；与“逐 tick 零回传”轻微冲突，可在定位为热点后
+  改到下载边界检查。
+- 容差为启发式（8·eps 系数）：当前数值搜索余量充足；若未来出现极端 Z/量级组合，可再评估系数。
+
+### 49.5 结论
+
+A2 尺度相关容差修复正确、无回归，边界经独立数值与 GPU 验证，质量与覆盖率达标。**APPROVED**
+（范围为当前 HEAD `691728b` 与被审测试集；不声称任何历史基线失败消失）。

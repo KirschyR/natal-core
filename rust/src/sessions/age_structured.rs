@@ -321,6 +321,9 @@ impl AgeStructuredSession {
         )
         .map_err(map_lifecycle_error)?;
         executor.set_seed(self.seed);
+        executor
+            .ensure_migration_budget(&self.blueprint)
+            .map_err(map_lifecycle_error)?;
         self.gpu = Some(executor);
         Ok(())
     }
@@ -395,6 +398,11 @@ impl AgeStructuredSession {
             self.seed,
         )
         .map_err(map_lifecycle_error)?;
+        // Panmictic ensembles have no CSR (the check skips); kept for parity
+        // with the single-population enable path.
+        executor
+            .ensure_migration_budget(&self.blueprint)
+            .map_err(map_lifecycle_error)?;
         self.gpu = Some(executor);
         Ok(())
     }

@@ -1363,6 +1363,36 @@ impl GpuExecutor {
         Ok(())
     }
 
+    /// Reserve device memory for the lazily-built migration cache.
+    ///
+    /// Called at enable time so a CSR whose cache cannot fit fails before any
+    /// tick, rather than as a bare allocation error on the first migration.
+    /// A blueprint whose CSR does not match the batch is skipped (no migration
+    /// plan is used).
+    ///
+    /// ## Parameters
+    /// - `blueprint`: Frozen CSR the executor would cache.
+    ///
+    /// ## Returns
+    /// `Ok(())` when the cache fits the measured free memory.
+    ///
+    /// ## Errors
+    /// Returns a description when the cache size overflows or exceeds the free
+    /// memory.
+    pub fn ensure_migration_budget(&self, blueprint: &Blueprint) -> Result<(), String> {
+        if blueprint.migration_indptr.len() != self.n_batch + 1 {
+            return Ok(());
+        }
+        let required = migration_cache_bytes(
+            self.n_batch,
+            self.n_ages,
+            self.n_ztypes,
+            blueprint.migration_dest_idx.len(),
+        )?;
+        let (free, _total) = self.context.memory_info()?;
+        ensure_memory_budget(free, required)
+    }
+
     /// Allocate the device history window described by `spec`.
     ///
     /// The projection dimensions must match the executor, and the whole window
@@ -1702,6 +1732,71 @@ fn ensure_memory_budget(free: usize, required: usize) -> Result<(), String> {
         ));
     }
     Ok(())
+}
+
+/// Bytes the migration cache holds for a CSR with `nnz` non-zeros.
+///
+/// The cache is built lazily on the first migration, so its footprint must be
+/// reserved by the enable-time budget guard instead of surfacing as a bare
+/// allocation failure mid-run.
+///
+/// ## Parameters
+/// - `n_batch`, `n_ages`, `n_ztypes`: Model dimensions.
+/// - `nnz`: CSR non-zero count (`migration_dest_idx.len()`).
+///
+/// ## Returns
+/// The cache size in bytes.
+///
+/// ## Errors
+/// Returns a description when the arithmetic overflows `usize`.
+fn migration_cache_bytes(
+    n_batch: usize,
+    n_ages: usize,
+    n_ztypes: usize,
+    nnz: usize,
+) -> Result<usize, String> {
+    let i32_bytes = size_of::<i32>();
+    let f32_bytes = size_of::<f32>();
+    let overflow = || "migration cache size overflow".to_owned();
+    let rows = n_batch.checked_add(1).ok_or_else(overflow)?;
+    // indptr + rev_indptr (i32 each).
+    let mut total = rows
+        .checked_mul(i32_bytes)
+        .and_then(|value| value.checked_mul(2))
+        .ok_or_else(overflow)?;
+    // rev_src + dest + rev_entry (i32) and rev_weight + weights (f32).
+    let entry_i32 = nnz
+        .checked_mul(i32_bytes)
+        .and_then(|value| value.checked_mul(3))
+        .ok_or_else(overflow)?;
+    let entry_f32 = nnz
+        .checked_mul(f32_bytes)
+        .and_then(|value| value.checked_mul(2))
+        .ok_or_else(overflow)?;
+    total = total
+        .checked_add(entry_i32)
+        .and_then(|value| value.checked_add(entry_f32))
+        .ok_or_else(overflow)?;
+    // row_sum (f32, one per source).
+    total = total
+        .checked_add(n_batch.checked_mul(f32_bytes).ok_or_else(overflow)?)
+        .ok_or_else(overflow)?;
+    // fwd_f + fwd_m (nnz·A·Z f32) and fwd_s (nnz·A·Z·Z f32).
+    let az = n_ages.checked_mul(n_ztypes).ok_or_else(overflow)?;
+    let fwd_fm = nnz
+        .checked_mul(az)
+        .and_then(|value| value.checked_mul(f32_bytes))
+        .and_then(|value| value.checked_mul(2))
+        .ok_or_else(overflow)?;
+    let fwd_s = nnz
+        .checked_mul(az)
+        .and_then(|value| value.checked_mul(n_ztypes))
+        .and_then(|value| value.checked_mul(f32_bytes))
+        .ok_or_else(overflow)?;
+    total
+        .checked_add(fwd_fm)
+        .and_then(|value| value.checked_add(fwd_s))
+        .ok_or_else(overflow)
 }
 
 /// Validate an ecology column length.

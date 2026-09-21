@@ -3257,3 +3257,39 @@ fn evaluator_valid_large_virgin_state_is_not_rejected() {
         "a valid stored==female state must not be rejected: {result:?}"
     );
 }
+
+#[test]
+fn migration_cache_budget_is_checked_at_enable() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // The size helper reports a positive footprint and rejects overflow.
+    let bytes = super::migration_cache_bytes(4, 4, 2, 4).expect("cache bytes");
+    assert!(bytes > 0);
+    assert!(super::migration_cache_bytes(usize::MAX, 4, 2, 4).is_err());
+
+    // The executor accepts a fitting CSR plan and skips a mismatched one.
+    let blueprint = migration_blueprint();
+    let (_, ecology) = density_fixture();
+    let n_batch = ecology.n_demes;
+    let (ind, sperm) = populated_state(n_batch, blueprint.n_ages, blueprint.n_ztypes);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let executor = GpuExecutor::new(
+        context,
+        n_batch,
+        blueprint.n_ages,
+        blueprint.n_ztypes,
+        &ind,
+        &sperm,
+    )
+    .expect("executor");
+    executor
+        .ensure_migration_budget(&blueprint)
+        .expect("a fitting CSR plan is accepted");
+    let mut mismatched = blueprint.clone();
+    mismatched.migration_indptr = vec![0];
+    executor
+        .ensure_migration_budget(&mismatched)
+        .expect("a CSR that does not match the batch is skipped");
+}

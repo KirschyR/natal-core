@@ -388,6 +388,11 @@ impl SpatialSession {
         )
         .map_err(map_lifecycle_error)?;
         executor.set_seed(self.seed);
+        // Reserve the lazily-built migration cache up front so an over-budget
+        // CSR fails at enable time, not mid-run.
+        executor
+            .ensure_migration_budget(&self.blueprint)
+            .map_err(map_lifecycle_error)?;
         self.gpu = Some(executor);
         Ok(())
     }

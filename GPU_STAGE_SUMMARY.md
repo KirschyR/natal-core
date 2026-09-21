@@ -193,7 +193,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 8. 已知限制 / 未做项
 
 - **`continuous_sampling=true`**：**已支持**（第 14 轮）：设备连续二项/多项/Poisson 采样，生存/繁殖/迁移随机阶段均可用。
-- **hooks/停止门控**：含钩子模型设备拒绝；D6 设备侧门控未做。
+- **hooks/停止门控**：含 Python 回调或声明式钩子的模型当前一律设备拒绝；声明式钩子设备化由 **P7** 规划承接（D6 停止门控在 P7.2）。
 - **离散世代 GPU**：空间离散已支持（第 15 轮）；未覆盖 Wright-Fisher 融合模式。
 - **设备侧 history 驻留（观测模式）已实现**：空间观测历史在设备上投影成行、运行期零逐记录回传、结束时一次下载回填
   `HistoryStore`；**raw 模式与设备窗口超预算时仍走 host 逐记录路径**（第 12 轮，§32，待复核）。
@@ -263,13 +263,14 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | **A3** | 质量 | 设备历史 `flush` 的 boundary metadata（phase/execution）未按 tick 写 | stop/异常边界的历史元数据可能与 CPU 不同（GPU 无钩子→影响很小） | flush 时按 tick 写入 | 低 | 未开始 |
 | **C10** | 质量 | ~~CSR 迁移缓存未纳入显存预算估算~~ | ~~首次迁移才报错~~ | 已实现：`migration_cache_bytes` + `ensure_migration_budget`，启用时校验（第 21 轮，§50） | 低 | **已实现，待 §51 复核** |
 | **B4** | 完整性 | ~~frontend 无单群体 `enable_gpu` 入口~~ | ~~无法通过 Population API 启用单群体 GPU~~ | 已实现：`enable_gpu()`/`gpu_status()` + 中英文档 §11.1（第 22 轮，§52） | 低 | **已实现，待 §53 复核** |
-| **B5** | 完整性 | ensemble 返回裸数组，未接 `History` | ensemble 结果不能复用 observation/history | 返回结果对象或提供 History 转换 | 低-中 | 未开始 |
+| **B5** | 完整性 | ~~ensemble 返回裸数组，未接 Observation~~ | ~~不能复用 observation/history 选择器~~ | 已实现：`observe_gpu_ensemble` 逐 replicate 经 `Observation` 投影（第 23 轮，§54） | 低-中 | **已实现，待 §55 复核** |
 | **B6** | 性能/内存 | raw 历史不走设备驻留；设备窗口未按 `max_rows` 收缩 | raw 逐记录同步；大 D×长 T 超预算回退 host | raw 设备暂存 + `capacity=min(records, max_rows)`（GPU 无 stop，安全） | 中 | 未开始 |
 | **C8** | 一致性 | 设备连续采样阈值未统一到 host `EPS=1e-10` | 极小窗口分支差异，统计已验证等价；仅可维护性 | 统一常量 | 低 | 未开始 |
 | **C11** | 质量 | `run_gpu_ensemble` 在 `_gpu_ensemble_replicates==0` 时 reshape 失败 | 误用路径（frontend 无单群体入口，实际不可达） | 前置校验并给明确 `RuntimeError` | 低 | 未开始 |
 | **C9** | 一致性 | `male_adult_mating_rate`/`eggs_per_female` clamp 差异 | 契约范围内无差异 | 可选对齐或注释说明 | 低 | 已记录，可不做 |
 | **B7** | 完整性 | Wright-Fisher 融合模式未设备化 | 空间离散 CPU 不用它；非空间离散无 GPU 入口 | 按需实现 | 中 | 低优先 |
-| **D6** | 设计 | hooks/停止门控设备侧未做 | 含钩子（含 `stop_if_*`）模型完全不可用 GPU | 需移植 CSR 钩子解释器（计划已排除） | 极高 | **阻塞（设计取舍）** |
+| **D6** | 设计 | hooks/停止门控设备侧未做 | 含 `stop_if_*` 的模型不可用 GPU | **由 P7 承接**（用户选定声明式钩子）：设备侧解释器 + 停止门控 | 高 | 规划中（P7.2） |
+| **P7** | 完整性 | GPU 不支持声明式钩子插入点（`first/early/late/finish`） | 含声明式钩子的模型无法上 GPU | 设备侧声明式解释器，分 P7.1–P7.4（见 §11.5）；Python 回调仍显式拒绝 | 高 | 规划中（用户已选声明式） |
 | **E12** | 性能 | 深层性能优化未做（debug 基准受宿主机重建/上传主导） | 大 B 计算侧瓶颈 | release + 空闲卡剖析 → 缓存恒定张量 / 复用 scratch / 内核重构 | 高（内核重构） | 待空闲卡 |
 | **E13** | 验收 | P6 相对 16 核 `ProcessPool` 仅 2.4–3.3×，阈值未定 | “显著优于”是否达标无口径 | 用户定阈值或换更大模型/更少核重测 | 低 | **待用户口径** |
 
@@ -278,13 +279,41 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 1. **A1**（正确性、静默错误）→ **A2** → **C10**：先消灭正确性/显式失败缺口。
 2. **B4** → **B5**：补齐用户可见入口与结果集成。
 3. **B6** → **C8** → **C11** → **A3**：性能/内存与一致性收尾。
-4. **D6** 保持阻塞；**B7** 低优先；**E12/E13** 需空闲 GPU 与用户口径，另行启动。
+4. **P7**（设备侧声明式钩子，含 D6）：大特性，按 §11.5 分阶段（P7.0→P7.4）；**B7** 低优先；**E12/E13** 需空闲 GPU 与用户口径。
 
 ### 11.4 验收口径（按类别）
 
 - 正确性/完整性（A/B/C）：针对性测试 + `phase0` bit-identical + L3 对照；公开 API/状态类改动走独立复核。
 - 文档类：`docs/zh` 与 `docs/en` 同步、示例可运行。
 - 性能类：`maturin develop --release` + 空闲 GPU + 前后 `nvidia-smi` 快照，给出可复现基准。
+
+### 11.5 P7 规划：设备侧声明式钩子（用户已选定）
+
+**目标**：让**仅含声明式钩子**（`HookProgram`，无 Python 回调）的模型在 GPU 上按 CPU 相同的
+`first → reproduction → early → survival → late → aging` 事件顺序与优先级执行，且尽量保持
+“运行期间零主机同步”。**Python 回调模型仍显式拒绝**（CUDA 内核无法回调 Python；如需支持另立 P8 主机桥接）。
+
+现状（依据）：
+- `HookProgram`（`rust/src/hooks/interpreter.rs`）是完整 CSR 字节码：`op_types`（SCALE/SET/ADD/SUBTRACT/KILL/SAMPLE/STOP_IF_*/SET_PARAM/CONVERT）、selector（`zidx/age/sex/deme`）、RPN 条件、`OP_SET_PARAM` 的 RPN 栈机 + wire bounds。
+- GPU 会话当前对 `n_hooks != 0` 或任何 `python_callbacks` 一律拒绝。
+
+分阶段（每阶段：全门禁 → 独立复核）：
+
+| 阶段 | 内容 | 验收 |
+|---|---|---|
+| **P7.1** | 设备侧 opcode 解释器：上传 CSR 数据并执行 SCALE/SET/ADD/SUBTRACT/KILL/CONVERT（含 RPN 条件与 selector/wire bounds）；**同时按 opcode 放开资格**（仅无 Python 回调且只用已支持 opcode 的模型；其余显式拒绝） | 确定性 L2/L3 与 CPU 一致（相对误差档）；事件顺序/优先级一致；未支持 opcode/回调解仍 `Err` |
+| **P7.2** | 设备侧 `STOP_IF_*` 门控（D6）：设备侧归约出 stop 标志，host 按需读取；停止点与 CPU 一致；放开 STOP_IF_* 资格 | 含 `stop_if_*` 模型的停止 tick 与 CPU 一致；零逐 tick 同步 |
+| **P7.3** | `OP_SET_PARAM` 同 tick 可见性 + `SAMPLE` 的设备 RNG site 对齐；放开二者资格 | later-stage 读取已更新参数；随机 op 可复现/统计等价 |
+| **P7.4** | 空间（per-deme selector + 调度）与 ensemble 集成 | 空间/多 B 的声明式钩子与 CPU 一致 |
+
+> **不可先放开资格再补解释器**：若允许 `n_hooks>0` 而不执行钩子，会**静默丢钩子**。因此资格必须在
+> 对应 opcode 的解释器落地时**按 opcode 逐步放开**（P7.1 起）。
+
+**关键语义约束**：事件顺序与 priority 交错、`set_param` 边界可见性、stop 中断时机、RNG site
+映射必须与 CPU 完全一致（CPU 仍是 golden reference）；精度分档不变。
+
+**风险**：高（钩子会改写状态/参数、影响停止点与随机流）。必须独立 evaluator 复核并补强对照测试。
+**前置**：P7 是大特性，建议在完成 B5/B6/C8/C11/A3 等小项后启动，或由用户指定优先级。
 
 ---
 

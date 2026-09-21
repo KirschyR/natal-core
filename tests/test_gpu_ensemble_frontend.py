@@ -116,3 +116,39 @@ def test_single_population_gpu_path_runs() -> None:
     pop.run(3)
     assert pop.tick == 3
     assert np.isfinite(pop.state.individual_count).all()
+
+
+def test_enable_gpu_lazily_initializes_session() -> None:
+    """``enable_gpu`` must build the session when none exists yet."""
+    pop = _build_pop("__gpu_single_lazy__")
+    pop._rust_lifecycle_backend = None  # pyright: ignore[reportPrivateUsage]
+    try:
+        pop.enable_gpu()
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU unavailable: {exc}")
+    assert pop._rust_lifecycle_backend is not None
+
+
+def test_gpu_status_disabled_without_session() -> None:
+    """A population without a native session reports ``disabled``."""
+    pop = _build_pop("__gpu_single_nostatus__")
+    pop._rust_lifecycle_backend = None  # pyright: ignore[reportPrivateUsage]
+    assert pop.gpu_status() == "disabled"
+
+
+def test_observe_gpu_ensemble_projects_each_replicate() -> None:
+    """Ensemble readouts project through the population's Observation."""
+    pop = _build_pop("__gpu_obs_ens__")
+    try:
+        pop.enable_gpu_ensemble(32)
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU ensemble unavailable: {exc}")
+    _, ind, _ = pop.run_gpu_ensemble(2)
+    observed = pop.observe_gpu_ensemble(ind)
+    assert observed.shape[0] == ind.shape[0]
+    assert np.isfinite(observed).all()
+    expected = pop.observation.apply(ind[0])
+    assert observed.shape[1:] == expected.shape
+    np.testing.assert_array_equal(observed[0], expected)
+    with pytest.raises(ValueError):
+        pop.observe_gpu_ensemble(ind[0])

@@ -1109,6 +1109,39 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         )
         return int(tick), ind_array, sperm_array
 
+    def observe_gpu_ensemble(
+        self, individual_count: NDArray[np.float64]
+    ) -> NDArray[np.float64]:
+        """Project every replicate of an ensemble readout through
+        :attr:`observation`.
+
+        The ensemble is a separate experiment that does not record history, so
+        this applies the same observation selector used by ``History`` to each
+        replicate's ``(2, n_ages, n_ztypes)`` state.
+
+        Args:
+            individual_count: The ``(n_replicates, 2, n_ages, n_ztypes)`` array
+                returned by :meth:`run_gpu_ensemble`.
+
+        Returns:
+            The stacked observed values with a leading replicate axis.
+
+        Raises:
+            ValueError: If the array is not a stacked 3-D state.
+        """
+        array = np.asarray(individual_count, dtype=np.float64)
+        if array.ndim != 4 or array.shape[1] != 2:
+            raise ValueError(
+                "observe_gpu_ensemble expects a "
+                "(n_replicates, 2, n_ages, n_ztypes) array, got shape "
+                f"{array.shape}"
+            )
+        observation = self.observation
+        return np.stack(
+            [observation.apply(array[index]) for index in range(array.shape[0])],
+            axis=0,
+        )
+
     def get_age_distribution(self, sex: str = "both") -> np.ndarray:
         """Return the age distribution for the requested sex.
 

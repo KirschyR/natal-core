@@ -317,6 +317,10 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 
 - **Eligibility**: same as 11.1. `enable_gpu_ensemble` raises `RuntimeError`
   when the model is ineligible or the extension lacks GPU support.
+- **Observation**: `pop.observe_gpu_ensemble(individual_count)` projects every
+  replicate through the population's `Observation` (the same selector
+  `History` uses) and returns a stacked observed array. The ensemble itself is
+  a separate experiment and does not record history.
 - **Isolation**: the ensemble is a separate experiment. The population's own
   state and tick are not advanced by `run_gpu_ensemble`; call `pop.run(...)`
   to continue the CPU trajectory.

@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 21 轮：**APPROVED**（§51；C10 迁移缓存纳入启用时显存预算） |
-| 待回执 | §53（第 22 轮 B4：frontend 单群体 enable_gpu + 文档） |
-| 主 agent 处理 | 第 22 轮：B4 已实现并自测；下一项为 B5 |
-| 待 evaluator 动作 | 按 §52 复核，把第 22 轮结论写入 §53 |
+| 最近回执 | 第 22 轮：**APPROVED**（§53；B4 frontend 单群体 `enable_gpu` + 文档） |
+| 待回执 | §55（第 23 轮 B5：ensemble 结果接 Observation） |
+| 主 agent 处理 | 第 23 轮：B5 已实现并自测；下一项为 B6 |
+| 待 evaluator 动作 | 按 §54 复核，把第 23 轮结论写入 §55 |
 
 ## 0. 一句话目标
 
@@ -1312,6 +1312,48 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 54. 第 23 轮交接 — B5：ensemble 结果接入 Observation
+
+- 日期：2026-09-21
+- 背景：§53 APPROVED（B4）。按 `GPU_STAGE_SUMMARY §11.3` 推进 **B5**（完整性、P5）。
+- 风险分类：**文档与格式修改 + 局部代码修改**（新增公开 Python 方法；不改 Rust 数值）。
+- 计划说明：P7（声明式钩子设备化）已按用户决定写入 `GPU_STAGE_SUMMARY §11.5`；用户选择先收尾小项，故 P7 暂缓。
+
+### 54.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `src/natal/frontend/population/age_structured.py` | 新增 `observe_gpu_ensemble(individual_count)`：把 `(B,2,A,Z)` 的 ensemble 读值逐 replicate 经种群自身的 `Observation`（与 `History` 同一选择器）投影，返回带 replicate 轴的堆叠结果；输入形状不符抛 `ValueError`。 |
+| `tests/test_gpu_ensemble_frontend.py` | 新增 `test_observe_gpu_ensemble_projects_each_replicate`：形状/有限性、与单条 `observation.apply` 逐位一致、3-D 输入拒绝。 |
+| `docs/en/4_simulation_engine.md` / `docs/zh/4_simulation_engine.md` | §11.2 增加「Observation」要点。 |
+
+### 54.2 行为
+
+- ensemble 结果无需手动 reshape 即可复用 observation/history 的选择器；ensemble 仍为独立实验、不记录 per-population `History`（既有局限已在文档说明）。
+
+### 54.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `pytest -q`（全量） | **3615 passed**（含新增 1 个） |
+| `pytest tests/test_gpu_ensemble_frontend.py` | 9 passed |
+| `ruff` / `pyright` / `phase0_baseline --check` | 通过 / 0 errors / bit-identical（Rust 未改） |
+
+### 54.4 请 evaluator 独立核对
+
+- **公开合同**：`observe_gpu_ensemble` 形状/语义；与 `observation.apply` 单条结果一致；非法形状显式报错。
+- **文档中英同步**：§11.2 新增要点两版对应。
+- **回归**：既有 Python/Rust 门禁不变。
+
+### 54.5 残余风险
+
+- 逐 replicate 的 Python 层投影对超大 B 有循环开销；若成为瓶颈可改设备侧整批投影（后续可选）。
+- ensemble 仍不与 per-population `History` 合并（既有，文档已述）。
+
+结论请追加为 **§55**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2552,3 +2594,53 @@ C10 把惰性迁移缓存的显存占用纳入**启用时**预算守卫；公式
 
 C10 预算纳入正确、算术安全、无回归，质量与覆盖率达标。**APPROVED**（范围为当前 HEAD `86f5cbd`
 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 53. 第 22 轮结论（evaluator 独立执行，2026-09-21，HEAD=`0748779`）
+
+### 53.1 裁定：**APPROVED**
+
+frontend 单群体 `enable_gpu()` / `gpu_status()` 语义正确、惰性建会话与透传一致；中英文档同步，
+并把“设备路径无历史、忽略 `record_every`”的既有局限在公开入口明确文档化。Rust 数值未改、门禁无回归。
+（Python 新增行覆盖率由 evaluator 补 2 个用例后达 100%，见 53.3。）
+
+### 53.2 独立核对
+
+- **公开合同**（读代码 + 独立运行）：`gpu_status()` 初始 `disabled` → `enable_gpu()` → `enabled` →
+  `run(3)` 后 `tick==3`、状态有限；`enable_gpu` 惰性建会话 / 已建会话先 `_run_startup_sync()` 再透传。
+- **设备路径被真正使用**：`enable_gpu` 调用后端 `enable_gpu`（无 gpu 扩展时显式 `RuntimeError`，不静默回退）；
+  既有 Rust L3/会话用例证明设备分支正确。
+- **文档化的局限实测**：GPU 下 `run(3, record_every=1)` 的 `history` 长度为 **0**，CPU 为 4；
+  §11.1 已明确警告该行为并在 docstring 标注。与主 agent 描述一致。
+- **文档中英同步**：`docs/en|zh/4_simulation_engine.md` §11 改为「GPU 加速」并分 11.1（单群体）/11.2（ensemble），
+  两版内容对应、示例使用真实公开 API、编号/链接正确、「无历史」表述准确。
+
+### 53.3 覆盖率（Python 新增行）
+
+`pytest tests/test_gpu_ensemble_frontend.py --cov=natal --cov-report=json`，按 diff 新增行统计：
+新增可执行 13 行，初始未覆盖 2 行（`enable_gpu` 的惰性建会话分支、`gpu_status` 的 `backend is None`
+返回 `disabled`——因 `build()` 已建会话故原用例未触及）。evaluator 补
+`test_enable_gpu_lazily_initializes_session`、`test_gpu_status_disabled_without_session` 后
+**13/13 = 100%**。Rust `src/gpu/**` 未改（第 21 轮 97.03%）。
+
+### 53.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `PYTHONUTF8=1 pytest -q` | **3614 passed**（作者 3612 + evaluator 2） |
+| `pytest -q tests/test_gpu_ensemble_frontend.py` | 8 passed |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `cargo test` / `cargo test --features gpu` | 67 / 180 passed（Rust 未改，回归确认） |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+
+### 53.5 残余风险（非阻塞，见 §52.5）
+
+- 设备路径无历史仍为既有局限；本轮仅暴露并文档化，未改行为。启用 GPU 后 `record_every>0` 仍**静默**
+  无历史（文档已警告）；是否加运行期显式告警可另立小项。
+
+### 53.6 结论
+
+B4 单群体公开入口与文档满足合同、同步与覆盖要求；门禁全绿、Python 新增行覆盖率 100%。**APPROVED**
+（范围为当前 HEAD `0748779` 与被审测试集；不声称任何历史基线失败消失）。

@@ -305,6 +305,9 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 
 - **适用条件**：同 11.1。模型不合格或扩展未带 `gpu` feature 时，`enable_gpu_ensemble`
   抛 `RuntimeError`。
+- **观测投影**：`pop.observe_gpu_ensemble(individual_count)` 用种群自身的 `Observation`
+  （与 `History` 相同的选择器）对**每条 replicate** 投影，返回带 replicate 轴的堆叠结果；
+  ensemble 本身是独立实验，不记录 history。
 - **隔离性**：ensemble 是独立实验，`run_gpu_ensemble` **不会**推进种群自身的 state/tick；
   要继续 CPU 轨迹请调用 `pop.run(...)`。
 - **可复现性**：同 seed 在设备上逐位复现。CPU 与 GPU 是两个不同随机系综，只能做

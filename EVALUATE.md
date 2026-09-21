@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 22 轮：**APPROVED**（§53；B4 frontend 单群体 `enable_gpu` + 文档） |
-| 待回执 | §55（第 23 轮 B5：ensemble 结果接 Observation） |
-| 主 agent 处理 | 第 23 轮：B5 已实现并自测；下一项为 B6 |
-| 待 evaluator 动作 | 按 §54 复核，把第 23 轮结论写入 §55 |
+| 最近回执 | 第 23 轮：**APPROVED**（§55；B5 ensemble 读值接入 Observation） |
+| 待回执 | §57（第 24 轮 B6/C8/C11/A3：raw 设备历史 + `max_rows` 环形窗口、阈值统一、前置报错、boundary metadata） |
+| 主 agent 处理 | 第 24 轮：B6/C8/C11/A3 已实现并自测；下一大项为 P7 |
+| 待 evaluator 动作 | 按 §56 复核，把第 24 轮结论写入 §57 |
 
 ## 0. 一句话目标
 
@@ -1354,6 +1354,70 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 56. 第 24 轮交接 — B6 / C8 / C11 / A3：raw 设备历史 + `max_rows` 环形窗口、阈值统一、前置报错、boundary metadata
+
+- 日期：2026-09-21
+- 背景：§55 APPROVED（B5）。按 `GPU_STAGE_SUMMARY §11.3` 收尾 **B6 → C8 → C11 → A3**。
+- 风险分类：**B6 高风险**（状态恢复：raw 设备行在 flush 时重建 checkpoint，属历史/状态路径）；
+  **C8 高风险**（随机分布阈值，需统计等价）；**C11/A3 低风险**（局部 + 元数据）。Rust 数值 CPU 路径零改动。
+
+### 56.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | `HistorySpec` 增 `raw`/`raw_sperm`/`wrap`；`DeviceHistory` 变为环形（`head`/`written`/`rows`）并支持 raw。`configure_history`：raw 宽度由 `dims` 推得、跳过 mask 校验、`capacity==0` 显式 `Err`。`record_history_row`：按环位置写入，raw 走 `copy_raw_history_row`（`memcpy_dtod` 设备→设备，无新内核）。`download_history_rows`：按环时序输出（未回绕时与旧行为逐位相同）。新增 `history_is_raw`/`history_dropped`。 |
+| `rust/src/sessions/spatial.rs` | `start_device_history`：放开 raw（此前 `data.raw` 一律拒绝），并据 `max_rows` 收缩为环（`capacity=min(records, max_rows)`，`wrap=true`）。`flush_device_history`：按 `dropped` 重建起始 tick；raw 行经 `batch_to_outer` 转置回 batch-major 后 `append_row`，并按行重建 `SpatialTickCheckpoint`；同时回填 boundary `phase`/`execution`（A3）。 |
+| `rust/src/gpu/kernels.rs` | 新增 `#define NATAL_EPS 1e-10f`；连续二项/多项/Poisson 的零/壹/near-1/alpha/sum 阈值由 `1e-12f`/`1e-7f` 统一为 `NATAL_EPS`（对应 host `rng::EPS=1e-10`）。 |
+| `src/natal/frontend/population/age_structured.py` | `run_gpu_ensemble`：`backend is None or _gpu_ensemble_replicates < 1` 时前置抛显式 `RuntimeError`，不再走到 reshape。 |
+| 测试 | 更新 `HistorySpec` 字面量；新增 `spatial_device_history_raw_matches_cpu`（raw interval 1/2/3 与 CPU 对照）、`spatial_device_history_raw_respects_max_rows`、`spatial_device_history_observation_respects_max_rows`（环 + 保留 tick 对照）、`device_raw_history_ring_overwrites_oldest_and_orders_rows`（ring 时序 + `history_dropped`）；更新原 raw 回退用例为「raw 现走设备」。 |
+
+### 56.2 行为
+
+- **raw 历史不再逐记录 D2H**：记录边界只做设备内状态拷贝（设备原生 `(2,A,Z,B)`/`(A,Z,Z,B)` 布局），运行结束一次下载并转置回 batch-major，回填 `HistoryStore`；raw 语义与 host 路径一致（f32 值）。
+- **窗口按 `max_rows` 收缩为环**：`max_rows` 有界时设备只保留最新 `max_rows` 行，超出的最旧行被覆盖；flush 用 `written - rows` 还原首个保留 tick。观测模式同样受益。
+- **checkpoint 由 flush 重建**：raw 设备行下载后按行生成 `SpatialTickCheckpoint`（ind/sperm 取自该行；rng_words/ecology/execution/phase 取会话当前值——GPU 无钩子/停止，故与 host 逐 tick 捕获等价）。`restore_from_checkpoint` 行为不变。
+- **A3**：设备 flush 写入与 host 相同的 boundary `phase`/`execution`，替换原默认 `(tick,0,"Ready")`。
+- **C8**：设备连续采样阈值与 host `EPS` 对齐（f32 下 `1.0f+NATAL_EPS` 回绕为 `1.0f`，注释已说明）。
+- **C11**：误用路径给出明确 `RuntimeError`。
+- 设备窗口确实超预算 / 无法配置时仍退回 host 逐记录路径（非引擎回退），行为与 §32 一致。
+
+### 56.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **184 passed, 0 failed**（含新增 4 用例） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | **3615 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| `maturin develop --features "gpu,extension-module"` | 成功；`pytest tests/test_gpu_ensemble_frontend.py` 9 passed |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`，lcov DA 合并） | 聚合 **2520/2598 = 97.00%**；executor 96.3%、kernels 97.5%、probe 96.1%，其余 100% |
+| CPU 不变性 | `git diff cd43ff9..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 仅 `lib.rs` 新增 `#[cfg(gpu)] pub mod gpu;` |
+
+> 环境备注：本机 cargo 测试需 `PYO3_PYTHON=/opt/conda/bin/python PYTHONHOME=/opt/conda` **且** `PYTHONPATH=/opt/conda/lib/python3.11/site-packages`（嵌入式解释器找 numpy）；`pytest` GPU 用例需 `LD_LIBRARY_PATH` 含 `nvidia/cu13/lib`（NVRTC），否则抛 `PanicException`。
+
+### 56.4 请 evaluator 独立核对
+
+- **raw 设备暂存正确性**：自造模型（含 `n_demes>1`、`record_every` 非整除起点、跨多次 `run_steps` 的 continuation、离散无 sperm），对照 CPU raw `HistoryStore`：tick 序列一致、逐 cell 在 f32 容差内一致；确认 raw 窗口真的设备化（`start_device_history` 返回 true），不是静默 host。
+- **`max_rows` 环**：`max_rows < records` 时保留最新 `max_rows` 行、最旧被覆盖、flush tick 从正确起点重建；raw 与观测两种模式均对照 CPU；未设 `max_rows` 时与旧行为逐位相同。
+- **checkpoint 重建（高风险重点）**：raw 设备运行后，所有仍在历史中的 record tick 都有 checkpoint 且 `restore_from_checkpoint` 重跑与参照**逐位一致**（现有 `spatial_gpu_restore_checkpoint_rewinds_device_state` 已覆盖一轮，请独立复跑并核对 rng/ecology/phase/execution 字段语义）；确认延迟到 flush 捕获不改变可恢复语义。
+- **A3**：设备 flush 行的 boundary `phase`/`execution` 与 host 路径一致。
+- **C8**：连续二项/多项/Poisson 分布对照仍统计等价（KS/卡方/矩）；确认确定性路径未受影响、替换在 f32 下行为可解释；必要时设计 frontier（n 略大于 1、p 接近 0/1、alpha 介于 1e-10 与 1e-7）。
+- **C11**：`backend` 存在但 `_gpu_ensemble_replicates==0` 时显式 `RuntimeError`（可 monkeypatch 模拟），不出现 reshape 报错。
+- **CPU 不变性 / 门禁 / 覆盖率 / Python 新增行**同既往口径；覆盖须按绝对路径过滤 `rust/src/gpu/**` 并排除 `/tests/`（`--sources src/gpu` 会误含 `src/gpu/../../tests/...`）。
+
+### 56.5 残余风险（非阻塞）
+
+- checkpoint 延迟到 flush：若设备在 `run_steps` 中途报错，未 flush 的设备行不会生成 checkpoint（host 路径会留下部分 checkpoint）；报错会话通常已失效，记为可接受差异。
+- raw 设备行是 f32（host GPU 路径本就是 f32）；CPU 对照仅统计/容差，非逐位。
+- 环容量按每次 `run_steps` 的 `min(records, max_rows)` 配置；运行期改 `max_rows` 从下一次窗口生效。
+- 每次 `run_steps` 的对齐起始边界仍走 host（一次 D2H）——既有行为，未在 B6 消除。
+- 共享 GPU 基准/显存竞争为既有环境性质。
+
+结论请追加为 **§57**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2644,3 +2708,75 @@ frontend 单群体 `enable_gpu()` / `gpu_status()` 语义正确、惰性建会�
 
 B4 单群体公开入口与文档满足合同、同步与覆盖要求；门禁全绿、Python 新增行覆盖率 100%。**APPROVED**
 （范围为当前 HEAD `0748779` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 附录 A. 全局交接快照（给下一位主 agent，2026-09-21 上下文切换）
+
+> 完整执行清单与验收口径见 `GPU_STAGE_SUMMARY.md` **§11（尤其 §11.2/§11.5/§11.6）**；本附录是索引。
+
+- **分支**：`feat/gpu-merge-test`（HEAD=`e5766ef`，工作树干净）。
+- **最新回执**：§53（B4）**APPROVED**；**待回执 §55（B5 `observe_gpu_ensemble`，已实现自测、未批准）**。
+- **已完成并 APPROVED**：P0–P6 全部；观测历史设备驻留（§32）；CSR 缓存 + 零逐 tick 回传（§28）；
+  continuous_sampling（§36）；离散世代空间 GPU（§38）；frontend ensemble（§40）；移除每 tick 缩放同步（§42）；
+  A1（§45）；A2（§49）；C10（§51）；B4（§53）。
+- **未开始（按 §11.3 顺序）**：**B6**（raw 历史设备驻留 + 窗口按 `max_rows` 收缩）→ **C8**（阈值统一）→
+  **C11**（`run_gpu_ensemble` 误用显式报错）→ **A3**（boundary metadata 对齐）。
+- **P7（设备侧声明式钩子，含 D6）**：已规划（§11.5，P7.1–P7.4），用户选定**声明式**方案、并选择**先收尾小项**；
+  P7 尚未开始。资格必须随各 opcode 解释器**逐步放开**，不得先放开后补（会静默丢钩子）。
+- **不做/低优先/待条件**：C9（已记录可不做）、B7（低优先）、E12（需空闲 GPU + release 剖析）、
+  E13（P6 性能阈值待用户口径）。
+- **沟通协议**：主 agent 交接写本文件「主 agent 交接区」（追加），请求 evaluator 回执；evaluator 写
+  「evaluator 回执区」（追加，§55 为待填）。每轮：全门禁 → 独立复核 → 再下一项。
+- **门禁与环境**：见 `GPU_STAGE_SUMMARY §9/§10`。要点：`NATAL_GPU_REQUIRE` 默认强制；NVRTC 需
+  `LD_LIBRARY_PATH`；重编带 GPU 扩展用 `maturin develop --features "gpu,extension-module"`；
+  `phase0_baseline.py --check` 必须 bit-identical；覆盖必须按绝对路径过滤 `rust/src/gpu/**` 并排除 `/tests/`。
+- **已知非阻塞残余**：设备路径无历史（年龄结构）、raw 历史未设备化、GPU checkpoint 已支持（A1）、
+  共享 GPU 基准仅定性、CSR 缓存已入预算（C10）。
+
+---
+
+## 55. 第 23 轮结论（evaluator 独立执行，2026-09-21，HEAD=`e5766ef`）
+
+### 55.1 裁定：**APPROVED**
+
+`observe_gpu_ensemble` 用种群自身的 `Observation`（与 `History` 同一个原生 `project_observation` 选择器）
+对每条 replicate 投影，形状/语义正确、非法输入显式 `ValueError`；中英文档同步；Rust 数值未改、门禁无回归。
+
+### 55.2 独立核对
+
+- **公开合同**（独立运行）：`enable_gpu_ensemble(48)` → `run_gpu_ensemble(2)` 得 `ind (48,2,4,3)`；
+  `observe_gpu_ensemble(ind)` → `obs (48,3,2,4)`，全有限；且 `obs[k]` 与 `pop.observation.apply(ind[k])`
+  **逐位一致**（rep0/rep5 验证）。
+- **输入校验**：要求 `ndim==4 且 shape[1]==2`；3-D/扁平/错 sex 轴抛 `ValueError`（作者用例 + 全量 pytest 通过）。
+- **选择器一致性**：`observe_gpu_ensemble` 走 `observation.apply`（内部即 `_engine_rs.project_observation`），
+  与 `History` 记录所用选择器相同（读代码）。
+- **文档中英同步**：`docs/en|zh/4_simulation_engine.md` §11.2 新增「Observation/观测投影」要点，两版对应。
+- **CPU 不变性**：本轮仅 Python + docs，Rust `src/gpu/**` 与 `rust/src/kernels|model|contracts|lib.rs` 未改；
+  `phase0` bit-identical。
+
+### 55.3 覆盖率（Python 新增行）
+
+`pytest tests/test_gpu_ensemble_frontend.py --cov=natal --cov-report=json`，按 diff 新增行统计：
+新增可执行 6 行，**0 未覆盖 = 100%**（含 ValueError 分支与逐 replicate 投影）。
+
+### 55.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `PYTHONUTF8=1 pytest -q` | **3615 passed** |
+| `pytest -q tests/test_gpu_ensemble_frontend.py` | 9 passed |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `cargo test` / `cargo test --features gpu` | 67 / 180 passed（Rust 未改） |
+| `python scripts/check_rust.py` | EXIT=0 |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+
+### 55.5 残余风险（非阻塞，见 §54.5）
+
+- 逐 replicate 的 Python 层投影对超大 B 有循环开销；若成为瓶颈可改设备侧整批投影（后续可选）。
+- ensemble 仍不与 per-population `History` 合并（既有，文档已述）。
+
+### 55.6 结论
+
+B5 ensemble→Observation 投影正确、与既有选择器一致、文档同步、覆盖率 100%。**APPROVED**（范围为当前 HEAD
+`e5766ef` 与被审测试集；不声称任何历史基线失败消失）。

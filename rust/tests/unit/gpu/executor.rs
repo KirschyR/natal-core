@@ -1613,6 +1613,9 @@ fn device_history_projection_matches_host_project() {
                 selected: selected.clone(),
                 collapse,
                 aggregate,
+                raw: false,
+                raw_sperm: false,
+                wrap: false,
             };
             let context = GpuContext::new(0).expect("device 0 context");
             let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
@@ -1673,6 +1676,9 @@ fn device_history_rejects_over_budget_and_empty_mask() {
         selected: selected.clone(),
         collapse: false,
         aggregate: true,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
     };
     assert!(executor.configure_history(&huge).is_err());
 
@@ -1685,6 +1691,9 @@ fn device_history_rejects_over_budget_and_empty_mask() {
         selected: selected.clone(),
         collapse: false,
         aggregate: true,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
     };
     assert!(executor.configure_history(&no_mask).is_err());
 
@@ -1697,6 +1706,9 @@ fn device_history_rejects_over_budget_and_empty_mask() {
         selected: selected.clone(),
         collapse: false,
         aggregate: true,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
     };
     assert!(executor.configure_history(&bad_dims).is_err());
     let bad_selected = HistorySpec {
@@ -1707,6 +1719,9 @@ fn device_history_rejects_over_budget_and_empty_mask() {
         selected: vec![0, 9],
         collapse: false,
         aggregate: true,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
     };
     assert!(executor.configure_history(&bad_selected).is_err());
     let bad_width = HistorySpec {
@@ -1717,6 +1732,9 @@ fn device_history_rejects_over_budget_and_empty_mask() {
         selected: selected.clone(),
         collapse: false,
         aggregate: true,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
     };
     assert!(executor.configure_history(&bad_width).is_err());
     let overflow = HistorySpec {
@@ -1727,10 +1745,26 @@ fn device_history_rejects_over_budget_and_empty_mask() {
         selected: selected.clone(),
         collapse: false,
         aggregate: false,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
     };
     assert!(executor.configure_history(&overflow).is_err());
+    let zero = HistorySpec {
+        capacity: 0,
+        width: 8,
+        dims,
+        mask: vec![1.0; plane],
+        selected: selected.clone(),
+        collapse: false,
+        aggregate: true,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
+    };
+    assert!(executor.configure_history(&zero).is_err());
 
-    // A full window refuses further rows, and clearing drops the window.
+    // A configured but unwritten window downloads nothing.
     let spec = HistorySpec {
         capacity: 1,
         width: 8,
@@ -1739,13 +1773,84 @@ fn device_history_rejects_over_budget_and_empty_mask() {
         selected,
         collapse: false,
         aggregate: true,
+        raw: false,
+        raw_sperm: false,
+        wrap: false,
     };
     executor.configure_history(&spec).expect("configure");
+    assert!(executor
+        .download_history_rows()
+        .expect("empty rows")
+        .is_empty());
     executor.record_history_row().expect("first row");
     assert!(executor.record_history_row().is_err(), "window must fill");
     assert_eq!(executor.history_width(), Some(8));
     executor.clear_history();
     assert!(executor.record_history_row().is_err(), "cleared window");
+}
+
+#[test]
+fn device_raw_history_ring_overwrites_oldest_and_orders_rows() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_batch = 2;
+    let n_ages = 2;
+    let n_ztypes = 1;
+    let ind_len = 2 * n_ages * n_ztypes * n_batch;
+    let sperm_len = n_ages * n_ztypes * n_ztypes * n_batch;
+    let width = ind_len + sperm_len;
+    // Distinct states so a wrong ring order is visible.
+    let state = |base: f32| -> (Vec<f32>, Vec<f32>) {
+        (
+            (0..ind_len).map(|i| base + i as f32).collect(),
+            (0..sperm_len).map(|i| base + i as f32).collect(),
+        )
+    };
+    let (ind, sperm) = state(0.0);
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    let spec = HistorySpec {
+        capacity: 3,
+        width,
+        dims: [n_batch, 2, n_ages, n_ztypes],
+        mask: Vec::new(),
+        selected: Vec::new(),
+        collapse: false,
+        aggregate: false,
+        raw: true,
+        raw_sperm: true,
+        wrap: true,
+    };
+    executor
+        .configure_history(&spec)
+        .expect("configure raw ring");
+    for base in [0.0f32, 100.0, 200.0, 300.0] {
+        let (ind, sperm) = state(base);
+        executor
+            .restore_state(&ind, &sperm, 0)
+            .expect("restore state");
+        executor.record_history_row().expect("record raw row");
+    }
+    assert_eq!(executor.history_dropped(), 1, "the ring drops the oldest");
+    let rows = executor.download_history_rows().expect("download rows");
+    assert_eq!(rows.len(), 3 * width, "only capacity rows survive");
+    for (slot, base) in [100.0f32, 200.0, 300.0].iter().enumerate() {
+        let (ind, sperm) = state(*base);
+        let mut want = crate::gpu::layout::batch_to_inner(&ind, &[2, n_ages, n_ztypes], n_batch)
+            .expect("ind layout");
+        want.extend(
+            crate::gpu::layout::batch_to_inner(&sperm, &[n_ages, n_ztypes, n_ztypes], n_batch)
+                .expect("sperm layout"),
+        );
+        assert_eq!(
+            &rows[slot * width..(slot + 1) * width],
+            want.as_slice(),
+            "ring slot {slot}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------

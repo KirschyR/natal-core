@@ -1310,10 +1310,11 @@ impl SpatialSession {
 
     /// Try to stage this run's history rows on the device.
     ///
-    /// Device staging applies only when the CUDA path is active, observation
-    /// (non-raw) history is bound, and the window fits in the measured free
-    /// memory. Failure is not an engine fallback: the run simply keeps the
-    /// host per-record projection path.
+    /// Device staging applies when the CUDA path is active, history is bound,
+    /// and the window fits in the measured free memory. Both raw and
+    /// observation rows stage; a `max_rows` bound clamps the window into a ring
+    /// because the host store only ever retains that many rows. Failure is not
+    /// an engine fallback: the run simply keeps the host per-record path.
     ///
     /// ## Parameters
     /// - `capacity`: Upper bound on the records this run will write.
@@ -1328,19 +1329,37 @@ impl SpatialSession {
         let Some(shared) = self.history_store.clone() else {
             return false;
         };
+        let raw_sperm = !self.discrete;
         let spec = {
             let data = shared.lock().unwrap();
-            if data.raw || data.width <= 1 {
+            if data.width <= 1 {
                 None
             } else {
+                // `max_rows` evicts oldest rows on the host, so the device only
+                // needs room for the rows that can survive: clamp and wrap.
+                let (capacity, wrap) = match data.max_rows {
+                    Some(max_rows) if max_rows < capacity => (max_rows, true),
+                    _ => (capacity, false),
+                };
                 Some(crate::gpu::executor::HistorySpec {
                     capacity,
                     width: data.width - 1,
                     dims: data.dimensions,
-                    mask: data.mask.clone(),
-                    selected: data.selected.clone(),
+                    mask: if data.raw {
+                        Vec::new()
+                    } else {
+                        data.mask.clone()
+                    },
+                    selected: if data.raw {
+                        Vec::new()
+                    } else {
+                        data.selected.clone()
+                    },
                     collapse: data.collapse_age,
                     aggregate: data.aggregate,
+                    raw: data.raw,
+                    raw_sperm,
+                    wrap,
                 })
             }
         };
@@ -1391,9 +1410,11 @@ impl SpatialSession {
 
     /// Download and append the staged device history rows, then free them.
     ///
-    /// The record ticks are reconstructed from the run's start, interval, and
-    /// the number of staged rows, so no per-row bookkeeping has to persist on
-    /// the device.
+    /// The record ticks are reconstructed from the run's start, interval, the
+    /// number of rows a clamped ring dropped, and the number of staged rows, so
+    /// no per-row bookkeeping has to persist on the device. Raw rows are
+    /// transposed back to the host batch-major layout and, like the host raw
+    /// path, contribute a restorable checkpoint each.
     ///
     /// ## Parameters
     /// - `start_tick`: Session tick when the run began.
@@ -1411,6 +1432,8 @@ impl SpatialSession {
         };
         let values = gpu.download_history_rows();
         let width = gpu.history_width().unwrap_or(0);
+        let raw = gpu.history_is_raw();
+        let dropped = gpu.history_dropped();
         gpu.clear_history();
         self.gpu = Some(gpu);
         let values = values.map_err(map_lifecycle_error)?;
@@ -1420,13 +1443,81 @@ impl SpatialSession {
         let Some(shared) = self.history_store.clone() else {
             return Ok(());
         };
+        let n_ages = self.blueprint.n_ages;
+        let n_ztypes = self.blueprint.n_ztypes;
+        let n_demes = self.blueprint.n_demes;
+        let ind_len = 2 * n_ages * n_ztypes * n_demes;
+        let phase = self.phase;
+        let execution = self.execution;
+        let rng_words: Vec<[u64; 4]> = if raw {
+            self.rngs.iter().map(SessionRng::state_words).collect()
+        } else {
+            Vec::new()
+        };
+        let ecology = self.ecology.clone();
         let mut history = shared.lock().unwrap();
-        let mut tick = (start_tick / interval + 1) * interval;
+        let mut tick = (start_tick / interval + 1 + dropped as i64) * interval;
         for row in values.chunks_exact(width) {
+            let (ind, sperm) = if raw {
+                if width < ind_len {
+                    return Err(PyValueError::new_err(
+                        "device raw history row is narrower than the state plane",
+                    ));
+                }
+                let ind_inner = &row[..ind_len];
+                let ind =
+                    crate::gpu::layout::batch_to_outer(ind_inner, &[2, n_ages, n_ztypes], n_demes)
+                        .map_err(PyValueError::new_err)?
+                        .into_iter()
+                        .map(f64::from)
+                        .collect::<Vec<f64>>();
+                let mut sperm = Vec::new();
+                if width > ind_len {
+                    sperm = crate::gpu::layout::batch_to_outer(
+                        &row[ind_len..],
+                        &[n_ages, n_ztypes, n_ztypes],
+                        n_demes,
+                    )
+                    .map_err(PyValueError::new_err)?
+                    .into_iter()
+                    .map(f64::from)
+                    .collect();
+                }
+                (ind, sperm)
+            } else {
+                (
+                    row.iter().map(|value| f64::from(*value)).collect(),
+                    Vec::new(),
+                )
+            };
             let mut host_row = Vec::with_capacity(width + 1);
             host_row.push(tick as f64);
-            host_row.extend(row.iter().map(|value| f64::from(*value)));
-            history.append_row(host_row, true)?;
+            if raw {
+                host_row.extend_from_slice(&ind);
+                host_row.extend_from_slice(&sperm);
+            } else {
+                host_row.extend_from_slice(&ind);
+            }
+            let added = history.append_row(host_row, true)?;
+            if added {
+                // A3: the device flush writes the same boundary metadata the
+                // host record path does, so restored timelines agree.
+                if let Some(boundary) = history.boundaries.back_mut() {
+                    boundary.1 = phase;
+                    boundary.2 = execution.name().to_owned();
+                }
+                if raw {
+                    self.checkpoints.push(SpatialTickCheckpoint {
+                        execution,
+                        phase,
+                        tick,
+                        ind,
+                        sperm,
+                        rng_words: rng_words.clone(),
+                        ecology: ecology.clone(),
+                    });
+                }
+            }
             tick += interval;
         }
         Ok(())

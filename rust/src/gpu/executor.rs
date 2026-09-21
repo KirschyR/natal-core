@@ -106,7 +106,7 @@ struct MigrationCache {
 pub struct HistorySpec {
     /// Number of record rows this window may hold.
     pub capacity: usize,
-    /// Projected values per row, excluding the host-added tick column.
+    /// Values per row, excluding the host-added tick column.
     pub width: usize,
     /// Population dimensions `[n_demes, n_sexes, n_ages, n_ztypes]`.
     pub dims: [usize; 4],
@@ -118,20 +118,41 @@ pub struct HistorySpec {
     pub collapse: bool,
     /// Aggregate all selected demes into one output column.
     pub aggregate: bool,
+    /// Stage raw state rows (batch-major on the host) instead of observation
+    /// projections. Raw rows hold the device-native `ind`/`sperm` planes and are
+    /// transposed on flush.
+    pub raw: bool,
+    /// Raw rows include the stored-sperm plane. Discrete demes carry none.
+    pub raw_sperm: bool,
+    /// Treat `capacity` as a bounded ring. Set when the window was clamped by
+    /// `max_rows`, so exceeding it overwrites the oldest row instead of
+    /// failing. Exact windows keep the hard "full" guard.
+    pub wrap: bool,
 }
 
-/// Device-resident observation history rows for the current run.
+/// Device-resident history rows for the current run.
 ///
-/// Rows are projected on the device and downloaded once, so a long run does
-/// not synchronize host state at every record tick. Only observation-mode
-/// (non-raw) history is staged; raw rows keep the host path.
+/// Observation rows are projected on the device and raw rows copy the state
+/// planes; either way they are downloaded once, so a long run does not
+/// synchronize host state at every record tick. `wrap` rows live in a ring
+/// whose oldest entry is overwritten once a `max_rows`-clamped window fills.
 struct DeviceHistory {
-    /// Projected values per row, excluding the tick column.
+    /// Values per row, excluding the tick column.
     width: usize,
     /// Allocated row capacity.
     capacity: usize,
-    /// Rows written so far.
+    /// Valid rows currently held (`<= capacity`).
     rows: usize,
+    /// Ring index of the oldest valid row.
+    head: usize,
+    /// Total rows ever recorded; `written - rows` were overwritten.
+    written: usize,
+    /// Stage raw state rows instead of observation projections.
+    raw: bool,
+    /// Raw rows include the stored-sperm plane.
+    raw_sperm: bool,
+    /// Overwrite the oldest row once full instead of erroring.
+    wrap: bool,
     /// Number of observation groups.
     n_groups: usize,
     /// `n_sexes · n_ages · n_ztypes`.
@@ -152,9 +173,9 @@ struct DeviceHistory {
     collapse: bool,
     /// Deme aggregation flag.
     aggregate: bool,
-    /// Observation weights uploaded as `f32`.
+    /// Observation weights uploaded as `f32` (empty for raw windows).
     mask: DeviceBuffer<f32>,
-    /// Selected deme indices uploaded as `i32`.
+    /// Selected deme indices uploaded as `i32` (empty for raw windows).
     selected: DeviceBuffer<i32>,
     /// Row-major row storage, `capacity · width`.
     buffer: DeviceBuffer<f32>,
@@ -1418,24 +1439,37 @@ impl GpuExecutor {
                 spec.dims, self.n_ages, self.n_ztypes
             ));
         }
-        if spec.mask.is_empty() || spec.mask.len() % plane != 0 {
-            return Err(format!(
-                "history mask length {} is not a positive multiple of the state plane {plane}",
-                spec.mask.len()
-            ));
+        if spec.capacity == 0 {
+            return Err("history spec capacity must be positive".to_owned());
         }
-        if spec.selected.is_empty() || spec.selected.iter().any(|index| *index >= d) {
-            return Err("history deme selection is empty or out of range".to_owned());
-        }
-        let groups = spec.mask.len() / plane;
-        let out_d = if spec.aggregate {
-            1
+        // Raw rows carry the state planes; observation rows carry a projection.
+        let (groups, out_d, out_a, width) = if spec.raw {
+            let ind = d * s * a * z;
+            let sperm = if spec.raw_sperm { d * a * z * z } else { 0 };
+            let width = ind
+                .checked_add(sperm)
+                .ok_or_else(|| "history raw width overflow".to_owned())?;
+            (0, 0, 0, width)
         } else {
-            spec.selected.len()
+            if spec.mask.is_empty() || spec.mask.len() % plane != 0 {
+                return Err(format!(
+                    "history mask length {} is not a positive multiple of the state plane {plane}",
+                    spec.mask.len()
+                ));
+            }
+            if spec.selected.is_empty() || spec.selected.iter().any(|index| *index >= d) {
+                return Err("history deme selection is empty or out of range".to_owned());
+            }
+            let groups = spec.mask.len() / plane;
+            let out_d = if spec.aggregate {
+                1
+            } else {
+                spec.selected.len()
+            };
+            let out_a = if spec.collapse { 1 } else { a };
+            (groups, out_d, out_a, groups * out_d * s * out_a)
         };
-        let out_a = if spec.collapse { 1 } else { a };
-        let width = groups * out_d * s * out_a;
-        if spec.capacity == 0 || spec.width != width {
+        if spec.width != width {
             return Err(format!(
                 "history spec width mismatch: computed {width}, got {}",
                 spec.width
@@ -1471,6 +1505,11 @@ impl GpuExecutor {
             width,
             capacity: spec.capacity,
             rows: 0,
+            head: 0,
+            written: 0,
+            raw: spec.raw,
+            raw_sperm: spec.raw_sperm,
+            wrap: spec.wrap,
             n_groups: groups,
             plane,
             n_selected: spec.selected.len(),
@@ -1501,43 +1540,110 @@ impl GpuExecutor {
             .history
             .take()
             .ok_or_else(|| "device history is not configured".to_owned())?;
-        if history.rows >= history.capacity {
+        if history.rows >= history.capacity && !history.wrap {
             self.history = Some(history);
             return Err("device history window is full".to_owned());
         }
-        let row_offset = history.rows * history.width;
+        // A ring window overwrites its oldest row once full; an exact window
+        // only ever fills up to `capacity` and is guarded above.
+        let position = if history.rows < history.capacity {
+            (history.head + history.rows) % history.capacity
+        } else {
+            history.head
+        };
+        let row_offset = position * history.width;
         let stream = self.context.stream();
-        let result = self.kernels.observation_project(
-            &stream,
-            self.ind.slice(),
-            history.mask.slice(),
-            history.selected.slice(),
-            history.n_groups,
-            history.plane,
-            history.n_selected,
-            history.n_sexes,
-            history.n_ages,
-            history.n_ztypes,
-            self.n_batch,
-            history.collapse,
-            history.aggregate,
-            history.out_d,
-            history.out_a,
-            row_offset,
-            history.buffer.slice_mut(),
-        );
+        let result = if history.raw {
+            self.copy_raw_history_row(&mut history, row_offset)
+        } else {
+            self.kernels.observation_project(
+                &stream,
+                self.ind.slice(),
+                history.mask.slice(),
+                history.selected.slice(),
+                history.n_groups,
+                history.plane,
+                history.n_selected,
+                history.n_sexes,
+                history.n_ages,
+                history.n_ztypes,
+                self.n_batch,
+                history.collapse,
+                history.aggregate,
+                history.out_d,
+                history.out_a,
+                row_offset,
+                history.buffer.slice_mut(),
+            )
+        };
         if result.is_ok() {
-            history.rows += 1;
+            history.written += 1;
+            if history.rows < history.capacity {
+                history.rows += 1;
+            } else {
+                history.head = (history.head + 1) % history.capacity;
+            }
         }
         self.history = Some(history);
         result
     }
 
+    /// Copy the current state planes into a raw history row (device to device).
+    ///
+    /// The row keeps the device-native batch-minor layout; the session
+    /// transposes it back when it flushes the window.
+    ///
+    /// ## Parameters
+    /// - `history`: The taken device window being written.
+    /// - `row_offset`: Element offset of the row inside the window buffer.
+    ///
+    /// ## Errors
+    /// Returns a description when the row lies outside the allocation or a copy
+    /// fails.
+    fn copy_raw_history_row(
+        &self,
+        history: &mut DeviceHistory,
+        row_offset: usize,
+    ) -> Result<(), String> {
+        let stream = self.context.stream();
+        let ind_len = 2 * self.n_ages * self.n_ztypes * self.n_batch;
+        let sperm_start = row_offset
+            .checked_add(ind_len)
+            .ok_or_else(|| "history row offset overflow".to_owned())?;
+        let end = row_offset
+            .checked_add(history.width)
+            .ok_or_else(|| "history row offset overflow".to_owned())?;
+        if end > history.buffer.len() || sperm_start > end {
+            return Err("history row offset out of range".to_owned());
+        }
+        {
+            let mut view = history
+                .buffer
+                .slice_mut()
+                .try_slice_mut(row_offset..sperm_start)
+                .ok_or_else(|| "history ind slice out of range".to_owned())?;
+            stream
+                .memcpy_dtod(self.ind.slice(), &mut view)
+                .map_err(|err| format!("history ind copy failed: {err}"))?;
+        }
+        if history.raw_sperm {
+            let mut view = history
+                .buffer
+                .slice_mut()
+                .try_slice_mut(sperm_start..end)
+                .ok_or_else(|| "history sperm slice out of range".to_owned())?;
+            stream
+                .memcpy_dtod(self.sperm.slice(), &mut view)
+                .map_err(|err| format!("history sperm copy failed: {err}"))?;
+        }
+        Ok(())
+    }
+
     /// Copy the staged history rows back, flushing them from the device.
     ///
     /// ## Returns
-    /// Row-major `rows · width` values, or an empty vector when no window is
-    /// configured.
+    /// Row-major `rows · width` values in chronological order (the ring's
+    /// oldest row first), or an empty vector when no window is configured.
     ///
     /// ## Errors
     /// Returns a description when the device-to-host copy fails.
@@ -1545,17 +1651,45 @@ impl GpuExecutor {
         let Some(history) = self.history.as_ref() else {
             return Ok(Vec::new());
         };
+        if history.rows == 0 {
+            return Ok(Vec::new());
+        }
         let stream = self.context.stream();
         let all = history.buffer.to_host(&stream)?;
-        Ok(all[..history.rows * history.width].to_vec())
+        let mut rows = Vec::with_capacity(history.rows * history.width);
+        for index in 0..history.rows {
+            let position = (history.head + index) % history.capacity;
+            let start = position * history.width;
+            rows.extend_from_slice(&all[start..start + history.width]);
+        }
+        Ok(rows)
     }
 
-    /// Projected values per staged history row.
+    /// Values per staged history row.
     ///
     /// ## Returns
     /// The row width, or `None` when no window is configured.
     pub fn history_width(&self) -> Option<usize> {
         self.history.as_ref().map(|history| history.width)
+    }
+
+    /// Whether the staged window holds raw state rows instead of projections.
+    ///
+    /// ## Returns
+    /// `true` for a raw window, `false` when no window is configured or it
+    /// holds observation projections.
+    pub fn history_is_raw(&self) -> bool {
+        self.history.as_ref().is_some_and(|history| history.raw)
+    }
+
+    /// How many oldest rows a clamped ring window has overwritten.
+    ///
+    /// ## Returns
+    /// `written - rows`, or `0` when no window is configured.
+    pub fn history_dropped(&self) -> usize {
+        self.history
+            .as_ref()
+            .map_or(0, |history| history.written - history.rows)
     }
 
     /// Drop the device history window, releasing its memory.

@@ -513,16 +513,20 @@ fn spatial_device_history_falls_back_for_raw_or_missing_window() {
     gpu.enable_gpu().expect("enable gpu");
     assert!(!gpu.start_device_history(2));
 
-    // Raw history is full-state: it keeps the host per-record path.
+    // Raw history stages on the device too: full-state rows are copied into a
+    // device window and transposed back on flush.
     let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
     gpu.history_store = Some(HistoryData::transient(raw_width, dims, true));
-    assert!(!gpu.start_device_history(2));
+    assert!(
+        gpu.start_device_history(2),
+        "raw device history staging must be available"
+    );
     gpu.run_steps(2, 1).expect("raw gpu run");
     let ticks: Vec<i64> = {
         let data = gpu.history_store.as_ref().unwrap().lock().unwrap();
         data.rows.iter().map(|row| row[0] as i64).collect()
     };
-    assert_eq!(ticks, vec![0, 1, 2], "raw history must keep host recording");
+    assert_eq!(ticks, vec![0, 1, 2], "raw history records every boundary");
 
     // Observation history on the same GPU session uses the device window.
     gpu.history_store = Some(configured_history(
@@ -533,6 +537,191 @@ fn spatial_device_history_falls_back_for_raw_or_missing_window() {
         true,
     ));
     assert!(gpu.start_device_history(2));
+}
+
+/// Build a raw history store, optionally with a `max_rows` retention bound.
+fn raw_history(dims: [usize; 4], raw_width: usize, max_rows: Option<usize>) -> SharedHistory {
+    let store = HistoryData::transient(raw_width, dims, true);
+    store.lock().unwrap().max_rows = max_rows;
+    store
+}
+
+/// Read `(flat values, width, ticks)` from a bound history store.
+fn history_snapshot(store: &SharedHistory) -> (Vec<f64>, usize, Vec<i64>) {
+    let data = store.lock().unwrap();
+    let (flat, _) = data.flat_rows();
+    let ticks = data.rows.iter().map(|row| row[0] as i64).collect();
+    (flat, data.width, ticks)
+}
+
+/// Compare two history snapshots with the f32 arithmetic tolerance.
+fn assert_history_close(
+    got: (Vec<f64>, usize, Vec<i64>),
+    want: (Vec<f64>, usize, Vec<i64>),
+    label: &str,
+) {
+    let (g_flat, g_width, g_ticks) = got;
+    let (c_flat, c_width, c_ticks) = want;
+    assert_eq!(g_width, c_width, "{label}: width");
+    assert_eq!(g_ticks, c_ticks, "{label}: ticks");
+    assert_eq!(g_flat.len(), c_flat.len(), "{label}: length");
+    for (index, (got, want)) in g_flat.iter().zip(c_flat.iter()).enumerate() {
+        let got = *got as f32;
+        let want = *want as f32;
+        let tolerance = 1e-4f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "{label} [{index}]: device {got} vs host {want}"
+        );
+    }
+}
+
+#[test]
+fn spatial_device_history_raw_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
+    for interval in [1i64, 2, 3] {
+        let gpu_store = raw_history(dims, raw_width, None);
+        let mut gpu = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        gpu.enable_gpu().expect("enable gpu");
+        gpu.history_store = Some(gpu_store.clone());
+        // Guard against a silent host fallback: the raw window must be usable.
+        assert!(
+            gpu.start_device_history((6 / interval) as usize),
+            "raw device staging must be available"
+        );
+        gpu.run_steps(6, interval).expect("gpu run_steps");
+
+        let cpu_store = raw_history(dims, raw_width, None);
+        let mut cpu = make_session(
+            blueprint.clone(),
+            ecology.clone(),
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        cpu.history_store = Some(cpu_store.clone());
+        cpu.run_steps(6, interval).expect("cpu run_steps");
+
+        assert_history_close(
+            history_snapshot(&gpu_store),
+            history_snapshot(&cpu_store),
+            &format!("raw interval={interval}"),
+        );
+    }
+}
+
+#[test]
+fn spatial_device_history_raw_respects_max_rows() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let raw_width = 1 + 3 * 2 * 4 * 2 + 3 * 4 * 2 * 2;
+    let max_rows = 3usize;
+    let gpu_store = raw_history(dims, raw_width, Some(max_rows));
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.enable_gpu().expect("enable gpu");
+    gpu.history_store = Some(gpu_store.clone());
+    // The window request is clamped to `max_rows`; the run overflows it.
+    assert!(gpu.start_device_history(6), "raw ring must be available");
+    gpu.run_steps(6, 1).expect("gpu run_steps");
+
+    let cpu_store = raw_history(dims, raw_width, Some(max_rows));
+    let mut cpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    cpu.history_store = Some(cpu_store.clone());
+    cpu.run_steps(6, 1).expect("cpu run_steps");
+
+    let gpu_snapshot = history_snapshot(&gpu_store);
+    assert_eq!(
+        gpu_snapshot.2,
+        vec![4, 5, 6],
+        "the ring must keep the newest max_rows boundaries"
+    );
+    assert_history_close(gpu_snapshot, history_snapshot(&cpu_store), "raw max_rows");
+}
+
+#[test]
+fn spatial_device_history_observation_respects_max_rows() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let dims = [3usize, 2, 4, 2];
+    let plane = 2 * 4 * 2;
+    let max_rows = 3usize;
+    let gpu_store = configured_history(dims, vec![1.0; plane], vec![0, 1, 2], false, false);
+    gpu_store.lock().unwrap().max_rows = Some(max_rows);
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.enable_gpu().expect("enable gpu");
+    gpu.history_store = Some(gpu_store.clone());
+    assert!(
+        gpu.start_device_history(6),
+        "observation ring must be available"
+    );
+    gpu.run_steps(6, 1).expect("gpu run_steps");
+
+    let cpu_store = configured_history(dims, vec![1.0; plane], vec![0, 1, 2], false, false);
+    cpu_store.lock().unwrap().max_rows = Some(max_rows);
+    let mut cpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    cpu.history_store = Some(cpu_store.clone());
+    cpu.run_steps(6, 1).expect("cpu run_steps");
+
+    let gpu_snapshot = history_snapshot(&gpu_store);
+    assert_eq!(
+        gpu_snapshot.2,
+        vec![4, 5, 6],
+        "the ring must keep the newest max_rows boundaries"
+    );
+    assert_history_close(
+        gpu_snapshot,
+        history_snapshot(&cpu_store),
+        "observation max_rows",
+    );
 }
 
 /// Flatten a session's bound history store into `(flat values, width)`.
@@ -653,6 +842,9 @@ fn evaluator_configure_history_over_budget_is_explicit() {
         selected: vec![0, 1, 2],
         collapse: true,
         aggregate: false,
+        raw: false,
+        raw_sperm: true,
+        wrap: false,
     };
     let mut gpu = session.gpu.take().expect("executor");
     let result = gpu.configure_history(&huge);

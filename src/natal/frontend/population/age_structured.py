@@ -1092,12 +1092,12 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
             RuntimeError: If :meth:`enable_gpu_ensemble` was not called first.
         """
         backend = self._rust_lifecycle_backend
-        if backend is None:
+        replicates = int(self._gpu_ensemble_replicates)
+        if backend is None or replicates < 1:
             raise RuntimeError(
                 "run_gpu_ensemble requires enable_gpu_ensemble first"
             )
         tick, ind, sperm = backend.run_gpu_ensemble(int(n_ticks))
-        replicates = int(self._gpu_ensemble_replicates)
         state = self._live_state().individual_count
         n_ages = int(state.shape[1])
         n_ztypes = int(state.shape[2])

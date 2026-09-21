@@ -770,6 +770,10 @@ extern "C" __global__ void fill_uniform(
 /// conditional-binomial loop to the outer axis all threads advance together
 /// (§4.2 plan C).
 const SAMPLING_SOURCE: &str = r#"
+// Device mirror of the host RNG module's `EPS` (1e-10). Continuous samplers
+// use it for their zero/one guards; adding it to 1.0f rounds back to 1.0f in
+// f32, so `1.0f + NATAL_EPS` is the faithful f32 form of the host `1.0 + EPS`.
+#define NATAL_EPS 1e-10f
 struct RngState {
     unsigned long long counter;
     unsigned int key0;
@@ -953,18 +957,18 @@ __device__ __forceinline__ float sample_continuous_binomial(
     if (!isfinite(n) || !isfinite(p)) {
         return 0.0f;
     }
-    if (p <= 1e-12f) {
+    if (p <= NATAL_EPS) {
         return 0.0f;
     }
-    if (p >= 1.0f - 1e-12f) {
+    if (p >= 1.0f - NATAL_EPS) {
         return n;
     }
-    if (n <= 1.0f + 1e-12f) {
+    if (n <= 1.0f + NATAL_EPS) {
         return n * p;
     }
     float concentration = n - 1.0f;
-    float alpha = fmaxf(p * concentration, 1e-12f);
-    float beta = fmaxf((1.0f - p) * concentration, 1e-12f);
+    float alpha = fmaxf(p * concentration, NATAL_EPS);
+    float beta = fmaxf((1.0f - p) * concentration, NATAL_EPS);
     float numerator = sample_gamma(state, alpha, 1.0f);
     float denominator = sample_gamma(state, beta, 1.0f);
     if (numerator == 0.0f) {
@@ -976,7 +980,7 @@ __device__ __forceinline__ float sample_continuous_binomial(
 // Continuous Poisson analogue: a Gamma(shape=lambda, scale=1) draw.
 __device__ __forceinline__ float sample_continuous_poisson(RngState* state, float lambda)
 {
-    if (!isfinite(lambda) || lambda <= 1e-12f) {
+    if (!isfinite(lambda) || lambda <= NATAL_EPS) {
         return 0.0f;
     }
     return sample_gamma(state, lambda, 1.0f);
@@ -986,7 +990,7 @@ __device__ __forceinline__ float sample_continuous_poisson(RngState* state, floa
 __device__ __forceinline__ void natal_continuous_multinomial(
     RngState* state, float n, const float* p, int K, float* out)
 {
-    if (n <= 1.0f + 1e-7f) {
+    if (n <= 1.0f + NATAL_EPS) {
         for (int k = 0; k < K; ++k) {
             out[k] = n * p[k];
         }
@@ -996,11 +1000,11 @@ __device__ __forceinline__ void natal_continuous_multinomial(
     float sum_gamma = 0.0f;
     for (int k = 0; k < K; ++k) {
         float alpha = p[k] * concentration;
-        float value = (alpha <= 1e-12f) ? 0.0f : sample_gamma(state, alpha, 1.0f);
+        float value = (alpha <= NATAL_EPS) ? 0.0f : sample_gamma(state, alpha, 1.0f);
         out[k] = value;
         sum_gamma += value;
     }
-    if (sum_gamma > 1e-12f) {
+    if (sum_gamma > NATAL_EPS) {
         float factor = n / sum_gamma;
         for (int k = 0; k < K; ++k) {
             out[k] *= factor;
@@ -1015,7 +1019,7 @@ __device__ __forceinline__ void natal_continuous_multinomial(
         total += out[k];
     }
     float tolerance = 1e-6f * fmaxf(n, 1.0f);
-    if (total > 1e-12f && fabsf(total - n) > tolerance) {
+    if (total > NATAL_EPS && fabsf(total - n) > tolerance) {
         float correction = n / total;
         for (int k = 0; k < K; ++k) {
             out[k] *= correction;

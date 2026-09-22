@@ -1687,3 +1687,271 @@ fn evaluator_set_param_committed_on_stop_matches_cpu() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for the §66 set_param-on-stop fix and the §65.5
+// stochastic-equivalence sweep.
+// ---------------------------------------------------------------------------
+
+/// Build a session with an explicit RNG seed (both engines).
+fn make_session_seeded(
+    blueprint: Blueprint,
+    params: EcologyParams,
+    genetics: GeneticsTensors,
+    seed: u64,
+    state_ind: Vec<f64>,
+    state_sperm: Vec<f64>,
+) -> AgeStructuredSession {
+    AgeStructuredSession::assemble(blueprint, params, genetics, seed, state_ind, state_sperm)
+}
+
+/// `SET_PARAM(carrying_capacity * 0.5)` followed by a `STOP_IF_BELOW` that
+/// always fires, placed at one event.
+fn setparam_stop_program(event: usize, stop_type: i64) -> HookProgram {
+    let mut events: [Vec<EvalHook>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    events[event] = vec![EvalHook {
+        ops: vec![eval_op(10, 0.0), eval_op(stop_type, 1e9)],
+        deme_type: 0,
+        deme_data: Vec::new(),
+    }];
+    let mut p = eval_program(events);
+    p.sp_param_ids = vec![0, -1];
+    p.sp_every = vec![1, 1];
+    p.sp_start = vec![0, 0];
+    p.rpn_offsets = vec![0, 3, 3];
+    p.rpn_kinds = vec![1, 0, 4];
+    p.rpn_payload = vec![0, 0, 0];
+    p.sp_literals = vec![0.5];
+    p.has_set_param = true;
+    p
+}
+
+#[test]
+fn evaluator_set_param_committed_on_stop_middle_and_late_events() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        for event in [1usize, 2] {
+            let (blueprint, params, genetics) = fixture();
+            let (ind, sperm) = initial_state();
+            let mut gpu = make_session(
+                blueprint.clone(),
+                params.clone(),
+                genetics.clone(),
+                ind.clone(),
+                sperm.clone(),
+            );
+            gpu.hooks = setparam_stop_program(event, 7);
+            gpu.enable_gpu().expect("enable gpu");
+            let (_, _, gpu_stopped) = gpu.run_inner(py, 1, 0, None, 0).expect("gpu run");
+
+            let mut cpu = make_session(blueprint, params, genetics, ind, sperm);
+            cpu.hooks = setparam_stop_program(event, 7);
+            let (_, _, cpu_stopped) = cpu.run_inner(py, 1, 0, None, 0).expect("cpu run");
+
+            assert!(gpu_stopped && cpu_stopped, "event {event}: both must stop");
+            assert_eq!(gpu.state_tick, cpu.state_tick, "event {event}: tick");
+            let g = gpu.params.eco_value(0, 0);
+            let c = cpu.params.eco_value(0, 0);
+            assert!(
+                (g - c).abs() <= 1.2e-6 * c.abs().max(1.0),
+                "event {event}: committed set_param diverged device {g} vs host {c}"
+            );
+            eval_assert_close(
+                &(gpu.state_ind.clone(), gpu.state_sperm.clone()),
+                &(cpu.state_ind.clone(), cpu.state_sperm.clone()),
+                1.2e-5,
+                &format!("event {event} partial state"),
+            );
+        }
+    });
+}
+
+#[test]
+fn evaluator_set_param_committed_on_stop_stochastic_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (mut blueprint, params, genetics) = fixture();
+        blueprint.stochastic = true;
+        let (ind, sperm) = initial_state();
+        let program = setparam_stop_program(0, 7);
+
+        let mut gpu = make_session_seeded(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            7,
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.hooks = program;
+        gpu.enable_gpu().expect("enable gpu");
+        let (_, _, gpu_stopped) = gpu.run_inner(py, 1, 0, None, 0).expect("gpu run");
+
+        let mut cpu = make_session_seeded(blueprint, params, genetics, 7, ind, sperm);
+        cpu.hooks = setparam_stop_program(0, 7);
+        let (_, _, cpu_stopped) = cpu.run_inner(py, 1, 0, None, 0).expect("cpu run");
+
+        assert!(gpu_stopped && cpu_stopped, "both must stop");
+        // The set_param write is deterministic; stochastic state may differ.
+        let g = gpu.params.eco_value(0, 0);
+        let c = cpu.params.eco_value(0, 0);
+        assert!(
+            (g - c).abs() <= 1.2e-6 * c.abs().max(1.0),
+            "stochastic stop: committed set_param diverged device {g} vs host {c}"
+        );
+    });
+}
+
+#[test]
+fn evaluator_set_param_persists_across_repeated_stops() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let initial = params.eco_value(0, 0);
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.hooks = setparam_stop_program(0, 7);
+        gpu.enable_gpu().expect("enable gpu");
+
+        let mut cpu = make_session(blueprint, params, genetics, ind, sperm);
+        cpu.hooks = setparam_stop_program(0, 7);
+
+        let mut expected = initial;
+        for round in 0..3 {
+            let (_, _, gs) = gpu.run_inner(py, 1, 0, None, 0).expect("gpu run");
+            let (_, _, cs) = cpu.run_inner(py, 1, 0, None, 0).expect("cpu run");
+            assert!(gs && cs, "round {round}: both must stop");
+            expected *= 0.5;
+            let g = gpu.params.eco_value(0, 0);
+            let c = cpu.params.eco_value(0, 0);
+            assert!(
+                (g - c).abs() <= 1.2e-6 * c.abs().max(1.0),
+                "round {round}: device {g} vs host {c}"
+            );
+            assert!(
+                (c - expected).abs() <= 1.2e-6 * expected.abs().max(1.0),
+                "round {round}: host {c} != expected {expected}"
+            );
+        }
+    });
+}
+
+/// Draw one stochastic-hook trajectory total for one engine/seed.
+fn stochastic_total<F: Fn() -> HookProgram>(make: &F, seed: u64, gpu: bool, ticks: i64) -> f64 {
+    let (mut blueprint, params, genetics) = fixture();
+    blueprint.stochastic = true;
+    let (ind, sperm) = initial_state();
+    let mut session = make_session_seeded(blueprint, params, genetics, seed, ind, sperm);
+    session.hooks = make();
+    if gpu {
+        session.enable_gpu().expect("enable gpu");
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        session
+            .run_inner(py, ticks, 0, None, 0)
+            .expect("stochastic run");
+    });
+    session.state_ind.iter().sum()
+}
+
+#[test]
+fn evaluator_device_stochastic_hooks_statistically_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // SAMPLE(150) on a stochastic model. The device and host streams differ, so
+    // only the distribution must match (§5.2).
+    let make = || {
+        eval_program([
+            Vec::new(),
+            vec![eval_hook(eval_op(5, 150.0))],
+            Vec::new(),
+            Vec::new(),
+        ])
+    };
+    let n = 100u64;
+    let cpu: Vec<f64> = (0..n)
+        .map(|s| stochastic_total(&make, s, false, 4))
+        .collect();
+    let gpu: Vec<f64> = (0..n)
+        .map(|s| stochastic_total(&make, s, true, 4))
+        .collect();
+    let mut gpu_pairs: Vec<(u64, f64)> = (0..n).map(|s| (s, gpu[s as usize])).collect();
+    gpu_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    let mut cpu_pairs: Vec<(u64, f64)> = (0..n).map(|s| (s, cpu[s as usize])).collect();
+    cpu_pairs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+    eprintln!("STOCH GPU top: {:?}", &gpu_pairs[..5]);
+    eprintln!("STOCH CPU top: {:?}", &cpu_pairs[..5]);
+
+    let mean = |values: &[f64]| values.iter().sum::<f64>() / values.len() as f64;
+    let variance = |values: &[f64]| {
+        let m = mean(values);
+        values.iter().map(|x| (x - m) * (x - m)).sum::<f64>() / (values.len() as f64 - 1.0)
+    };
+    let (mc, mg) = (mean(&cpu), mean(&gpu));
+    let (sc, sg) = (variance(&cpu).sqrt(), variance(&gpu).sqrt());
+    assert!(sc > 0.0 && sg > 0.0, "seeds did not produce variance");
+    let se = (sc * sc / n as f64 + sg * sg / n as f64).sqrt();
+    let t = (mg - mc) / se;
+    let ratio = sg / sc;
+    // Calibration: split each engine's sample in half and compare the halves.
+    let half = cpu.len() / 2;
+    let cpu_a = &cpu[..half];
+    let cpu_b = &cpu[half..];
+    let gpu_a = &gpu[..half];
+    let gpu_b = &gpu[half..];
+    let sd = |values: &[f64]| variance(values).sqrt();
+    let control_cc = sd(cpu_a) / sd(cpu_b);
+    let control_gg = sd(gpu_a) / sd(gpu_b);
+    // A simple two-sample KS statistic on the (sorted) samples.
+    let mut sorted_cpu = cpu.clone();
+    let mut sorted_gpu = gpu.clone();
+    sorted_cpu.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    sorted_gpu.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mut ks = 0.0f64;
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < sorted_cpu.len() && j < sorted_gpu.len() {
+        let cdf_c = (i + 1) as f64 / sorted_cpu.len() as f64;
+        let cdf_g = (j + 1) as f64 / sorted_gpu.len() as f64;
+        ks = ks.max((cdf_c - cdf_g).abs());
+        if sorted_cpu[i] <= sorted_gpu[j] {
+            i += 1;
+        } else {
+            j += 1;
+        }
+    }
+    eprintln!(
+        "STOCH STAT n={n} cpu_mean={mc:.3} cpu_sd={sc:.3} gpu_mean={mg:.3} gpu_sd={sg:.3} t={t:.2} var_ratio={ratio:.3} control_cc={control_cc:.3} control_gg={control_gg:.3} ks={ks:.3}"
+    );
+    assert!(
+        t.abs() < 4.0,
+        "stochastic hook means differ: cpu={mc:.3} gpu={mg:.3} t={t:.2}"
+    );
+    assert!(
+        (0.5..2.0).contains(&ratio),
+        "stochastic hook variance ratio out of band: {ratio:.3}"
+    );
+    // Two-sample KS at n=100: 5% critical value is ~0.19.
+    assert!(ks < 0.25, "stochastic hook ECDFs differ: ks={ks:.3}");
+}

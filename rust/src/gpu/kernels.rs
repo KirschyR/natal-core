@@ -2250,6 +2250,10 @@ extern "C" __global__ void discrete_survival(
 /// device flag; `SET_PARAM` writes the ecology scratch. One thread owns one
 /// batch element.
 const HOOK_SOURCE: &str = r#"
+// Ecosystem scalars addressable by `SET_PARAM`, matching the host
+// `N_ECO_PARAMS` wire contract. The scratch is batch-major, one row per demE.
+#define NATAL_N_ECO_PARAMS 5
+
 __device__ __forceinline__ float hook_clamp01(float x)
 {
     if (x <= 0.0f) {
@@ -2529,7 +2533,7 @@ __device__ __forceinline__ int hook_deme_matches(
 extern "C" __global__ void apply_hook_event(
     float* ind,
     float* sperm,
-    int* stop_flag,
+    int* stop_mask,
     float* eco,
     const int* hook_offsets,
     const int* op_offsets,
@@ -2570,6 +2574,11 @@ extern "C" __global__ void apply_hook_event(
     if (b >= n_batch) {
         return;
     }
+    // A demE already stopped this tick skips its remaining events.
+    if (stop_mask[b]) {
+        return;
+    }
+    float* eco_row = eco + (long long)b * NATAL_N_ECO_PARAMS;
     // One reproducible counter-based stream per batch element; hook draws use
     // a site that does not collide with the lifecycle stages.
     RngState rng;
@@ -2697,7 +2706,7 @@ extern "C" __global__ void apply_hook_event(
                         }
                     }
                     if (total <= 0.0f) {
-                        *stop_flag = 1;
+                        stop_mask[b] = 1;
                         return;
                     }
                 } else {
@@ -2724,7 +2733,7 @@ extern "C" __global__ void apply_hook_event(
                     if ((op_type == 6 && selected_total <= 0.0f)
                         || (op_type == 7 && selected_total < param)
                         || (op_type == 8 && selected_total > param)) {
-                        *stop_flag = 1;
+                        stop_mask[b] = 1;
                         return;
                     }
                 }
@@ -2736,15 +2745,35 @@ extern "C" __global__ void apply_hook_event(
                 if (tick >= (long long)sp_start_tick && sp_every_tick > 0
                     && (tick - (long long)sp_start_tick) % (long long)sp_every_tick == 0) {
                     float value = hook_eval_rpn(
-                        rpn_offsets, rpn_kinds, rpn_payload, sp_literals, eco, op);
+                        rpn_offsets, rpn_kinds, rpn_payload, sp_literals, eco_row, op);
                     int param_id = sp_param_ids[op];
-                    if (param_id >= 0 && param_id < 5) {
-                        eco[param_id] = value;
+                    if (param_id >= 0 && param_id < NATAL_N_ECO_PARAMS) {
+                        eco_row[param_id] = value;
                     }
                 }
             }
         }
     }
+}
+
+// Element-wise copy of a single batch element's plane, used to save/restore a
+// stopped demE's state while the other demEs keep ticking. `total` is the
+// plane length; the batch index is `i % n_batch`.
+extern "C" __global__ void hook_copy_batch(
+    float* dst,
+    const float* src,
+    long long total,
+    int n_batch,
+    int batch)
+{
+    long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+    if (i >= total) {
+        return;
+    }
+    if ((int)(i % (long long)n_batch) != batch) {
+        return;
+    }
+    dst[i] = src[i];
 }
 "#;
 
@@ -2867,6 +2896,8 @@ pub struct Kernels {
     discrete_survival: CudaFunction,
     /// `apply_hook_event(...)`.
     apply_hook_event: CudaFunction,
+    /// `hook_copy_batch(...)`.
+    hook_copy_batch: CudaFunction,
 }
 
 impl Kernels {
@@ -2974,6 +3005,9 @@ impl Kernels {
         let apply_hook_event = module
             .load_function("apply_hook_event")
             .map_err(|err| format!("loading kernel `apply_hook_event` failed: {err}"))?;
+        let hook_copy_batch = module
+            .load_function("hook_copy_batch")
+            .map_err(|err| format!("loading kernel `hook_copy_batch` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -2998,6 +3032,7 @@ impl Kernels {
             discrete_reproduction,
             discrete_survival,
             apply_hook_event,
+            hook_copy_batch,
         })
     }
 
@@ -4070,17 +4105,20 @@ impl Kernels {
     ///
     /// One thread per batch element walks the event's CSR slots in priority
     /// order, evaluating conditions and selectors exactly like the CPU
-    /// interpreter. Only deterministic opcodes are eligible, so no RNG is
-    /// involved.
+    /// interpreter. Deterministic and stochastic models are supported; the
+    /// optional per-batch stop mask freezes demes that already stopped.
     ///
     /// ## Parameters
     /// - `stream`: Stream the launch is ordered on.
     /// - `ind`: Batch-minor individual counts, `(2, A, Z, B)`.
     /// - `sperm`: Batch-minor stored sperm, `(A, Z, Z, B)`.
-    /// - `stop_flag`: One-element flag set when a `STOP_IF_*` op fires.
+    /// - `stop_mask`: Per-batch flags set when a `STOP_IF_*` op fires.
+    /// - `eco`: Batch-major ecology scratch, `(B, N_ECO_PARAMS)`.
     /// - `buffers`: Uploaded CSR arrays for the hook program.
     /// - `n_ages`, `n_ztypes`, `n_batch`: Model dimensions.
     /// - `event_id`: Lifecycle event index (first/early/late/finish).
+    /// - `stochastic`, `continuous`: Sampling mode flags.
+    /// - `key0`, `key1`, `site`: Device RNG key/site for hook draws.
     /// - `tick`: Session tick used by the condition program.
     ///
     /// ## Errors
@@ -4091,7 +4129,7 @@ impl Kernels {
         stream: &Arc<CudaStream>,
         ind: &mut CudaSlice<f32>,
         sperm: &mut CudaSlice<f32>,
-        stop_flag: &mut CudaSlice<i32>,
+        stop_mask: &mut CudaSlice<i32>,
         eco: &mut CudaSlice<f32>,
         buffers: &HookEventBuffers<'_>,
         n_ages: usize,
@@ -4128,7 +4166,7 @@ impl Kernels {
         let mut launch = stream.launch_builder(&self.apply_hook_event);
         launch.arg(&mut *ind);
         launch.arg(&mut *sperm);
-        launch.arg(&mut *stop_flag);
+        launch.arg(&mut *stop_mask);
         launch.arg(&mut *eco);
         launch.arg(buffers.hook_offsets);
         launch.arg(buffers.op_offsets);
@@ -4167,6 +4205,45 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("apply_hook_event launch failed: {err}"))
+    }
+
+    /// Copy one batch element's plane from `src` to `dst` (element-wise).
+    ///
+    /// Used to save/restore a stopped demE's state.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the copy is ordered on.
+    /// - `dst`, `src`: Equal-length batch-minor planes.
+    /// - `n_batch`: Number of batch elements (the batch axis stride).
+    /// - `batch`: Batch index to copy.
+    ///
+    /// ## Errors
+    /// Returns a description when the launch fails.
+    pub fn hook_copy_batch(
+        &self,
+        stream: &Arc<CudaStream>,
+        dst: &mut CudaSlice<f32>,
+        src: &CudaSlice<f32>,
+        n_batch: usize,
+        batch: usize,
+    ) -> Result<(), String> {
+        let total = src.len() as u64;
+        if total == 0 || n_batch == 0 {
+            return Ok(());
+        }
+        let total_i = total as i64;
+        let n_batch_i = n_batch as i32;
+        let batch_i = batch as i32;
+        let config = LaunchConfig::for_num_elems(total as u32);
+        let mut launch = stream.launch_builder(&self.hook_copy_batch);
+        launch.arg(&mut *dst);
+        launch.arg(src);
+        launch.arg(&total_i);
+        launch.arg(&n_batch_i);
+        launch.arg(&batch_i);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("hook_copy_batch launch failed: {err}"))
     }
 }
 

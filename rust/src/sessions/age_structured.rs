@@ -1111,7 +1111,7 @@ impl AgeStructuredSession {
 /// ## Errors
 /// Returns ``PyValueError`` for Python callbacks or unsupported opcodes.
 #[cfg(feature = "gpu")]
-fn validate_device_hooks(hooks: &HookProgram) -> PyResult<()> {
+pub(crate) fn validate_device_hooks(hooks: &HookProgram) -> PyResult<()> {
     if hooks.has_python_callbacks() {
         return Err(PyValueError::new_err(
             "GPU path does not support Python hook callbacks",
@@ -1506,7 +1506,8 @@ impl AgeStructuredSession {
             // Persist any set_param writes so the next tick and the Python
             // params view see the committed ecology.
             if let Some(values) = gpu.take_pending_eco() {
-                crate::gpu::executor::GpuExecutor::apply_eco_values(params, &values)?;
+                let n_batch = gpu.n_batch();
+                crate::gpu::executor::GpuExecutor::apply_eco_values(params, &values, n_batch)?;
             }
             if gpu.take_stopped() {
                 stopped = true;

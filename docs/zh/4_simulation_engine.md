@@ -274,7 +274,7 @@ pop.import_state(state_flat)
 `AgeStructuredPopulation.enable_gpu()` 把种群状态搬到设备；之后的 `run(...)` 会在 GPU 上推进。
 
 ```python
-pop = (...)  # 一个 panmictic、无钩子的年龄结构模型
+pop = (...)  # 一个 panmictic 年龄结构模型
 
 pop.enable_gpu()
 print(pop.gpu_status())  # "enabled"
@@ -296,7 +296,7 @@ NVIDIA GPU 上同时演化。种群当前状态被复制到设备 batch 轴，�
 counter-based 随机流，因此**同 seed 的设备重跑逐位可复现**。
 
 ```python
-pop = (...)  # 一个 panmictic、无钩子的年龄结构模型
+pop = (...)  # 一个 panmictic 年龄结构模型
 
 pop.enable_gpu_ensemble(n_replicates=2000)
 tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
@@ -305,7 +305,8 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 # sperm_storage:    (n_replicates, n_ages, n_ztypes, n_ztypes)
 ```
 
-- **适用条件**：同 11.1。模型不合格或扩展未带 `gpu` feature 时，`enable_gpu_ensemble`
+- **适用条件**：panmictic、内置生长模式。与 11.1 不同，ensemble 目前要求模型**无钩子**
+  （ensemble 的钩子语义尚未定义）。模型不合格或扩展未带 `gpu` feature 时，`enable_gpu_ensemble`
   抛 `RuntimeError`。
 - **观测投影**：`pop.observe_gpu_ensemble(individual_count)` 用种群自身的 `Observation`
   （与 `History` 相同的选择器）对**每条 replicate** 投影，返回带 replicate 轴的堆叠结果；
@@ -316,6 +317,13 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
   统计比较（分布/矩），不能逐位比较。
 - **性能**：GPU 的“单位 replicate 吞吐”远高于单核 CPU，但相对多进程 CPU 基线的墙面加速比
   取决于模型规模与本机核数；请在目标机器上实测。
+
+### 11.3 空间设备路径
+
+`RustHeterogeneousSpatialLifecycleBackend.enable_gpu()` 为空间种群启用可选 CUDA 路径。
+声明式钩子会在设备上**按 deme** 执行，事件顺序与 deme selector 与 CPU 一致（确定性增删改、`sample`、
+`stop_if_*`、`set_param`、`convert`）；某个 deme 的 `stop_if_*` 会冻结该 tick 并跳过迁移，其他 deme
+仍跑完各自生命周期——与 CPU 调度一致；Python 回调被拒绝。
 
 更低层的 `RustLifecycleBackend.enable_gpu` / `gpu_status` / `enable_gpu_ensemble` /
 `run_gpu_ensemble` 提供同一条路径。

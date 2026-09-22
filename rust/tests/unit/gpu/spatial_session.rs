@@ -267,17 +267,25 @@ fn spatial_enable_gpu_rejects_ineligible_models() {
     );
     assert!(custom.enable_gpu().is_err(), "custom growth must reject");
 
-    let (blueprint, ecology, genetics) = fixture();
-    let mut hooked = make_session(
-        blueprint,
-        ecology,
-        vec![genetics.clone()],
-        vec![0, 0, 0],
-        false,
-        false,
-    );
-    hooked.hooks.n_hooks = 1;
-    assert!(hooked.enable_gpu().is_err(), "hooks must reject");
+    // Declarative hooks are supported on the spatial device path (P7.4a).
+    if hardware_required() {
+        let (blueprint, ecology, genetics) = fixture();
+        let mut hooked = make_session(
+            blueprint,
+            ecology,
+            vec![genetics.clone()],
+            vec![0, 0, 0],
+            false,
+            false,
+        );
+        hooked.hooks = crate::hooks::interpreter::HookProgram::default();
+        hooked.hooks.n_hooks = 1;
+        hooked.hooks.op_types = vec![0];
+        assert!(
+            hooked.enable_gpu().is_ok(),
+            "spatial hooks must be accepted"
+        );
+    }
 
     // Fewer variant ids than demes is rejected before any device work.
     let (blueprint, ecology, genetics) = fixture();
@@ -1338,6 +1346,151 @@ fn evaluator_raw_device_checkpoint_restore_is_bit_exact() {
             got.to_bits(),
             want.to_bits(),
             "device state diverged after raw-history restore at sperm[{index}]: {got} vs {want}"
+        );
+    }
+}
+
+/// Build a two-hook spatial program: first-event `SET 5` on deme 0 only, and
+/// late-event `SCALE 0.5` on all demes.
+fn spatial_hook_program() -> HookProgram {
+    let mut p = HookProgram::default();
+    p.n_events = 4;
+    p.n_hooks = 2;
+    p.hook_offsets = vec![0, 1, 1, 2, 2];
+    p.op_offsets = vec![0, 1, 2];
+    p.op_types = vec![1, 0];
+    p.zidx_offsets = vec![0, 2, 4];
+    p.zidx_data = vec![0, 1, 0, 1];
+    p.age_offsets = vec![0, 4, 8];
+    p.age_data = vec![0, 1, 2, 3, 0, 1, 2, 3];
+    p.sex_masks = vec![true, true, true, true];
+    p.params = vec![5.0, 0.5];
+    p.condition_offsets = vec![0, 0, 0];
+    p.deme_selector_types = vec![1, 0];
+    p.deme_selector_offsets = vec![0, 1, 1];
+    p.deme_selector_data = vec![0];
+    p.convert_source_z = vec![-1, -1];
+    p.convert_target_z = vec![-1, -1];
+    p
+}
+
+#[test]
+fn spatial_device_hooks_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.hooks = spatial_hook_program();
+    gpu.enable_gpu().expect("spatial enable_gpu");
+    gpu.run_steps(3, 0).expect("gpu run_steps");
+
+    let mut cpu = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    cpu.hooks = spatial_hook_program();
+    cpu.run_steps(3, 0).expect("cpu run_steps");
+
+    assert_eq!(gpu.state_tick, cpu.state_tick);
+    for (index, (got, want)) in gpu.state_ind.iter().zip(cpu.state_ind.iter()).enumerate() {
+        let (got, want) = (*got as f32, *want as f32);
+        let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "ind[{index}]: device {got} vs host {want}"
+        );
+    }
+    for (index, (got, want)) in gpu
+        .state_sperm
+        .iter()
+        .zip(cpu.state_sperm.iter())
+        .enumerate()
+    {
+        let (got, want) = (*got as f32, *want as f32);
+        let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "sperm[{index}]: device {got} vs host {want}"
+        );
+    }
+}
+
+/// Late-event `STOP_IF_ABOVE` on deme 0 only, gated on `tick >= 1`.
+fn spatial_stop_program() -> HookProgram {
+    let mut p = HookProgram::default();
+    p.n_events = 4;
+    p.n_hooks = 1;
+    p.hook_offsets = vec![0, 0, 0, 1, 1];
+    p.op_offsets = vec![0, 1];
+    p.op_types = vec![8];
+    p.zidx_offsets = vec![0, 2];
+    p.zidx_data = vec![0, 1];
+    p.age_offsets = vec![0, 4];
+    p.age_data = vec![0, 1, 2, 3];
+    p.sex_masks = vec![true, true];
+    p.params = vec![0.0];
+    p.condition_offsets = vec![0, 1];
+    p.condition_types = vec![3];
+    p.condition_params = vec![1];
+    p.deme_selector_types = vec![1];
+    p.deme_selector_offsets = vec![0, 1];
+    p.deme_selector_data = vec![0];
+    p.convert_source_z = vec![-1];
+    p.convert_target_z = vec![-1];
+    p
+}
+
+#[test]
+fn spatial_device_hook_stop_freezes_tick_and_keeps_other_demes() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology, genetics) = fixture();
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.hooks = spatial_stop_program();
+    gpu.enable_gpu().expect("spatial enable_gpu");
+    let (gpu_tick, gpu_stopped) = gpu.run_steps(4, 0).expect("gpu run_steps");
+
+    let mut cpu = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    cpu.hooks = spatial_stop_program();
+    let (cpu_tick, cpu_stopped) = cpu.run_steps(4, 0).expect("cpu run_steps");
+
+    assert!(gpu_stopped && cpu_stopped, "both must report a stop");
+    assert_eq!(gpu_tick, cpu_tick, "stop tick must match");
+    for (index, (got, want)) in gpu.state_ind.iter().zip(cpu.state_ind.iter()).enumerate() {
+        let (got, want) = (*got as f32, *want as f32);
+        let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+        assert!(
+            (got - want).abs() <= tolerance,
+            "ind[{index}]: device {got} vs host {want}"
         );
     }
 }

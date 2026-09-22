@@ -60,6 +60,12 @@ pub struct GpuExecutor {
     stopped: bool,
     /// Committed `set_param` scalars from the last tick, for the session.
     pending_eco: Option<Vec<f64>>,
+    /// Saved `ind` plane for demes that stopped mid-tick (lazily allocated).
+    saved_ind: Option<DeviceBuffer<f32>>,
+    /// Saved `sperm` plane for demes that stopped mid-tick (lazily allocated).
+    saved_sperm: Option<DeviceBuffer<f32>>,
+    /// Which batch elements have a saved plane this tick.
+    saved_mask: Vec<bool>,
     /// Cached static migration buffers for the current CSR, if any.
     migration_cache: Option<MigrationCache>,
     /// Device-staged observation history rows for the current run, if any.
@@ -228,8 +234,8 @@ struct DeviceHooks {
     convert_target_z: DeviceBuffer<i32>,
     /// Whether the program contains any `STOP_IF_*` op (flag read needed).
     has_stop: bool,
-    /// One-element stop flag written by `STOP_IF_*` reductions.
-    stop_flag: DeviceBuffer<i32>,
+    /// Per-batch stop flags written by `STOP_IF_*` reductions.
+    stop_mask: DeviceBuffer<i32>,
     /// Whether the program contains any `OP_SET_PARAM` op.
     has_set_param: bool,
     /// Per-op `SET_PARAM` eco ids.
@@ -246,7 +252,7 @@ struct DeviceHooks {
     rpn_payload: DeviceBuffer<i32>,
     /// Shared RPN literal pool.
     sp_literals: DeviceBuffer<f32>,
-    /// Current ecology scalar values (`N_ECO_PARAMS`), read/written by RPN.
+    /// Ecology scratch, batch-major `(B, N_ECO_PARAMS)`, read/written by RPN.
     eco_scratch: DeviceBuffer<f32>,
 }
 
@@ -287,6 +293,15 @@ impl EcoView<'_> {
             EcoView::Commit(ecology) => Some(ecology),
         }
     }
+}
+
+/// Which lifecycle the tick runs between its hook events.
+#[derive(Clone, Copy)]
+enum TickStages {
+    /// Age-structured (`reproduction`/`survival`).
+    Continuous,
+    /// Two-age discrete lifecycle (`discrete_reproduction`/`discrete_survival`).
+    Discrete,
 }
 
 impl GpuExecutor {
@@ -356,6 +371,9 @@ impl GpuExecutor {
             tick: 0,
             stopped: false,
             pending_eco: None,
+            saved_ind: None,
+            saved_sperm: None,
+            saved_mask: vec![false; n_batch],
             migration_cache: None,
             history: None,
             hooks: None,
@@ -412,6 +430,8 @@ impl GpuExecutor {
             .map(|value| i32::from(*value))
             .collect();
         let params: Vec<f32> = program.params.iter().map(|value| *value as f32).collect();
+        let stop_mask_host = vec![0i32; self.n_batch];
+        let eco_host = vec![0.0f32; self.n_batch * crate::hooks::interpreter::N_ECO_PARAMS];
         self.hooks = Some(DeviceHooks {
             hook_offsets: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.hook_offsets)?)?,
             op_offsets: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.op_offsets)?)?,
@@ -455,7 +475,7 @@ impl GpuExecutor {
                 &to_i32_vec(&program.convert_target_z)?,
             )?,
             has_stop: program.op_types.iter().any(|op| (6..=9).contains(op)),
-            stop_flag: DeviceBuffer::from_host(&stream, &[0i32])?,
+            stop_mask: DeviceBuffer::from_host(&stream, &stop_mask_host)?,
             has_set_param: program.op_types.contains(&10),
             sp_param_ids: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.sp_param_ids)?)?,
             sp_every: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.sp_every)?)?,
@@ -471,10 +491,7 @@ impl GpuExecutor {
                     .map(|value| *value as f32)
                     .collect::<Vec<f32>>(),
             )?,
-            eco_scratch: DeviceBuffer::from_host(
-                &stream,
-                &[0.0f32; crate::hooks::interpreter::N_ECO_PARAMS],
-            )?,
+            eco_scratch: DeviceBuffer::from_host(&stream, &eco_host)?,
         });
         Ok(())
     }
@@ -504,11 +521,6 @@ impl GpuExecutor {
         };
         let stream = self.context.stream();
         let result = (|| -> Result<bool, String> {
-            if hooks.has_stop {
-                stream
-                    .memset_zeros(&mut *hooks.stop_flag.slice_mut())
-                    .map_err(|err| format!("stop flag reset failed: {err}"))?;
-            }
             let buffers = crate::gpu::kernels::HookEventBuffers {
                 hook_offsets: hooks.hook_offsets.slice(),
                 op_offsets: hooks.op_offsets.slice(),
@@ -543,7 +555,7 @@ impl GpuExecutor {
                 &stream,
                 self.ind.slice_mut(),
                 self.sperm.slice_mut(),
-                hooks.stop_flag.slice_mut(),
+                hooks.stop_mask.slice_mut(),
                 hooks.eco_scratch.slice_mut(),
                 &buffers,
                 self.n_ages,
@@ -558,8 +570,8 @@ impl GpuExecutor {
                 self.tick,
             )?;
             if hooks.has_stop {
-                let flag = hooks.stop_flag.to_host(&stream)?;
-                Ok(flag.first().copied().unwrap_or(0) != 0)
+                let mask = hooks.stop_mask.to_host(&stream)?;
+                Ok(mask.iter().any(|flag| *flag != 0))
             } else {
                 Ok(false)
             }
@@ -584,9 +596,13 @@ impl GpuExecutor {
         if !hooks.has_set_param {
             return Ok(());
         }
-        let values: Vec<f32> = (0..crate::hooks::interpreter::N_ECO_PARAMS)
-            .map(|id| ecology.eco_value(id, 0) as f32)
-            .collect();
+        let n_eco = crate::hooks::interpreter::N_ECO_PARAMS;
+        let mut values: Vec<f32> = Vec::with_capacity(self.n_batch * n_eco);
+        for batch in 0..self.n_batch {
+            for id in 0..n_eco {
+                values.push(ecology.eco_value(id, batch) as f32);
+            }
+        }
         let stream = self.context.stream();
         hooks.eco_scratch = DeviceBuffer::from_host(&stream, &values)?;
         Ok(())
@@ -599,7 +615,8 @@ impl GpuExecutor {
     /// the tick.
     ///
     /// ## Returns
-    /// `Some(values)` when the program has `OP_SET_PARAM`, else `None`.
+    /// `Some(values)` (`n_batch · N_ECO_PARAMS`, batch-major) when the program
+    /// has `OP_SET_PARAM`, else `None`.
     ///
     /// ## Errors
     /// Returns a description when a value is out of bounds or the read fails.
@@ -613,8 +630,9 @@ impl GpuExecutor {
         let stream = self.context.stream();
         let raw = hooks.eco_scratch.to_host(&stream)?;
         let values: Vec<f64> = raw.iter().map(|value| f64::from(*value)).collect();
-        for (id, value) in values.iter().enumerate() {
-            crate::hooks::interpreter::validate_eco_param(id, *value)?;
+        let n_eco = crate::hooks::interpreter::N_ECO_PARAMS;
+        for (index, value) in values.iter().enumerate() {
+            crate::hooks::interpreter::validate_eco_param(index % n_eco, *value)?;
         }
         Ok(Some(values))
     }
@@ -623,17 +641,25 @@ impl GpuExecutor {
     ///
     /// ## Parameters
     /// - `ecology`: Contract to update in place.
-    /// - `values`: `N_ECO_PARAMS` scalar values.
+    /// - `values`: `n_batch · N_ECO_PARAMS` batch-major scalar values.
+    /// - `n_batch`: Number of batch elements.
     ///
     /// ## Errors
     /// Returns a description when a value is out of bounds.
-    pub fn apply_eco_values(ecology: &mut EcologyParams, values: &[f64]) -> Result<(), String> {
-        for (id, value) in values.iter().enumerate() {
-            if id >= crate::hooks::interpreter::N_ECO_PARAMS {
-                break;
+    pub fn apply_eco_values(
+        ecology: &mut EcologyParams,
+        values: &[f64],
+        n_batch: usize,
+    ) -> Result<(), String> {
+        let n_eco = crate::hooks::interpreter::N_ECO_PARAMS;
+        for batch in 0..n_batch {
+            for id in 0..n_eco {
+                let Some(value) = values.get(batch * n_eco + id).copied() else {
+                    return Ok(());
+                };
+                crate::hooks::interpreter::validate_eco_param(id, value)?;
+                ecology.set_eco_value(id, batch, value);
             }
-            crate::hooks::interpreter::validate_eco_param(id, *value)?;
-            ecology.set_eco_value(id, 0, *value);
         }
         Ok(())
     }
@@ -1375,6 +1401,26 @@ impl GpuExecutor {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
     ) -> Result<(), String> {
+        self.run_full_tick(
+            TickStages::Continuous,
+            blueprint,
+            ecology,
+            variants,
+            deme_variants,
+        )
+    }
+
+    /// Run the event/stage sequence on one tick, committing `set_param` writes
+    /// between events and handling per-batch hooks.
+    #[allow(clippy::too_many_arguments)] // Mirrors the stage calls it sequences.
+    fn run_full_tick(
+        &mut self,
+        stages: TickStages,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
         let stochastic = blueprint.stochastic;
         let continuous = blueprint.continuous_sampling;
         if self.hooks.as_ref().is_some_and(|hooks| hooks.has_set_param) {
@@ -1382,6 +1428,7 @@ impl GpuExecutor {
             self.sync_eco_scratch(&working)?;
             let mut view = EcoView::Commit(&mut working);
             self.run_tick_sequence(
+                stages,
                 blueprint,
                 &mut view,
                 variants,
@@ -1389,14 +1436,20 @@ impl GpuExecutor {
                 stochastic,
                 continuous,
             )?;
-            self.pending_eco = Some(
-                (0..crate::hooks::interpreter::N_ECO_PARAMS)
-                    .map(|id| view.get().eco_value(id, 0))
-                    .collect(),
-            );
+            self.pending_eco = Some({
+                let mut values =
+                    Vec::with_capacity(self.n_batch * crate::hooks::interpreter::N_ECO_PARAMS);
+                for batch in 0..self.n_batch {
+                    for id in 0..crate::hooks::interpreter::N_ECO_PARAMS {
+                        values.push(view.get().eco_value(id, batch));
+                    }
+                }
+                values
+            });
         } else {
             let mut view = EcoView::Plain(ecology);
             self.run_tick_sequence(
+                stages,
                 blueprint,
                 &mut view,
                 variants,
@@ -1408,14 +1461,15 @@ impl GpuExecutor {
         Ok(())
     }
 
-    /// Run the event/stage sequence on one tick, committing `set_param` writes
-    /// between events so later stages see them (matching the CPU `EcoCtx`).
+    /// Run the event/stage sequence on one tick for the requested lifecycle.
     ///
-    /// A hook `STOP_IF_*` aborts the tick at its event point exactly like the
-    /// CPU engine: later stages are skipped and the tick is not advanced.
+    /// A hook `STOP_IF_*` freezes only the demes that stopped: their events and
+    /// further stages are masked, their state is saved and restored at the end
+    /// of the tick, and the tick is not advanced. Other demes still complete.
     #[allow(clippy::too_many_arguments)] // Mirrors the stage calls it sequences.
     fn run_tick_sequence(
         &mut self,
+        stages: TickStages,
         blueprint: &Blueprint,
         ecology: &mut EcoView<'_>,
         variants: &[GeneticsTensors],
@@ -1423,41 +1477,149 @@ impl GpuExecutor {
         stochastic: bool,
         continuous: bool,
     ) -> Result<(), String> {
-        // The CPU commits an event's `set_param` writes at the event boundary
-        // before it checks the stop result, so a `STOP_IF_*` must not skip the
-        // commit for its own event.
-        let stopped = self.run_hook_event(0, stochastic, continuous)?;
+        self.reset_stop_mask()?;
+        self.run_hook_event(0, stochastic, continuous)?;
+        self.capture_stopped()?;
         self.commit_eco(ecology)?;
-        if stopped {
-            self.stopped = true;
-            return Ok(());
+        match stages {
+            TickStages::Continuous => {
+                self.reproduction_tick(blueprint, ecology.get(), variants, deme_variants)?
+            }
+            TickStages::Discrete => {
+                self.discrete_reproduction_tick(blueprint, ecology.get(), variants, deme_variants)?
+            }
         }
-        self.reproduction_tick(blueprint, ecology.get(), variants, deme_variants)?;
-        let stopped = self.run_hook_event(1, stochastic, continuous)?;
+        self.run_hook_event(1, stochastic, continuous)?;
+        self.capture_stopped()?;
         self.commit_eco(ecology)?;
-        if stopped {
-            self.stopped = true;
-            return Ok(());
+        match stages {
+            TickStages::Continuous => {
+                self.survival_tick(blueprint, ecology.get(), variants, deme_variants)?
+            }
+            TickStages::Discrete => {
+                self.discrete_survival_tick(blueprint, ecology.get(), variants, deme_variants)?
+            }
         }
-        self.survival_tick(blueprint, ecology.get(), variants, deme_variants)?;
-        let stopped = self.run_hook_event(2, stochastic, continuous)?;
+        self.run_hook_event(2, stochastic, continuous)?;
+        self.capture_stopped()?;
         self.commit_eco(ecology)?;
-        if stopped {
-            self.stopped = true;
-            return Ok(());
-        }
         self.age_tick()?;
-        self.tick = self.tick.wrapping_add(1);
+        if self.restore_stopped()? {
+            self.stopped = true;
+        } else {
+            self.tick = self.tick.wrapping_add(1);
+        }
         Ok(())
+    }
+
+    /// Zero the per-batch stop mask at the start of a tick.
+    fn reset_stop_mask(&mut self) -> Result<(), String> {
+        for saved in self.saved_mask.iter_mut() {
+            *saved = false;
+        }
+        let Some(hooks) = self.hooks.as_mut() else {
+            return Ok(());
+        };
+        if !hooks.has_stop {
+            return Ok(());
+        }
+        let stream = self.context.stream();
+        stream
+            .memset_zeros(&mut *hooks.stop_mask.slice_mut())
+            .map_err(|err| format!("stop mask reset failed: {err}"))
+    }
+
+    /// Save the state of demes that newly stopped during the current event.
+    fn capture_stopped(&mut self) -> Result<(), String> {
+        let mask = {
+            let Some(hooks) = self.hooks.as_ref() else {
+                return Ok(());
+            };
+            if !hooks.has_stop {
+                return Ok(());
+            }
+            let stream = self.context.stream();
+            hooks.stop_mask.to_host(&stream)?
+        };
+        let newly: Vec<usize> = (0..self.n_batch)
+            .filter(|batch| mask.get(*batch).copied().unwrap_or(0) != 0 && !self.saved_mask[*batch])
+            .collect();
+        if newly.is_empty() {
+            return Ok(());
+        }
+        let stream = self.context.stream();
+        if self.saved_ind.is_none() {
+            let ind_host = vec![0.0f32; self.ind.len()];
+            let sperm_host = vec![0.0f32; self.sperm.len()];
+            self.saved_ind = Some(DeviceBuffer::from_host(&stream, &ind_host)?);
+            self.saved_sperm = Some(DeviceBuffer::from_host(&stream, &sperm_host)?);
+        }
+        for batch in newly {
+            let saved_ind = self.saved_ind.as_mut().expect("allocated above");
+            self.kernels.hook_copy_batch(
+                &stream,
+                saved_ind.slice_mut(),
+                self.ind.slice(),
+                self.n_batch,
+                batch,
+            )?;
+            let saved_sperm = self.saved_sperm.as_mut().expect("allocated above");
+            self.kernels.hook_copy_batch(
+                &stream,
+                saved_sperm.slice_mut(),
+                self.sperm.slice(),
+                self.n_batch,
+                batch,
+            )?;
+            self.saved_mask[batch] = true;
+        }
+        Ok(())
+    }
+
+    /// Restore saved state for stopped demes.
+    ///
+    /// ## Returns
+    /// `true` when at least one deme was stopped this tick.
+    fn restore_stopped(&mut self) -> Result<bool, String> {
+        if self.saved_ind.is_none() {
+            return Ok(false);
+        }
+        let stream = self.context.stream();
+        let mut any = false;
+        for batch in 0..self.n_batch {
+            if !self.saved_mask[batch] {
+                continue;
+            }
+            any = true;
+            let saved_ind = self.saved_ind.as_ref().expect("allocated above");
+            self.kernels.hook_copy_batch(
+                &stream,
+                self.ind.slice_mut(),
+                saved_ind.slice(),
+                self.n_batch,
+                batch,
+            )?;
+            let saved_sperm = self.saved_sperm.as_ref().expect("allocated above");
+            self.kernels.hook_copy_batch(
+                &stream,
+                self.sperm.slice_mut(),
+                saved_sperm.slice(),
+                self.n_batch,
+                batch,
+            )?;
+            self.saved_mask[batch] = false;
+        }
+        Ok(any)
     }
 
     /// Commit read-back `set_param` writes into the tick's working ecology.
     fn commit_eco(&mut self, ecology: &mut EcoView<'_>) -> Result<(), String> {
+        let n_batch = self.n_batch;
         let Some(values) = self.take_eco_scratch()? else {
             return Ok(());
         };
         if let Some(params) = ecology.as_commit() {
-            Self::apply_eco_values(params, &values)?;
+            Self::apply_eco_values(params, &values, n_batch)?;
         }
         Ok(())
     }
@@ -1567,11 +1729,13 @@ impl GpuExecutor {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
     ) -> Result<(), String> {
-        self.discrete_reproduction_tick(blueprint, ecology, variants, deme_variants)?;
-        self.discrete_survival_tick(blueprint, ecology, variants, deme_variants)?;
-        self.age_tick()?;
-        self.tick = self.tick.wrapping_add(1);
-        Ok(())
+        self.run_full_tick(
+            TickStages::Discrete,
+            blueprint,
+            ecology,
+            variants,
+            deme_variants,
+        )
     }
 
     /// Run one deterministic CSR migration step across the batch (demes).

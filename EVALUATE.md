@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 28 轮：**NOT APPROVED**（§65；P7.3 阻塞项——`SET_PARAM` 在 stop 事件边界未提交，设备≠CPU） |
-| 待回执 | §67（第 29 轮：修复 §65 阻塞项——stop 事件边界仍提交 set_param；回归测试转绿） |
-| 主 agent 处理 | 第 29 轮修复已完成并自测；待复核 |
-| 待 evaluator 动作 | 按 §66 复核修复与受影响门禁，结论写入 §67；并补做 §65.5 的随机统计等价扫描 |
+| 最近回执 | 第 29 轮：**APPROVED**（§67；§65 阻塞项已修复——stop 事件边界仍提交 `SET_PARAM`；§65.5 统计等价扫描补完） |
+| 待回执 | §69（第 30 轮 P7.4a：空间声明式钩子 + per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过） |
+| 主 agent 处理 | 第 30 轮：P7.4a 已实现并自测；P7.4b（ensemble）待启动 |
+| 待 evaluator 动作 | 按 §68 复核，把第 30 轮结论写入 §69 |
 
 ## 0. 一句话目标
 
@@ -1710,6 +1710,60 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - `sync_eco_scratch` 每 tick 分配 5 元素缓冲（可优化）。
 
 结论请追加为 **§67**。
+
+---
+
+## 68. 第 30 轮交接 — P7.4a：空间声明式钩子（per-deme selector + per-batch stop 掩码/恢复）
+
+- 日期：2026-09-22
+- 背景：§67 APPROVED（P7.3）。用户确认 **P7.4a 先做空间、含 per-batch stop 掩码（与 CPU 完全一致）**；ensemble 另议（P7.4b）。
+- 风险分类：**高风险**（停止/状态冻结语义、per-deme 生态写入、跨 deme 调度；CPU golden reference 不变）。
+
+### 68.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `apply_hook_event`：`stop_flag` → 每 batch 的 `stop_mask`（已停止 batch 入口直接跳过）；`eco` 改批量布局，内核用 `eco_row = eco + b*N_ECO_PARAMS`（RPN/SET_PARAM 均按 deme）；新增 `hook_copy_batch`（按 batch 元素复制，用于保存/恢复停止 deme 的 `ind`/`sperm`）。 |
+| `rust/src/gpu/executor.rs` | `DeviceHooks`：`stop_mask` 大小 `n_batch`，`eco_scratch` 大小 `n_batch·N_ECO_PARAMS`；`sync/take/apply_eco` 全部按 batch；`run_hook_event` 不再逐事件归零掩码；`run_tick_sequence` 改为**不提前返回**：每个事件后 `capture_stopped`（保存新停止 batch 的 state）、无条件 `commit_eco`，tick 末 `restore_stopped`（恢复停止 batch 的 state），任一停止则不前进 tick；新增 `reset_stop_mask`/`capture_stopped`/`restore_stopped`；`tick`/`discrete_tick` 统一经 `run_full_tick(TickStages)`（离散生命周期也走同一事件序列）。 |
+| `rust/src/sessions/spatial.rs` | `enable_gpu` 用共享 `validate_device_hooks` + `configure_hooks` + `set_tick` 放开钩子；新增 `install_hook_program`（`set_hook_program`/`clear_hook_program` 在设备活跃时重传）；`run_gpu_tick` 收 `&mut ecology`、提交 `set_param`、`take_stopped` 后跳过迁移且不前进 tick；`run_inner` 设备分支传 `&mut self.ecology`。 |
+| `rust/src/sessions/age_structured.rs` | `validate_device_hooks` 设为 `pub(crate)`（空间复用）；`run_gpu` 的 `apply_eco_values` 传 `n_batch`。 |
+| 文档 | `docs/{en,zh}/4_simulation_engine.md`：§11 示例去「hook-free」、§11.2 说明 ensemble 仍要求无钩子、新增 §11.3 空间设备路径；`rust_backend.py` 空间 `enable_gpu` docstring。 |
+| 测试 | Rust：`spatial_device_hooks_match_cpu`（per-deme SET + 全局 SCALE，3 tick 对照 CPU）、`spatial_device_hook_stop_freezes_tick_and_keeps_other_demes`（late STOP_IF 仅 deme 0，stop tick 与整状态对照 CPU）；更新 `spatial_enable_gpu_rejects_ineligible_models`（钩子改为接受）。 |
+
+### 68.2 行为
+
+- **空间钩子**：声明式钩子（含 `SAMPLE`/`STOP_IF_*`/`SET_PARAM`/`CONVERT`）在设备上按 deme 执行，事件顺序与 CPU 一致；`deme=batch` 且 `n_batch=n_demes`，selector 语义正确。
+- **停止语义与 CPU 一致**：某 deme 命中 `STOP_IF_*` 后，其后续事件由 `stop_mask` 跳过；其状态在该事件后被保存、tick 末恢复（其他 deme 继续跑完生命周期）；整 tick 不前进、迁移被跳过。panmictic 单群体复用同一路径（掩码大小 1），行为与 §67 相同。
+- **per-deme `SET_PARAM`**：设备按 deme 写 `eco_scratch`，host 在事件边界按 deme 提交到工作生态，停止时已写值仍提交（§65 语义保持）。
+- 无钩子路径：掩码全 0、无保存/恢复、无额外同步，行为逐位不变。
+
+### 68.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **217 passed, 0 failed**（含新增 2 个空间钩子用例） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3620 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **3003/3107 = 96.65%**；executor 95.9%、kernels 97.3%、probe 96.1%，其余 100% |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 68.4 请 evaluator 独立核对
+
+- **空间钩子与 CPU 一致**：多 deme + per-deme selector（1/2/3 与全局）、条件、各 opcode；确定性逐点/容差对照，随机统计等价。
+- **停止语义（重点）**：某 deme 停止后，其他 deme 仍完成当前 tick；停止 deme 状态冻结在其停止边界；整 tick 不前进；迁移被跳过；跨多次 `run_steps` 的正确性；多个 deme 在不同事件/不同 tick 停止的组合。
+- **per-deme `SET_PARAM`**：按 deme 生效、同 tick 可见、停止边界仍提交、跨 tick 持久；越界显式 `Err`。
+- **panmictic 无回归**：掩码重构后 P7.1–P7.3 的停止/set_param/随机用例结果不变。
+- **离散空间**：`discrete_tick` 现也跑事件序列，确认 hook-free 离散路径逐位不变、含钩子离散路径与 CPU 一致。
+- CPU 不变性 / 门禁 / 覆盖率同既往口径。
+
+### 68.5 残余风险（非阻塞）
+
+- 停止 batch 的 state 保存缓冲在首次停止时按整幅 `ind`/`sperm` 分配（`Option<DeviceBuffer>`，跨 tick 复用），未纳入启用时显存预算；大模型首次停止可能显存紧张（不静默回退）。
+- 停止发生在 `set_param` 之后时，提交语义已对齐（§65）；但「同 tick 内停止 + 后续事件对未停止 deme 的 set_param」组合请 evaluator 重点覆盖。
+- ensemble 仍未支持钩子（P7.4b）。
+- §65.3 既有残余不变（负 virgin clamp、RNG 仅统计等价、trigger_event、归约 f32）。
+
+结论请追加为 **§69**。
 
 ---
 
@@ -3466,3 +3520,75 @@ P7.2 停止门控在受支持的确定性 panmictic 路径上与 CPU golden refe
 P7.3 的随机钩子/SAMPLE/CONVERT/set_param 正常路径大体正确，但由于 **stop 与 set_param 同事件时设备未提交生态写入**，
 CPU/GPU 存在静默持久分歧，**NOT APPROVED**。修复 `run_tick_sequence`（stop 返回前提交本事件 scratch）并保留/通过上述
 回归测试后，连同未完成的统计等价扫描一并回交复核（范围：HEAD `22db184` 与被审测试集；不声称历史基线失败消失）。
+
+---
+
+## 67. 第 29 轮结论（evaluator 独立执行，2026-09-22，HEAD=`bb9a55c`）
+
+### 67.1 裁定：**APPROVED**
+
+§65 阻塞项已修复并经独立复核：三个事件点均为「`run_hook_event` → 无条件 `commit_eco` → 若 stopped 再返回」，与
+CPU `run_tick` 的 commit 顺序一致。§65.5 的随机统计等价扫描已补做（正确改变种子），均值/方差/KS 均支持等价。
+CPU golden reference 未改；无回归。
+
+### 67.2 阻塞项修复核对
+
+- **读码**：`executor.rs::run_tick_sequence` 现为 `let stopped = self.run_hook_event(k)?; self.commit_eco(ecology)?; if stopped { self.stopped = true; return Ok(()); }`（k=0/1/2），与本轮 §65.2 指出的 CPU 顺序（`execute_event` → `ctx.commit` → 检查 result）一致。`commit_eco` 对 `has_set_param=false` 为 no-op，故 P7.1/P7.2/hook-free 数值不变。
+- **回归测试转绿**：`cargo test --features gpu evaluator_set_param_committed_on_stop_matches_cpu` → **1 passed**（§65 时 device 500 vs host 250）。
+- **独立扩展用例（本轮新增 3 个，全部通过）**：
+  - `evaluator_set_param_committed_on_stop_middle_and_late_events`：`SET_PARAM + STOP_IF_*` 置于 `early`/`late`，停止 tick、提交后的 `carrying_capacity` 与部分状态均与 CPU 一致；
+  - `evaluator_set_param_committed_on_stop_stochastic_matches_cpu`：随机模型同场景，提交的生态值（确定性）与 CPU 一致；
+  - `evaluator_set_param_persists_across_repeated_stops`：连续 3 次「run 1 tick 即 stop，每次 `K *= 0.5`」，设备与 CPU 每轮参数一致且等于 `K/2^r`（验证提交值跨 run 持续生效）。
+
+### 67.3 §65.5 随机统计等价扫描（已补完）
+
+新增 `evaluator_device_stochastic_hooks_statistically_match_cpu`：随机模型 + `SAMPLE(150)`（`continuous_sampling=false`），
+按**显式种子** `assemble(seed)`/`executor.set_seed(seed)` 跑 4 tick，采 100 个独立种子对比整状态总和的分布：
+
+| n | cpu mean/sd | gpu mean/sd | t | var ratio | KS |
+|---|---|---|---|---|---|
+| 40 | 281.5 / 10.9 | 284.2 / 17.8 | 0.82 | 1.63 | — |
+| 120 | 283.8 / 11.4 | 285.2 / 14.0 | 0.87 | 1.23 | 0.125 |
+| **300** | **282.90 / 12.56** | **283.90 / 12.52** | **0.98** | **0.996** | **0.083** |
+
+n=300 时方差比 **0.996**、均值差 `t=0.98`、KS=0.083（远低于 n=300 的 5% 临界 ~0.111）→ 支持统计等价；n=40/120 的方差比
+波动系小样本 + 轻尾噪声（GPU 半分样本 sd 比 n=120 时 1.44、n=300 时 1.28），非系统性偏差。永久用例采用 n=100（
+确定性种子集，非 flaky），断言 `|t|<4`、`0.5<var_ratio<2.0`、`ks<0.25`，当前实测 `t=0.83 / ratio=1.266 / ks=0.140`。
+
+### 67.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **215 passed**（作者 210 + evaluator 5） |
+| `cargo test --features gpu evaluator_set_param` | **4 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3620 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **2861/2961 = 96.62%**；executor 95.77%、kernels 97.28%、probe 96.13%、其余 100% |
+
+### 67.5 逐条发现（非阻塞）
+
+1. **low / 统计量稳定性（观察）**：整状态总和在 n=40/120 的方差比偏高（1.63/1.23），n=300 收敛到 0.996；提示小样本下不要用
+   F/方差比单指标判定，永久用例已放宽为多指标（t+方差比+KS）。设备与 CPU RNG 不同源（D3），只要求统计等价。
+2. **low / §65.3 残余未改**：`hook_apply_target_with_sperm` 负 virgin 一律 clamp 到 0（CPU 仅 `-EPS` 内 clamp、否则 panic）；
+   `trigger_event` GPU 语义；deme=batch（B=1）；stop/归约 f32；`sync_eco_scratch` 每 tick 分配 5 元素缓冲。
+
+### 67.6 阻塞项
+
+无。
+
+### 67.7 证据来源
+
+- **独立运行**：上表门禁、4 个 set_param 用例（含原回归）、统计扫描（n=40/120/300）、扩展重编、覆盖率采集。
+- **仅代码阅读**：`run_tick_sequence`/`commit_eco` 与 CPU `run_tick` commit 顺序对照、`assemble`/`set_seed`/`rng_key`、
+  `hook_apply_target_with_sperm` 负 virgin 语义。
+
+### 67.8 结论
+
+§65 阻塞项已修复且不引入回归；`SET_PARAM` 与 stop 的边界提交语义现与 CPU 一致（middle/late/随机/多次 run 均验证）；
+§65.5 统计等价扫描补齐并通过（n=300 方差比 0.996、KS 0.083）。**APPROVED**（范围：当前 HEAD `bb9a55c` 与被审测试集；
+不声称任何历史基线失败消失）。

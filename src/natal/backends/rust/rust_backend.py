@@ -1085,9 +1085,11 @@ class RustHeterogeneousSpatialLifecycleBackend:
     def enable_gpu(self) -> None:
         """Enable the optional CUDA device path for this spatial session.
 
-        Supported: hook-free, deterministic age-structured spatial models with
-        any number of demes. Raises when the extension lacks GPU support or the
-        model is ineligible; it never silently falls back to the CPU.
+        Supported: deterministic and stochastic age-structured spatial models
+        with any number of demes. Declarative hooks run per deme on the device;
+        Python callbacks are rejected. Raises when the extension lacks GPU
+        support or the model is ineligible; it never silently falls back to the
+        CPU.
 
         Raises:
             RuntimeError: The installed extension has no GPU support.

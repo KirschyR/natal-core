@@ -282,7 +282,7 @@ pop.import_state(state_flat)
 subsequent `run(...)` calls then advance it on the GPU.
 
 ```python
-pop = (...)  # a panmictic, hook-free age-structured model
+pop = (...)  # a panmictic age-structured model
 
 pop.enable_gpu()
 print(pop.gpu_status())  # "enabled"
@@ -309,7 +309,7 @@ the device batch axis, and every replicate draws from a disjoint counter-based
 random stream, so same-seed reruns are bit-reproducible on the device.
 
 ```python
-pop = (...)  # a panmictic, hook-free age-structured model
+pop = (...)  # a panmictic age-structured model
 
 pop.enable_gpu_ensemble(n_replicates=2000)
 tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
@@ -318,8 +318,11 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 # sperm_storage:    (n_replicates, n_ages, n_ztypes, n_ztypes)
 ```
 
-- **Eligibility**: same as 11.1. `enable_gpu_ensemble` raises `RuntimeError`
-  when the model is ineligible or the extension lacks GPU support.
+- **Eligibility**: panmictic and built-in growth modes. Unlike the
+  single-population path, the ensemble currently requires a **hook-free** model
+  (ensemble hook semantics are not yet defined). `enable_gpu_ensemble` raises
+  `RuntimeError` when the model is ineligible or the extension lacks GPU
+  support.
 - **Observation**: `pop.observe_gpu_ensemble(individual_count)` projects every
   replicate through the population's `Observation` (the same selector
   `History` uses) and returns a stacked observed array. The ensemble itself is
@@ -338,6 +341,16 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 The lower-level `RustLifecycleBackend.enable_gpu` / `gpu_status` /
 `enable_gpu_ensemble` / `run_gpu_ensemble` methods expose the same paths for
 backend-only callers.
+
+### 11.3 Spatial device path
+
+`RustHeterogeneousSpatialLifecycleBackend.enable_gpu()` enables the optional
+CUDA path for a spatial population. Declarative hooks run **per deme** on the
+device with the same event order and deme selectors as the CPU engine, including
+deterministic mutations, `sample`, `stop_if_*`, `set_param`, and `convert`; a
+`stop_if_*` in one deme freezes the tick and suppresses migration, while the
+other demes still complete their lifecycle — matching the CPU scheduler. Python
+callbacks are rejected.
 
 ## 12. Chapter Summary
 

@@ -340,24 +340,16 @@ impl SpatialSession {
 
     /// Enable the optional CUDA bypass for this spatial session.
     ///
-    /// Supported: hook-free, deterministic age-structured spatial models with
-    /// any number of demes. Discrete-generation and stochastic models are
-    /// rejected explicitly; the CPU path is never silently substituted.
+    /// Declarative hooks (deterministic mutations, `SAMPLE`, `STOP_IF_*`,
+    /// `SET_PARAM`, `CONVERT`) run on the device per deme; Python callbacks are
+    /// rejected. The CPU path is never silently substituted.
     ///
     /// ## Errors
     /// Returns ``PyValueError`` when the model is ineligible, or a runtime
     /// error when the device is unavailable.
     #[cfg(feature = "gpu")]
     fn enable_gpu(&mut self) -> PyResult<()> {
-        if self.hooks.n_hooks != 0
-            || self
-                .hooks
-                .python_callbacks
-                .iter()
-                .any(|callbacks| !callbacks.is_empty())
-        {
-            return Err(PyValueError::new_err("GPU path requires a hook-free model"));
-        }
+        crate::sessions::age_structured::validate_device_hooks(&self.hooks)?;
         if self
             .ecology
             .growth_mode
@@ -393,6 +385,12 @@ impl SpatialSession {
         executor
             .ensure_migration_budget(&self.blueprint)
             .map_err(map_lifecycle_error)?;
+        executor
+            .configure_hooks(&self.hooks)
+            .map_err(map_lifecycle_error)?;
+        if self.hooks.n_hooks != 0 {
+            executor.set_tick(self.state_tick.max(0) as u64);
+        }
         self.gpu = Some(executor);
         Ok(())
     }
@@ -627,13 +625,13 @@ impl SpatialSession {
     /// ## Parameters
     /// - `program`: Python CSR `HookProgram`.
     fn set_hook_program(&mut self, program: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.hooks = HookProgram::from_python(program)?;
-        Ok(())
+        let next = HookProgram::from_python(program)?;
+        install_hook_program(self, next)
     }
 
     /// Clear all declarative hooks.
     fn clear_hook_program(&mut self) {
-        self.hooks = HookProgram::default();
+        let _ = install_hook_program(self, HookProgram::default());
     }
 
     /// Register Python callables interleaved with the CSR hooks at the
@@ -1228,6 +1226,43 @@ fn validate_stacked_sperm(
     Ok(values.to_vec())
 }
 
+/// Replace a spatial session's hook program, keeping an active device
+/// interpreter in sync.
+///
+/// ## Parameters
+/// - `session`: The session owning the program.
+/// - `next`: The replacement program.
+///
+/// ## Errors
+/// Returns ``PyValueError`` when the GPU path is active and `next` is not
+/// device-eligible.
+#[cfg(feature = "gpu")]
+fn install_hook_program(session: &mut SpatialSession, next: HookProgram) -> PyResult<()> {
+    if let Some(gpu) = session.gpu.as_mut() {
+        crate::sessions::age_structured::validate_device_hooks(&next)?;
+        gpu.configure_hooks(&next).map_err(map_lifecycle_error)?;
+        if next.n_hooks != 0 {
+            gpu.set_tick(session.state_tick.max(0) as u64);
+        }
+    }
+    session.hooks = next;
+    Ok(())
+}
+
+/// CPU build of [`install_hook_program`]: only stores the program.
+///
+/// ## Parameters
+/// - `session`: The session owning the program.
+/// - `next`: The replacement program.
+///
+/// ## Errors
+/// Never fails.
+#[cfg(not(feature = "gpu"))]
+fn install_hook_program(session: &mut SpatialSession, next: HookProgram) -> PyResult<()> {
+    session.hooks = next;
+    Ok(())
+}
+
 impl SpatialSession {
     /// Run one deterministic spatial tick on the device (lifecycle then
     /// migration), leaving the result resident on the GPU.
@@ -1253,7 +1288,7 @@ impl SpatialSession {
     fn run_gpu_tick(
         gpu: &mut crate::gpu::executor::GpuExecutor,
         blueprint: &Blueprint,
-        ecology: &EcologyParams,
+        ecology: &mut EcologyParams,
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
         stay_after_send: bool,
@@ -1264,6 +1299,15 @@ impl SpatialSession {
             gpu.discrete_tick(blueprint, ecology, variants, deme_variants)?;
         } else {
             gpu.tick(blueprint, ecology, variants, deme_variants)?;
+        }
+        if let Some(values) = gpu.take_pending_eco() {
+            let n_batch = gpu.n_batch();
+            crate::gpu::executor::GpuExecutor::apply_eco_values(ecology, &values, n_batch)?;
+        }
+        // A hook stop freezes the tick and suppresses migration, matching the
+        // CPU spatial scheduler.
+        if gpu.take_stopped() {
+            return Ok(());
         }
         let all_zero = ecology.migration_rate.iter().all(|&rate| rate <= 0.0);
         if !all_zero {
@@ -1595,7 +1639,7 @@ impl SpatialSession {
             let outcome = Self::run_gpu_tick(
                 &mut gpu,
                 &self.blueprint,
-                &self.ecology,
+                &mut self.ecology,
                 &self.variants,
                 &self.deme_variants,
                 self.stay_after_send,

@@ -80,3 +80,28 @@ def test_gpu_particles_shapes_and_distinct_parameters() -> None:
     assert np.isfinite(ind).all()
     assert np.isfinite(sperm).all()
     assert not np.allclose(ind[0], ind[1]), "particles must diverge"
+
+
+def test_particles_backend_requires_gpu_build() -> None:
+    """A CPU-only extension build gives an actionable particle error."""
+    from natal.backends.rust.rust_backend import RustLifecycleBackend
+
+    class _Stub:
+        _session = object()
+
+    backend = _Stub()
+    with pytest.raises(RuntimeError, match="GPU particle support"):
+        RustLifecycleBackend.enable_gpu_particles(backend, [])  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="GPU particle support"):
+        RustLifecycleBackend.run_gpu_particles(backend, 1)  # type: ignore[arg-type]
+
+
+def test_gpu_particles_lazily_initializes_session() -> None:
+    """enable_gpu_particles creates the session when none exists yet."""
+    pop = _build_pop("__gpu_particles_lazy__")
+    pop._rust_lifecycle_backend = None  # noqa: SLF001
+    try:
+        pop.enable_gpu_particles([{"carrying_capacity": 300.0}])
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    assert pop.gpu_status() == "enabled"

@@ -16,6 +16,7 @@ This file defines authorization, risk classification, and agent collaboration. [
 - Explain and obtain approval before expanding scope, changing public API or scientific model semantics outside the authorization, adding production dependencies, or performing destructive operations. Do not ask again for changes already explicitly authorized.
 - When several implementations are viable, choose a simple, verifiable approach consistent with the existing architecture. Ask only when missing information, user preferences, or important tradeoffs affect the decision; continue independent work while waiting.
 - Do not commit, push, modify `.gitignore`, or create Markdown documentation files without an explicit user request. Necessary synchronization of existing documentation is part of the authorized task.
+- One-line commit messages use a **Chinese** description after the type prefix (`feat`/`fix`/`docs`, …), and the agent commits with that exact message, e.g. `feat(gpu): 在设备上执行声明式钩子`.
 - Preserve existing user changes. Do not expand repair scope, suppress errors, or alter check configuration to manufacture passing results.
 
 ## Implementation and Communication

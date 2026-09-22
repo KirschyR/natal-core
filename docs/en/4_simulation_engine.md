@@ -375,6 +375,9 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
 - **Shared**: the initial state and genetics are shared across particles; each
   particle keeps its own ecology column on the device.
 - **Hooks**: declarative hooks run per particle (Python callbacks are rejected).
+  Particles are panmictic, so a hook's deme selector is evaluated against
+  **deme 0** for every particle (matching `B` independent single-population CPU
+  runs).
 - **Eligibility**: panmictic, built-in growth modes (0–4). `enable_gpu_particles`
   raises `ValueError` for an empty list or an ineligible model, and
   `RuntimeError` when the extension lacks GPU support.

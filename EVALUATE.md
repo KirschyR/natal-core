@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 30 轮：**APPROVED**（§69；P7.4a 空间 per-deme 声明式钩子 + per-batch stop 冻结/恢复 + 迁移跳过） |
-| 待回执 | §71（第 31 轮 P9：GPU particle，per-particle 参数 `enable_gpu_particles`/`run_gpu_particles`） |
-| 主 agent 处理 | 第 31 轮：P9 已实现并自测；P7.4b（同参数 ensemble 钩子）暂缓 |
-| 待 evaluator 动作 | 按 §70 复核，把第 31 轮结论写入 §71 |
+| 最近回执 | 第 31 轮：**APPROVED**（§71；P9 GPU particle，per-particle 参数公开入口 + 逐 particle/逐字段与独立 CPU 一致） |
+| 待回执 | §73（第 32 轮：修 §71.5 的 selector 语义——panmictic 路径 deme=0，仅空间用 deme=b） |
+| 主 agent 处理 | 第 32 轮：P9 selector 语义已修复并自测；待复核 |
+| 待 evaluator 动作 | 按 §72 复核，把第 32 轮结论写入 §73 |
 
 ## 0. 一句话目标
 
@@ -1822,6 +1822,56 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 设备 RNG 仅统计等价（D3）；归约/停止阈值 f32（§63.5）。
 
 结论请追加为 **§71**。
+
+---
+
+## 72. 第 32 轮交接 — 修复 §71.5 selector 语义（panmictic 路径 deme=0）
+
+- 日期：2026-09-22
+- 背景：§71 APPROVED（P9）。按 §71.5 finding 2，修复「particle 路径把 particle 索引当 deme」导致带 deme selector 的钩子与独立 CPU 参考不一致的问题。
+- 风险分类：**高风险修复**（钩子 selector 语义；设备解释器 kernel 参数）。
+
+### 72.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `apply_hook_event` 增 `int panmictic` 参数；`deme_id = panmictic ? 0 : b`，`hook_deme_matches` 以 `deme_id` 求值（原先固定 `b`）。启动器增 `panmictic: bool` 并传参。 |
+| `rust/src/gpu/executor.rs` | `DeviceHooks` 增 `panmictic`；`configure_hooks(program, panmictic)` 记录模式；`run_hook_event` 传 `hooks.panmictic`。 |
+| `rust/src/sessions/age_structured.rs` | 单群体 `enable_gpu`、`enable_gpu_particles_ecologies`、`install_hook_program` 调 `configure_hooks(..., true)`（panmictic）。 |
+| `rust/src/sessions/spatial.rs` | `enable_gpu`、`install_hook_program` 调 `configure_hooks(..., false)`（空间 `deme=b` 不变）。 |
+| `docs/{en,zh}/4_simulation_engine.md` | §11.4 说明 particle 的钩子 deme selector 按 deme 0 解释。 |
+| 测试 | 新增 `session_gpu_particles_deme_selector_matches_cpu`：粒子程序用 deme selector `[0]`，三个 particle 全部命中，与 3 个独立 CPU session 逐 cell 一致。 |
+
+### 72.2 行为
+
+- **panmictic 批次**（单群体 B=1、ensemble、particle）：钩子的 deme selector 一律按 **deme 0** 求值，与 B 个独立单群体 CPU session 的语义一致。
+- **空间**：仍按 `deme = batch` 调度，既有空间 selector 用例（§69 evaluator 的 range/list/global）不变。
+- 无钩子路径不变；P7.1–P7.3 的 panmictic B=1 行为不变（b 本就为 0）。
+
+### 72.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu session_gpu_particles_deme_selector_matches_cpu` | **passed** |
+| `cargo test --features gpu` | **226 passed, 0 failed** |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3625 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **3009/3113 = 96.66%**；executor 95.9%、kernels 97.3%、probe 96.1%，其余 100% |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 72.4 请 evaluator 独立核对
+
+- **particle selector**：带 deme selector（1/2/3/全局）的钩子在粒子路径按 deme 0 求值，与 B 个独立 CPU session 对照一致。
+- **空间 selector 无回归**：空间 per-deme selector（含 range/list）仍按 `deme=b`，与 CPU 一致。
+- **P7.1–P7.3 panmictic 无回归**：B=1 路径逐位/容差不变。
+- CPU 不变性 / 门禁 / 覆盖率同既往口径。
+
+### 72.5 残余风险（非阻塞）
+
+- `run_gpu_particles` 仍不更新会话 `state_tick`（与 `run_gpu_ensemble` 同，§71.5 finding 1）。
+- 已灭绝 particle 不跳阶段；初始状态/genetics 共享（P9 v1 边界）。
+
+结论请追加为 **§73**。
 
 ---
 
@@ -3721,3 +3771,82 @@ P7.4a 空间 per-deme 声明式钩子、per-deme selector、per-deme `SET_PARAM`
 P7.4a 空间 per-deme 钩子（selector/opcode/stop/set_param/迁移跳过）在受支持路径上与 CPU golden reference 一致，
 panmictic/hook-free/离散无回归，测试与门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `1c761ab` 与被审测试集；
 不声称任何历史基线失败消失）。§69.5 为已知非阻塞残余。
+
+---
+
+## 71. 第 31 轮结论（evaluator 独立执行，2026-09-22，HEAD=`eca167b`）
+
+### 71.1 裁定：**APPROVED**
+
+P9 GPU particle（`enable_gpu_particles`/`run_gpu_particles`，per-particle 参数）经独立复核：B 个 particle 与 B 个独立
+CPU session 逐 particle、逐 cell 一致（覆盖全部标量/向量字段），batch 轴顺序与返回堆叠顺序一致；钩子（含 per-particle
+`SET_PARAM`）正确；公开 API 错误路径显式；无回归。CPU golden reference 未改。
+
+### 71.2 独立新增/补强用例
+
+**Rust（3 个，已保留在 `session.rs`）**
+- `evaluator_gpu_particles_all_fields_match_independent_cpu`：3 个 particle，**每个字段都取不同值**
+  （`carrying_capacity`/`eggs_per_female`/`sex_ratio`/`sperm_displacement_rate`/`low_density_growth_rate`/
+  `survival_rates`/`mating_rates`/`reproduction_rates`/`fertility`/`competition_weights`），3 tick 后逐 particle 与
+  独立 CPU session 对照，并断言各 particle 互异。这能捕获 `stack_ecologies` 的字段错位/顺序 bug。
+- `evaluator_gpu_particles_hooks_and_set_param_match_cpu`：同一 program（`SET_PARAM(carrying_capacity*0.5)` + `SCALE 0.9`）
+  在 3 个不同参数的 particle 上执行，逐 particle 与独立 CPU session 对照——验证 per-particle `SET_PARAM` 写各自生态列。
+- `evaluator_gpu_particles_reject_invalid`：空列表、未启用即 run、非 panmictic（`n_demes=2`）、自定义 `growth_mode=5` 均显式 `Err`。
+
+**Python（补 2 个，测试 `tests/test_gpu_particles_frontend.py`，使新增行覆盖 100%）**
+- `test_particles_backend_requires_gpu_build`：桩 `_session` 无 particle 方法 → `RuntimeError`（覆盖 backend 两个防御分支）。
+- `test_gpu_particles_lazily_initializes_session`：`_rust_lifecycle_backend=None` → `enable_gpu_particles` 走惰性初始化分支。
+
+**独立 Python E2E `/tmp/l3_particles.py`**：3 个 particle（不同 `carrying_capacity`/`eggs_per_female`），公开入口运行 3 tick，
+逐 particle 与独立 CPU population 对照 max_rel ≤ **1.16e-07**，形状 `(3,2,4,3)`/`(3,4,3,3)` 正确，空列表/未启用显式报错。
+
+### 71.3 独立核对（读码）
+
+- `stack_ecologies` 逐字段拼接，与 `tile_ecology`（ensemble 已用）的列布局一致（`n_demes=B`，batch-major）；`eco_value(id, batch)`/`set_eco_value` 按 batch 索引。
+- `enable_gpu_particles_ecologies`：校验 `n>=1`、`blueprint/params.n_demes==1`、`validate_device_hooks`、`growth_mode∈0..=4`；tile 会话初始状态到 B；`set_seed`/`ensure_migration_budget`/`configure_hooks`/`set_tick` 与既有入口一致；`particle_ecology` 在 `enable_gpu`/`enable_gpu_ensemble` 时清空。
+- `run_gpu_particles`：逐 tick `gpu.tick(..., &ecology, ...)` 并用 `take_pending_eco` 提交 per-particle `SET_PARAM`；导出堆叠 `ind/sperm`。
+- **API 混用是显式失败**：`enable_gpu_particles` 后误调 `pop.run(1)` → `RuntimeError: reproduction_tick needs 2 deme-variant ids, got 1`（非静默）。
+- 不影响既有路径：`rust/src/gpu/**` 本轮零改动；`enable_gpu`/`enable_gpu_ensemble`/空间/phase0 未变。
+
+### 71.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **225 passed**（作者 222 + evaluator 3） |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3625 passed**（含 `test_gpu_particles_frontend.py` 5 passed） |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| Rust `src/gpu/**` 覆盖率 | 本轮 `rust/src/gpu/**` 零改动；沿用 §69 实测 **3003/3107 = 96.65%** |
+| Python 新增可执行行 | **40/40 = 100%**（backend 11/11、frontend 29/29；补测后无未覆盖） |
+
+> 环境注记：工作树另有 **`AGENTS.md` 的未提交文档改动**（新增一句话 commit message 规范），非 P9 产品代码，evaluator 未改动。
+
+### 71.5 逐条发现（均非阻塞）
+
+1. **low / `run_gpu_particles` 不更新 `state_tick`**：与 `run_gpu_ensemble` 一致；设备 tick 在 executor 内继续，
+   但会话 `state_tick` 不同步。若用户混用 `run()`/snapshot 会看到旧 tick。建议文档声明（v1 与 ensemble 同边界）。
+2. **low / per-particle selector 语义未定义/未文档化**：设备以 particle 索引当作 `deme` 传给 `hook_deme_matches`；
+   全局 selector 正常，但带 `deme` selector 的钩子在 particle 路径会按 particle 命中（无 CPU 独立 session 对应语义）。
+   建议文档说明或限制。
+3. **low / 已灭绝 particle 不跳阶段**：v1 已知边界（与 P7.4b 同）。
+4. **low / 共享初始状态与 genetics**：v1 已知；per-particle 初始状态/genetics 未做。
+
+### 71.6 阻塞项
+
+无。
+
+### 71.7 证据来源
+
+- **独立运行**：上表门禁、3 个 Rust particle 用例、2 个 Python 补测、`/tmp/l3_particles.py`、扩展重编、Python 新增行覆盖统计。
+- **仅代码阅读**：`stack_ecologies`/`tile_ecology` 对照、`enable_gpu_particles_ecologies`/`run_gpu_particles`、
+  backend/frontend 透传、`EcologyParams::eco_value`/`set_eco_value`、API 混用显式报错探针。
+
+### 71.8 结论
+
+P9 per-particle 参数公开入口在受支持路径上与独立 CPU session 逐 particle/逐字段一致，钩子与错误路径正确，
+无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `eca167b` 与被审测试集；不声称任何历史基线失败消失）。
+§71.5 为已知非阻塞边界。

@@ -386,7 +386,7 @@ impl SpatialSession {
             .ensure_migration_budget(&self.blueprint)
             .map_err(map_lifecycle_error)?;
         executor
-            .configure_hooks(&self.hooks)
+            .configure_hooks(&self.hooks, false)
             .map_err(map_lifecycle_error)?;
         if self.hooks.n_hooks != 0 {
             executor.set_tick(self.state_tick.max(0) as u64);
@@ -1240,7 +1240,8 @@ fn validate_stacked_sperm(
 fn install_hook_program(session: &mut SpatialSession, next: HookProgram) -> PyResult<()> {
     if let Some(gpu) = session.gpu.as_mut() {
         crate::sessions::age_structured::validate_device_hooks(&next)?;
-        gpu.configure_hooks(&next).map_err(map_lifecycle_error)?;
+        gpu.configure_hooks(&next, false)
+            .map_err(map_lifecycle_error)?;
         if next.n_hooks != 0 {
             gpu.set_tick(session.state_tick.max(0) as u64);
         }

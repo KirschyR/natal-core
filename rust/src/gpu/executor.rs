@@ -232,6 +232,9 @@ struct DeviceHooks {
     convert_source_z: DeviceBuffer<i32>,
     /// Per-op convert target ztype (`-1` when not a convert).
     convert_target_z: DeviceBuffer<i32>,
+    /// Whether the model is panmictic (no deme axis): deme selectors then
+    /// match every batch element as deme 0.
+    panmictic: bool,
     /// Whether the program contains any `STOP_IF_*` op (flag read needed).
     has_stop: bool,
     /// Per-batch stop flags written by `STOP_IF_*` reductions.
@@ -408,6 +411,8 @@ impl GpuExecutor {
     ///
     /// ## Parameters
     /// - `program`: The session's declarative hook program.
+    /// - `panmictic`: Whether the batch axis is a panmictic batch (no deme
+    ///   axis), so deme selectors evaluate against deme 0 for every element.
     ///
     /// ## Returns
     /// `Ok(())` when the CSR arrays are resident (or the program is empty).
@@ -418,6 +423,7 @@ impl GpuExecutor {
     pub fn configure_hooks(
         &mut self,
         program: &crate::hooks::interpreter::HookProgram,
+        panmictic: bool,
     ) -> Result<(), String> {
         if program.n_hooks == 0 {
             self.hooks = None;
@@ -474,6 +480,7 @@ impl GpuExecutor {
                 &stream,
                 &to_i32_vec(&program.convert_target_z)?,
             )?,
+            panmictic,
             has_stop: program.op_types.iter().any(|op| (6..=9).contains(op)),
             stop_mask: DeviceBuffer::from_host(&stream, &stop_mask_host)?,
             has_set_param: program.op_types.contains(&10),
@@ -562,6 +569,7 @@ impl GpuExecutor {
                 self.n_ztypes,
                 self.n_batch,
                 event_id,
+                hooks.panmictic,
                 stochastic,
                 continuous,
                 key0,

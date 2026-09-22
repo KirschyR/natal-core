@@ -217,11 +217,11 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **222**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
-  （跳过硬件）、`ruff`、`pyright`、`pytest`（3623）、`phase0_baseline.py --check`。
+  `cargo test --features gpu`（当前 **226**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  （跳过硬件）、`ruff`、`pyright`、`pytest`（3625）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
-  `src/gpu/../../tests/...`），当前聚合 **96.65%**（executor 95.9%、kernels 97.3%、probe 96.1%）；新模块需 ≥95%。
+  `src/gpu/../../tests/...`），当前聚合 **96.66%**（executor 95.9%、kernels 97.3%、probe 96.1%）；新模块需 ≥95%。
 - 高风险改动必须由独立 evaluator 复核（走 `EVALUATE.md`，用 `adversarial-review` 技能）。
 
 ---
@@ -275,7 +275,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P7.2 | 设备侧 `STOP_IF_*` 门控 + 按 opcode 放开（§62） | APPROVED（§63） |
 | P7.3 | `SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG（§64） | APPROVED（§67；§65 阻塞项已修复） |
 | P7.4a | 空间钩子（per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过）（§68） | APPROVED（§69） |
-| P9 | GPU particle：per-particle 参数（`enable_gpu_particles`/`run_gpu_particles`）（§70） | **已实现，待 §71 复核** |
+| P9 | GPU particle：per-particle 参数（`enable_gpu_particles`/`run_gpu_particles`）（§70） | APPROVED（§71） |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -342,8 +342,8 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 ### 11.6 接手状态快照（2026-09-21，上下文切换）
 
 - **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.3 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67）。
-- **最近回执**：§67（P7.3）**APPROVED**。
-- **待回执**：**§71**（P9：GPU particle per-particle 参数）——已实现并自测，**未批准**。
+- **最近回执**：§71（P9）**APPROVED**。
+- **待回执**：无（P9 APPROVED §71）。
 - **后续未开始**：**P7.4b**（ensemble 钩子，语义待定；用户已澄清其大 B 场景为 per-particle 参数，由 P9 承接）；**B7** 低优先；
   **E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
 - **门禁基线（§69 时）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **221**、
@@ -353,6 +353,10 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
   （对每个 particle `EcologyParams::from_python(_,1)` 后 `stack_ecologies` 成 `n_demes=B`）+ `run_gpu_particles`；
   初始状态/genetics 共享；声明式钩子按 particle 执行。Rust 对照测试 `session_gpu_particles_match_independent_cpu_runs`；
   Python 测试 `tests/test_gpu_particles_frontend.py`。
+- **P9 selector 语义已修（§72）**：钩子内核按 panmictic 模式对**每个 batch 用 deme=0**（单群体/ensemble/particle），仅**空间**路径用 `deme=b`；
+  新测试 `session_gpu_particles_deme_selector_matches_cpu`。
+- **P9 已知边界（非阻塞）**：`run_gpu_particles` 不更新会话 `state_tick`（与 ensemble 同）；
+  已灭绝 particle 不跳阶段；初始状态/genetics 共享。
 - **P7.3 要点**：`HOOK_SOURCE` 增设备端 `hook_sample_survivors`/`hook_apply_target_*`/`hook_convert_count`、
   `hook_eval_rpn`（set_param）；内核接收 `eco`/RNG 参数；`DeviceHooks` 增 `has_set_param` 与 sp/RPN/eco 缓冲；
   `GpuExecutor` 增 `sync_eco_scratch`/`take_eco_scratch`/`apply_eco_values`/`take_pending_eco` 与 `EcoView`

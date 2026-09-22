@@ -2563,6 +2563,7 @@ extern "C" __global__ void apply_hook_event(
     int n_ztypes,
     int n_batch,
     int event_id,
+    int panmictic,
     int stochastic,
     int continuous,
     unsigned int key0,
@@ -2579,6 +2580,9 @@ extern "C" __global__ void apply_hook_event(
         return;
     }
     float* eco_row = eco + (long long)b * NATAL_N_ECO_PARAMS;
+    // A panmictic batch (single population, ensemble, or particle) has no deme
+    // axis; every element is deme 0 so deme selectors match the CPU reference.
+    int deme_id = panmictic ? 0 : b;
     // One reproducible counter-based stream per batch element; hook draws use
     // a site that does not collide with the lifecycle stages.
     RngState rng;
@@ -2587,7 +2591,7 @@ extern "C" __global__ void apply_hook_event(
     int hook_end = hook_offsets[event_id + 1];
     for (int hook = hook_start; hook < hook_end; ++hook) {
         if (!hook_deme_matches(
-                deme_selector_types, deme_selector_offsets, deme_selector_data, hook, b)) {
+                deme_selector_types, deme_selector_offsets, deme_selector_data, hook, deme_id)) {
             continue;
         }
         int op_start = op_offsets[hook];
@@ -4136,6 +4140,7 @@ impl Kernels {
         n_ztypes: usize,
         n_batch: usize,
         event_id: usize,
+        panmictic: bool,
         stochastic: bool,
         continuous: bool,
         key0: u32,
@@ -4155,6 +4160,7 @@ impl Kernels {
         let n_ztypes_i = n_ztypes as i32;
         let n_batch_i = n_batch as i32;
         let event_i = event_id as i32;
+        let panmictic_i = i32::from(panmictic);
         let stochastic_i = i32::from(stochastic);
         let continuous_i = i32::from(continuous);
         let tick_i = tick as i64;
@@ -4196,6 +4202,7 @@ impl Kernels {
         launch.arg(&n_ztypes_i);
         launch.arg(&n_batch_i);
         launch.arg(&event_i);
+        launch.arg(&panmictic_i);
         launch.arg(&stochastic_i);
         launch.arg(&continuous_i);
         launch.arg(&key0);

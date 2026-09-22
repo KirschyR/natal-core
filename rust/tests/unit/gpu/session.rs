@@ -2052,3 +2052,326 @@ fn session_gpu_particles_match_independent_cpu_runs() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for P9 GPU particles (per-particle parameters).
+// ---------------------------------------------------------------------------
+
+/// A single-deme ecology with a distinct value in every scalar/vector field,
+/// indexed by particle `k`.
+fn particle_ecology(base: &EcologyParams, k: usize) -> EcologyParams {
+    let mut p = base.clone();
+    let s = k as f64;
+    p.carrying_capacity[0] = 300.0 + 200.0 * s;
+    p.eggs_per_female[0] = 6.0 + 2.0 * s;
+    p.sex_ratio[0] = 0.3 + 0.2 * s;
+    p.sperm_displacement_rate[0] = 0.05 + 0.05 * s;
+    p.low_density_growth_rate[0] = 2.0 + s;
+    p.survival_rates = p
+        .survival_rates
+        .iter()
+        .map(|v| v * (0.95 - 0.05 * s))
+        .collect();
+    p.mating_rates = p
+        .mating_rates
+        .iter()
+        .map(|v| (v * (0.9 - 0.05 * s)).min(1.0))
+        .collect();
+    p.reproduction_rates = p
+        .reproduction_rates
+        .iter()
+        .map(|v| v * (0.95 - 0.05 * s))
+        .collect();
+    p.fertility = p.fertility.iter().map(|v| v * (0.95 - 0.03 * s)).collect();
+    p.competition_weights = p
+        .competition_weights
+        .iter()
+        .map(|v| v * (0.8 + 0.1 * s))
+        .collect();
+    p
+}
+
+#[test]
+fn evaluator_gpu_particles_all_fields_match_independent_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let particles: Vec<EcologyParams> = (0..3).map(|k| particle_ecology(&base, k)).collect();
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.enable_gpu_particles_ecologies(particles.clone())
+            .expect("enable particles");
+        let (_, ind_arr, sperm_arr) = gpu.run_gpu_particles(py, 3).expect("run particles");
+        let ind_flat: Vec<f64> = ind_arr.readonly().as_slice().expect("ind slice").to_vec();
+        let sperm_flat: Vec<f64> = sperm_arr
+            .readonly()
+            .as_slice()
+            .expect("sperm slice")
+            .to_vec();
+
+        let ind_block = 2 * 4 * 2;
+        let sperm_block = 4 * 2 * 2;
+        let mut blocks: Vec<Vec<f64>> = Vec::new();
+        for (index, part) in particles.iter().enumerate() {
+            let mut cpu = make_session(
+                blueprint.clone(),
+                part.clone(),
+                genetics.clone(),
+                ind.clone(),
+                sperm.clone(),
+            );
+            cpu.run_inner(py, 3, 0, None, 0).expect("cpu run");
+
+            let gblock = &ind_flat[index * ind_block..(index + 1) * ind_block];
+            for (cell, (got, want)) in gblock.iter().zip(cpu.state_ind.iter()).enumerate() {
+                let (got, want) = (*got as f32, *want as f32);
+                assert!(
+                    (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                    "particle {index} ind[{cell}]: device {got} vs host {want}"
+                );
+            }
+            for (cell, (got, want)) in sperm_flat[index * sperm_block..(index + 1) * sperm_block]
+                .iter()
+                .zip(cpu.state_sperm.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                assert!(
+                    (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                    "particle {index} sperm[{cell}]: device {got} vs host {want}"
+                );
+            }
+            blocks.push(gblock.to_vec());
+        }
+        assert_ne!(blocks[0], blocks[1], "particle 0 vs 1 must differ");
+        assert_ne!(blocks[1], blocks[2], "particle 1 vs 2 must differ");
+    });
+}
+
+#[test]
+fn evaluator_gpu_particles_hooks_and_set_param_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        // first: SET_PARAM(carrying_capacity*0.5) then SCALE 0.9, globally.
+        let build = || {
+            let mut q = HookProgram::default();
+            q.n_events = 4;
+            q.n_hooks = 1;
+            q.hook_offsets = vec![0, 1, 1, 1, 1];
+            q.op_offsets = vec![0, 2];
+            q.op_types = vec![10, 0];
+            q.zidx_offsets = vec![0, 2, 4];
+            q.zidx_data = vec![0, 1, 0, 1];
+            q.age_offsets = vec![0, 4, 8];
+            q.age_data = vec![0, 1, 2, 3, 0, 1, 2, 3];
+            q.sex_masks = vec![true, true, true, true];
+            q.params = vec![0.0, 0.9];
+            q.condition_offsets = vec![0, 0, 0];
+            q.deme_selector_types = vec![0];
+            q.deme_selector_offsets = vec![0, 0];
+            q.convert_source_z = vec![-1, -1];
+            q.convert_target_z = vec![-1, -1];
+            q.sp_param_ids = vec![0, -1];
+            q.sp_every = vec![1, 1];
+            q.sp_start = vec![0, 0];
+            q.rpn_offsets = vec![0, 3, 3];
+            q.rpn_kinds = vec![1, 0, 4];
+            q.rpn_payload = vec![0, 0, 0];
+            q.sp_literals = vec![0.5];
+            q.has_set_param = true;
+            q
+        };
+
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let particles: Vec<EcologyParams> = (0..3).map(|k| particle_ecology(&base, k)).collect();
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.hooks = build();
+        gpu.enable_gpu_particles_ecologies(particles.clone())
+            .expect("enable particles");
+        let (_, ind_arr, sperm_arr) = gpu.run_gpu_particles(py, 2).expect("run particles");
+        let ind_flat: Vec<f64> = ind_arr.readonly().as_slice().expect("ind slice").to_vec();
+        let sperm_flat: Vec<f64> = sperm_arr
+            .readonly()
+            .as_slice()
+            .expect("sperm slice")
+            .to_vec();
+
+        let ind_block = 2 * 4 * 2;
+        let sperm_block = 4 * 2 * 2;
+        for (index, part) in particles.iter().enumerate() {
+            let mut cpu = make_session(
+                blueprint.clone(),
+                part.clone(),
+                genetics.clone(),
+                ind.clone(),
+                sperm.clone(),
+            );
+            cpu.hooks = build();
+            cpu.run_inner(py, 2, 0, None, 0).expect("cpu run");
+            for (cell, (got, want)) in ind_flat[index * ind_block..(index + 1) * ind_block]
+                .iter()
+                .zip(cpu.state_ind.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                assert!(
+                    (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                    "hooked particle {index} ind[{cell}]: device {got} vs host {want}"
+                );
+            }
+            for (cell, (got, want)) in sperm_flat[index * sperm_block..(index + 1) * sperm_block]
+                .iter()
+                .zip(cpu.state_sperm.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                assert!(
+                    (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                    "hooked particle {index} sperm[{cell}]: device {got} vs host {want}"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn evaluator_gpu_particles_reject_invalid() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        let mut empty = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        assert!(
+            empty.enable_gpu_particles_ecologies(Vec::new()).is_err(),
+            "empty particle list must reject"
+        );
+        assert!(
+            empty.run_gpu_particles(py, 1).is_err(),
+            "run without enable must reject"
+        );
+
+        let (mut nonpan, params2, genetics2) = fixture();
+        nonpan.n_demes = 2;
+        let mut session = make_session(nonpan, params2, genetics2, ind.clone(), sperm.clone());
+        assert!(
+            session
+                .enable_gpu_particles_ecologies(vec![params.clone()])
+                .is_err(),
+            "non-panmictic must reject"
+        );
+
+        let (blueprint3, params3, genetics3) = fixture();
+        let mut bad = params3.clone();
+        bad.growth_mode[0] = 5;
+        let mut custom = make_session(blueprint3, params3, genetics3, ind.clone(), sperm.clone());
+        assert!(
+            custom.enable_gpu_particles_ecologies(vec![bad]).is_err(),
+            "custom growth must reject"
+        );
+    });
+}
+
+#[test]
+fn session_gpu_particles_deme_selector_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let base = make_session(
+            blueprint.clone(),
+            params,
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        )
+        .params
+        .clone();
+        let particle = |k: f64| {
+            let mut p = base.clone();
+            p.carrying_capacity[0] = k;
+            p
+        };
+        let particles = vec![particle(300.0), particle(500.0), particle(800.0)];
+
+        // A deme selector `[0]`: every particle is a panmictic model (deme 0),
+        // so all particles must scale, matching the independent CPU sessions.
+        let program = || {
+            let mut hook = eval_hook(eval_op(0, 0.5));
+            hook.deme_type = 1;
+            hook.deme_data = vec![0];
+            eval_program([vec![hook], Vec::new(), Vec::new(), Vec::new()])
+        };
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.hooks = program();
+        gpu.enable_gpu_particles_ecologies(particles.clone())
+            .expect("enable particles");
+        let (_, ind_flat, _) = gpu.run_gpu_particles(py, 2).expect("run particles");
+        let ind_values: Vec<f64> = ind_flat.readonly().as_slice().expect("ind slice").to_vec();
+        let ind_block = 2 * 4 * 2;
+
+        for (index, part) in particles.iter().enumerate() {
+            let mut cpu = make_session(
+                blueprint.clone(),
+                part.clone(),
+                genetics.clone(),
+                ind.clone(),
+                sperm.clone(),
+            );
+            cpu.hooks = program();
+            cpu.run_inner(py, 2, 0, None, 0).expect("cpu run");
+            for (cell, (got, want)) in ind_values[index * ind_block..(index + 1) * ind_block]
+                .iter()
+                .zip(cpu.state_ind.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "particle {index} ind[{cell}]: device {got} vs host {want}"
+                );
+            }
+        }
+    });
+}

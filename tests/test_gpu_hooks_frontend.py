@@ -83,19 +83,25 @@ def test_gpu_hooks_match_cpu() -> None:
     np.testing.assert_allclose(got, want, rtol=1.2e-5, atol=1e-4)
 
 
-def test_gpu_hooks_unsupported_opcode_rejected() -> None:
-    """Sampling hooks are reserved for P7.3 and must be rejected explicitly."""
+def test_gpu_hooks_sample_runs() -> None:
+    """Sampling hooks run on the device from P7.3."""
     pop = _build_hooked_pop(
         "__gpu_hooks_sample__",
         [
             (
-                (nt.Op.sample(genotypes="*", size=1),),
+                (nt.Op.sample(genotypes="*", size=10),),
                 {"event": "early"},
             )
         ],
     )
-    with pytest.raises((RuntimeError, ValueError), match="opcode"):
+    try:
         pop.enable_gpu()
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU unavailable: {exc}")
+    assert pop.gpu_status() == "enabled"
+    pop.run(3)
+    assert pop.tick == 3
+    assert np.isfinite(pop.state.individual_count).all()
 
 
 def test_gpu_hooks_stop_gating_matches_cpu() -> None:
@@ -130,8 +136,8 @@ def test_gpu_hooks_stop_gating_matches_cpu() -> None:
     )
 
 
-def test_gpu_hooks_stochastic_model_rejected() -> None:
-    """Hooks on a stochastic model stay host-only until P7.3."""
+def test_gpu_hooks_stochastic_model_runs() -> None:
+    """Stochastic models may now carry device hooks (P7.3)."""
     species = nt.Species.from_dict(
         name="__gpu_hooks_stochastic__",
         structure={"chr1": {"loc": ["WT", "Dr"]}},
@@ -157,5 +163,11 @@ def test_gpu_hooks_stochastic_model_rejected() -> None:
         )
         .build()
     )
-    with pytest.raises((RuntimeError, ValueError), match="deterministic"):
+    try:
         pop.enable_gpu()
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU unavailable: {exc}")
+    assert pop.gpu_status() == "enabled"
+    pop.run(3)
+    assert pop.tick == 3
+    assert np.isfinite(pop.state.individual_count).all()

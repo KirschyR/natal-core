@@ -274,13 +274,14 @@ impl AgeStructuredSession {
 
     /// Enable the optional CUDA bypass for this session.
     ///
-    /// The device path currently covers deterministic, panmictic age-structured
-    /// models. Deterministic declarative hooks (SCALE/SET/ADD/SUBTRACT/KILL/
-    /// CONVERT) and `STOP_IF_*` gating execute on the device at the same event
-    /// points as the CPU engine; stochastic hooks, `set_param`, and Python
-    /// callbacks are rejected. The current state is uploaded once; subsequent
-    /// ``run`` calls execute the whole tick on the device and copy the final
-    /// state back. Refuses explicitly (never silently falls back to CPU).
+    /// The device path currently covers panmictic age-structured models.
+    /// Declarative hooks — deterministic mutations, `SAMPLE`, `STOP_IF_*`,
+    /// `SET_PARAM`, and `CONVERT` — execute on the device at the same event
+    /// points as the CPU engine, for deterministic and stochastic models;
+    /// Python callbacks are rejected. The current state is uploaded once;
+    /// subsequent ``run`` calls execute the whole tick on the device and copy
+    /// the final state back. Refuses explicitly (never silently falls back to
+    /// CPU).
     ///
     /// ## Errors
     /// Returns ``PyValueError`` when the model is ineligible, or a runtime
@@ -292,7 +293,7 @@ impl AgeStructuredSession {
                 "GPU path currently supports panmictic models only",
             ));
         }
-        validate_device_hooks(&self.hooks, self.blueprint.stochastic)?;
+        validate_device_hooks(&self.hooks)?;
         if self
             .params
             .growth_mode
@@ -1106,13 +1107,11 @@ impl AgeStructuredSession {
 ///
 /// ## Parameters
 /// - `hooks`: The candidate program.
-/// - `stochastic`: Whether the owning blueprint samples stochastically.
 ///
 /// ## Errors
-/// Returns ``PyValueError`` for Python callbacks, unsupported opcodes, or
-/// hooks on a stochastic model.
+/// Returns ``PyValueError`` for Python callbacks or unsupported opcodes.
 #[cfg(feature = "gpu")]
-fn validate_device_hooks(hooks: &HookProgram, stochastic: bool) -> PyResult<()> {
+fn validate_device_hooks(hooks: &HookProgram) -> PyResult<()> {
     if hooks.has_python_callbacks() {
         return Err(PyValueError::new_err(
             "GPU path does not support Python hook callbacks",
@@ -1121,13 +1120,8 @@ fn validate_device_hooks(hooks: &HookProgram, stochastic: bool) -> PyResult<()> 
     if let Some(opcode) = hooks.first_unsupported_device_op() {
         return Err(PyValueError::new_err(format!(
             "GPU path does not support hook opcode {opcode}; supported opcodes \
-             are SCALE, SET, ADD, SUBTRACT, KILL, CONVERT, STOP_IF_*"
+             are SCALE, SET, ADD, SUBTRACT, KILL, SAMPLE, CONVERT, STOP_IF_*, SET_PARAM"
         )));
-    }
-    if hooks.n_hooks != 0 && stochastic {
-        return Err(PyValueError::new_err(
-            "GPU hooks require a deterministic model",
-        ));
     }
     Ok(())
 }
@@ -1144,7 +1138,7 @@ fn validate_device_hooks(hooks: &HookProgram, stochastic: bool) -> PyResult<()> 
 #[cfg(feature = "gpu")]
 fn install_hook_program(session: &mut AgeStructuredSession, next: HookProgram) -> PyResult<()> {
     if let Some(gpu) = session.gpu.as_mut() {
-        validate_device_hooks(&next, session.blueprint.stochastic)?;
+        validate_device_hooks(&next)?;
         gpu.configure_hooks(&next).map_err(map_lifecycle_error)?;
         if next.n_hooks != 0 {
             gpu.set_tick(session.state_tick.max(0) as u64);
@@ -1497,7 +1491,7 @@ impl AgeStructuredSession {
     fn run_gpu(
         gpu: &mut crate::gpu::executor::GpuExecutor,
         blueprint: &Blueprint,
-        params: &EcologyParams,
+        params: &mut EcologyParams,
         genetics: &GeneticsTensors,
         state_ind: &mut Vec<f64>,
         state_sperm: &mut Vec<f64>,
@@ -1509,6 +1503,11 @@ impl AgeStructuredSession {
         let mut stopped = false;
         for _ in 0..n_ticks.max(0) {
             gpu.tick(blueprint, params, &variants, &deme_variants)?;
+            // Persist any set_param writes so the next tick and the Python
+            // params view see the committed ecology.
+            if let Some(values) = gpu.take_pending_eco() {
+                crate::gpu::executor::GpuExecutor::apply_eco_values(params, &values)?;
+            }
             if gpu.take_stopped() {
                 stopped = true;
                 break;
@@ -1535,7 +1534,7 @@ impl AgeStructuredSession {
             let outcome = Self::run_gpu(
                 &mut gpu,
                 &self.blueprint,
-                &self.params,
+                &mut self.params,
                 &self.genetics,
                 &mut self.state_ind,
                 &mut self.state_sperm,

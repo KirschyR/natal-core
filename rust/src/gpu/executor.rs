@@ -58,6 +58,8 @@ pub struct GpuExecutor {
     tick: u64,
     /// Set when a device hook `STOP_IF_*` reduction fired during the last tick.
     stopped: bool,
+    /// Committed `set_param` scalars from the last tick, for the session.
+    pending_eco: Option<Vec<f64>>,
     /// Cached static migration buffers for the current CSR, if any.
     migration_cache: Option<MigrationCache>,
     /// Device-staged observation history rows for the current run, if any.
@@ -228,6 +230,24 @@ struct DeviceHooks {
     has_stop: bool,
     /// One-element stop flag written by `STOP_IF_*` reductions.
     stop_flag: DeviceBuffer<i32>,
+    /// Whether the program contains any `OP_SET_PARAM` op.
+    has_set_param: bool,
+    /// Per-op `SET_PARAM` eco ids.
+    sp_param_ids: DeviceBuffer<i32>,
+    /// Per-op `SET_PARAM` cadence.
+    sp_every: DeviceBuffer<i32>,
+    /// Per-op `SET_PARAM` first tick.
+    sp_start: DeviceBuffer<i32>,
+    /// Per-op RPN token ranges.
+    rpn_offsets: DeviceBuffer<i32>,
+    /// RPN token kinds.
+    rpn_kinds: DeviceBuffer<i32>,
+    /// RPN token payloads.
+    rpn_payload: DeviceBuffer<i32>,
+    /// Shared RPN literal pool.
+    sp_literals: DeviceBuffer<f32>,
+    /// Current ecology scalar values (`N_ECO_PARAMS`), read/written by RPN.
+    eco_scratch: DeviceBuffer<f32>,
 }
 
 /// Narrow an `i64` CSR column to the device `i32` width.
@@ -238,6 +258,35 @@ fn to_i32_vec(values: &[i64]) -> Result<Vec<i32>, String> {
             i32::try_from(*value).map_err(|_| format!("hook CSR value {value} does not fit in i32"))
         })
         .collect()
+}
+
+/// Borrowed or working-copy ecology for one device tick.
+///
+/// `OP_SET_PARAM` writes must be visible to later stages of the same tick, so
+/// those ticks run against a working copy that is committed between events.
+enum EcoView<'a> {
+    /// No `set_param`: stages read the session contract directly.
+    Plain(&'a EcologyParams),
+    /// `set_param` present: stages read a working copy updated mid-tick.
+    Commit(&'a mut EcologyParams),
+}
+
+impl EcoView<'_> {
+    /// The ecology the stage kernels should read.
+    fn get(&self) -> &EcologyParams {
+        match self {
+            EcoView::Plain(ecology) => ecology,
+            EcoView::Commit(ecology) => ecology,
+        }
+    }
+
+    /// The mutable working copy, when the tick commits `set_param` writes.
+    fn as_commit(&mut self) -> Option<&mut EcologyParams> {
+        match self {
+            EcoView::Plain(_) => None,
+            EcoView::Commit(ecology) => Some(ecology),
+        }
+    }
 }
 
 impl GpuExecutor {
@@ -306,6 +355,7 @@ impl GpuExecutor {
             seed: 0,
             tick: 0,
             stopped: false,
+            pending_eco: None,
             migration_cache: None,
             history: None,
             hooks: None,
@@ -406,6 +456,25 @@ impl GpuExecutor {
             )?,
             has_stop: program.op_types.iter().any(|op| (6..=9).contains(op)),
             stop_flag: DeviceBuffer::from_host(&stream, &[0i32])?,
+            has_set_param: program.op_types.contains(&10),
+            sp_param_ids: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.sp_param_ids)?)?,
+            sp_every: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.sp_every)?)?,
+            sp_start: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.sp_start)?)?,
+            rpn_offsets: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.rpn_offsets)?)?,
+            rpn_kinds: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.rpn_kinds)?)?,
+            rpn_payload: DeviceBuffer::from_host(&stream, &to_i32_vec(&program.rpn_payload)?)?,
+            sp_literals: DeviceBuffer::from_host(
+                &stream,
+                &program
+                    .sp_literals
+                    .iter()
+                    .map(|value| *value as f32)
+                    .collect::<Vec<f32>>(),
+            )?,
+            eco_scratch: DeviceBuffer::from_host(
+                &stream,
+                &[0.0f32; crate::hooks::interpreter::N_ECO_PARAMS],
+            )?,
         });
         Ok(())
     }
@@ -416,13 +485,20 @@ impl GpuExecutor {
     ///
     /// ## Parameters
     /// - `event_id`: Lifecycle event index (first/early/late/finish).
+    /// - `stochastic`: Whether the model samples stochastically.
+    /// - `continuous`: Whether continuous sampling is enabled.
     ///
     /// ## Returns
     /// `true` when a `STOP_IF_*` op fired during the event.
     ///
     /// ## Errors
     /// Returns a description when the launch or flag read fails.
-    pub fn run_hook_event(&mut self, event_id: usize) -> Result<bool, String> {
+    pub fn run_hook_event(
+        &mut self,
+        event_id: usize,
+        stochastic: bool,
+        continuous: bool,
+    ) -> Result<bool, String> {
         let Some(mut hooks) = self.hooks.take() else {
             return Ok(false);
         };
@@ -451,17 +527,34 @@ impl GpuExecutor {
                 deme_selector_data: hooks.deme_selector_data.slice(),
                 convert_source_z: hooks.convert_source_z.slice(),
                 convert_target_z: hooks.convert_target_z.slice(),
+                sp_param_ids: hooks.sp_param_ids.slice(),
+                sp_every: hooks.sp_every.slice(),
+                sp_start: hooks.sp_start.slice(),
+                rpn_offsets: hooks.rpn_offsets.slice(),
+                rpn_kinds: hooks.rpn_kinds.slice(),
+                rpn_payload: hooks.rpn_payload.slice(),
+                sp_literals: hooks.sp_literals.slice(),
             };
+            let (key0, key1) = self.rng_key();
+            // Hook draws use sites 4..=7 so they never collide with the
+            // lifecycle stage sites (0..=3).
+            let site = self.rng_site(4 + event_id as u32);
             self.kernels.apply_hook_event(
                 &stream,
                 self.ind.slice_mut(),
                 self.sperm.slice_mut(),
                 hooks.stop_flag.slice_mut(),
+                hooks.eco_scratch.slice_mut(),
                 &buffers,
                 self.n_ages,
                 self.n_ztypes,
                 self.n_batch,
                 event_id,
+                stochastic,
+                continuous,
+                key0,
+                key1,
+                site,
                 self.tick,
             )?;
             if hooks.has_stop {
@@ -473,6 +566,76 @@ impl GpuExecutor {
         })();
         self.hooks = Some(hooks);
         result
+    }
+
+    /// Upload the current ecology scalars into the hook `eco_scratch`.
+    ///
+    /// Only needed when the hook program contains `OP_SET_PARAM`.
+    ///
+    /// ## Parameters
+    /// - `ecology`: Live ecology contract.
+    ///
+    /// ## Errors
+    /// Returns a description when the upload fails.
+    pub fn sync_eco_scratch(&mut self, ecology: &EcologyParams) -> Result<(), String> {
+        let Some(hooks) = self.hooks.as_mut() else {
+            return Ok(());
+        };
+        if !hooks.has_set_param {
+            return Ok(());
+        }
+        let values: Vec<f32> = (0..crate::hooks::interpreter::N_ECO_PARAMS)
+            .map(|id| ecology.eco_value(id, 0) as f32)
+            .collect();
+        let stream = self.context.stream();
+        hooks.eco_scratch = DeviceBuffer::from_host(&stream, &values)?;
+        Ok(())
+    }
+
+    /// Read back and validate `set_param` writes, returning the scalar values.
+    ///
+    /// The session commits these into its `EcologyParams` after the tick; the
+    /// executor applies the same values to the stage kernels it runs later in
+    /// the tick.
+    ///
+    /// ## Returns
+    /// `Some(values)` when the program has `OP_SET_PARAM`, else `None`.
+    ///
+    /// ## Errors
+    /// Returns a description when a value is out of bounds or the read fails.
+    pub fn take_eco_scratch(&mut self) -> Result<Option<Vec<f64>>, String> {
+        let Some(hooks) = self.hooks.as_mut() else {
+            return Ok(None);
+        };
+        if !hooks.has_set_param {
+            return Ok(None);
+        }
+        let stream = self.context.stream();
+        let raw = hooks.eco_scratch.to_host(&stream)?;
+        let values: Vec<f64> = raw.iter().map(|value| f64::from(*value)).collect();
+        for (id, value) in values.iter().enumerate() {
+            crate::hooks::interpreter::validate_eco_param(id, *value)?;
+        }
+        Ok(Some(values))
+    }
+
+    /// Apply committed `set_param` scalars to an ecology contract.
+    ///
+    /// ## Parameters
+    /// - `ecology`: Contract to update in place.
+    /// - `values`: `N_ECO_PARAMS` scalar values.
+    ///
+    /// ## Errors
+    /// Returns a description when a value is out of bounds.
+    pub fn apply_eco_values(ecology: &mut EcologyParams, values: &[f64]) -> Result<(), String> {
+        for (id, value) in values.iter().enumerate() {
+            if id >= crate::hooks::interpreter::N_ECO_PARAMS {
+                break;
+            }
+            crate::hooks::interpreter::validate_eco_param(id, *value)?;
+            ecology.set_eco_value(id, 0, *value);
+        }
+        Ok(())
     }
 
     /// Take the stop flag set by the last device tick, clearing it.
@@ -1212,25 +1375,94 @@ impl GpuExecutor {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
     ) -> Result<(), String> {
-        // A hook STOP_IF_* aborts the tick at its event point exactly like the
-        // CPU engine: later stages are skipped and the tick is not advanced.
-        if self.run_hook_event(0)? {
+        let stochastic = blueprint.stochastic;
+        let continuous = blueprint.continuous_sampling;
+        if self.hooks.as_ref().is_some_and(|hooks| hooks.has_set_param) {
+            let mut working = ecology.clone();
+            self.sync_eco_scratch(&working)?;
+            let mut view = EcoView::Commit(&mut working);
+            self.run_tick_sequence(
+                blueprint,
+                &mut view,
+                variants,
+                deme_variants,
+                stochastic,
+                continuous,
+            )?;
+            self.pending_eco = Some(
+                (0..crate::hooks::interpreter::N_ECO_PARAMS)
+                    .map(|id| view.get().eco_value(id, 0))
+                    .collect(),
+            );
+        } else {
+            let mut view = EcoView::Plain(ecology);
+            self.run_tick_sequence(
+                blueprint,
+                &mut view,
+                variants,
+                deme_variants,
+                stochastic,
+                continuous,
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Run the event/stage sequence on one tick, committing `set_param` writes
+    /// between events so later stages see them (matching the CPU `EcoCtx`).
+    ///
+    /// A hook `STOP_IF_*` aborts the tick at its event point exactly like the
+    /// CPU engine: later stages are skipped and the tick is not advanced.
+    #[allow(clippy::too_many_arguments)] // Mirrors the stage calls it sequences.
+    fn run_tick_sequence(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &mut EcoView<'_>,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+        stochastic: bool,
+        continuous: bool,
+    ) -> Result<(), String> {
+        if self.run_hook_event(0, stochastic, continuous)? {
             self.stopped = true;
             return Ok(());
         }
-        self.reproduction_tick(blueprint, ecology, variants, deme_variants)?;
-        if self.run_hook_event(1)? {
+        self.commit_eco(ecology)?;
+        self.reproduction_tick(blueprint, ecology.get(), variants, deme_variants)?;
+        if self.run_hook_event(1, stochastic, continuous)? {
             self.stopped = true;
             return Ok(());
         }
-        self.survival_tick(blueprint, ecology, variants, deme_variants)?;
-        if self.run_hook_event(2)? {
+        self.commit_eco(ecology)?;
+        self.survival_tick(blueprint, ecology.get(), variants, deme_variants)?;
+        if self.run_hook_event(2, stochastic, continuous)? {
             self.stopped = true;
             return Ok(());
         }
+        self.commit_eco(ecology)?;
         self.age_tick()?;
         self.tick = self.tick.wrapping_add(1);
         Ok(())
+    }
+
+    /// Commit read-back `set_param` writes into the tick's working ecology.
+    fn commit_eco(&mut self, ecology: &mut EcoView<'_>) -> Result<(), String> {
+        let Some(values) = self.take_eco_scratch()? else {
+            return Ok(());
+        };
+        if let Some(params) = ecology.as_commit() {
+            Self::apply_eco_values(params, &values)?;
+        }
+        Ok(())
+    }
+
+    /// Take the committed `set_param` scalars from the last tick, if any.
+    ///
+    /// ## Returns
+    /// The `N_ECO_PARAMS` scalar values, or `None` when the program has no
+    /// `set_param`.
+    pub fn take_pending_eco(&mut self) -> Option<Vec<f64>> {
+        self.pending_eco.take()
     }
 
     /// Run one discrete-generation survival stage on the device.

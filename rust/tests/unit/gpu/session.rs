@@ -220,27 +220,25 @@ fn session_enable_gpu_rejects_ineligible_models() {
         let mut custom = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
         assert!(custom.enable_gpu().is_err(), "custom growth must reject");
 
-        let (blueprint, params, genetics) = fixture();
-        let mut hooked = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
-        hooked.hooks.n_hooks = 1;
-        // SAMPLE (5) is reserved for P7.3; the device interpreter rejects it.
-        hooked.hooks.op_types = vec![5];
-        assert!(
-            hooked.enable_gpu().is_err(),
-            "unsupported hook opcode must reject"
-        );
+        // SAMPLE and stochastic-model hooks are device-supported from P7.3.
+        if hardware_required() {
+            let (blueprint, params, genetics) = fixture();
+            let mut sample = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+            sample.hooks.n_hooks = 1;
+            sample.hooks.op_types = vec![5];
+            assert!(sample.enable_gpu().is_ok(), "SAMPLE hooks must be accepted");
 
-        // A supported opcode still rejects on a stochastic model until P7.3
-        // aligns device RNG with the host hook sampler.
-        let (mut blueprint, params, genetics) = fixture();
-        blueprint.stochastic = true;
-        let mut stochastic = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
-        stochastic.hooks.n_hooks = 1;
-        stochastic.hooks.op_types = vec![0];
-        assert!(
-            stochastic.enable_gpu().is_err(),
-            "hooks require a deterministic model"
-        );
+            let (mut blueprint, params, genetics) = fixture();
+            blueprint.stochastic = true;
+            let mut stochastic =
+                make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+            stochastic.hooks.n_hooks = 1;
+            stochastic.hooks.op_types = vec![0];
+            assert!(
+                stochastic.enable_gpu().is_ok(),
+                "hooks on a stochastic model must be accepted"
+            );
+        }
 
         // A callback-carrying program is rejected even with no declarative
         // hooks (`n_hooks == 0`), exercising the Python-callback arm.
@@ -903,27 +901,9 @@ fn evaluator_device_hook_eligibility_rejects_unsupported() {
     Python::with_gil(|py| {
         let (ind, sperm) = initial_state();
 
-        // Host-only opcodes are rejected explicitly. Stop-gating opcodes are
-        // now device-supported (P7.2), so only SAMPLE (5) and SET_PARAM (10)
-        // remain rejected.
-        for op_type in [5i64, 10] {
-            let (blueprint, params, genetics) = fixture();
-            let mut session = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
-            session.hooks = eval_program([
-                vec![eval_hook(eval_op(op_type, 1.0))],
-                vec![],
-                vec![],
-                vec![],
-            ]);
-            assert!(
-                session.enable_gpu().is_err(),
-                "opcode {op_type} must be rejected"
-            );
-        }
-
-        // Stop-gating opcodes now enable on the device.
+        // Every declarative opcode is now device-supported, including SAMPLE.
         if hardware_required() {
-            for op_type in [6i64, 7, 8, 9] {
+            for op_type in [0i64, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11] {
                 let (blueprint, params, genetics) = fixture();
                 let mut session =
                     make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
@@ -935,20 +915,22 @@ fn evaluator_device_hook_eligibility_rejects_unsupported() {
                 ]);
                 assert!(
                     session.enable_gpu().is_ok(),
-                    "stop opcode {op_type} must be accepted"
+                    "opcode {op_type} must be accepted"
                 );
             }
-        }
 
-        // A supported opcode on a stochastic blueprint is rejected.
-        let (mut blueprint, params, genetics) = fixture();
-        blueprint.stochastic = true;
-        let mut stochastic = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
-        stochastic.hooks = eval_program([vec![eval_hook(eval_op(0, 0.5))], vec![], vec![], vec![]]);
-        assert!(
-            stochastic.enable_gpu().is_err(),
-            "stochastic hooks must be rejected"
-        );
+            // Hooks on a stochastic model are accepted from P7.3.
+            let (mut blueprint, params, genetics) = fixture();
+            blueprint.stochastic = true;
+            let mut stochastic =
+                make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+            stochastic.hooks =
+                eval_program([vec![eval_hook(eval_op(0, 0.5))], vec![], vec![], vec![]]);
+            assert!(
+                stochastic.enable_gpu().is_ok(),
+                "stochastic hooks must be accepted"
+            );
+        }
 
         // Python callbacks are rejected even without declarative ops.
         let (blueprint, params, genetics) = fixture();
@@ -1048,19 +1030,17 @@ fn session_device_hook_program_refresh_reuploads() {
         session.enable_gpu().expect("enable gpu");
         // Replacing the program after enabling must reach the device.
         super::install_hook_program(&mut session, early_set(1.0)).expect("refresh program");
-        // An unsupported replacement is rejected while the device is active.
+        // A python-callback replacement is still rejected while active.
+        let mut rejected = eval_program([
+            Vec::new(),
+            vec![eval_hook(eval_op(0, 0.5))],
+            Vec::new(),
+            Vec::new(),
+        ]);
+        rejected.python_callbacks = vec![vec![py.None()]];
         assert!(
-            super::install_hook_program(
-                &mut session,
-                eval_program([
-                    Vec::new(),
-                    vec![eval_hook(eval_op(5, 0.5))],
-                    Vec::new(),
-                    Vec::new()
-                ])
-            )
-            .is_err(),
-            "unsupported refresh must be rejected"
+            super::install_hook_program(&mut session, rejected).is_err(),
+            "callback refresh must be rejected"
         );
         session.run_inner(py, 2, 0, None, 0).expect("gpu run");
 
@@ -1160,16 +1140,15 @@ fn evaluator_device_rejected_program_refresh_is_atomic() {
         session.enable_gpu().expect("enable gpu");
 
         let host_before = session.hooks.op_types.clone();
-        let rejected = super::install_hook_program(
-            &mut session,
-            eval_program([
-                Vec::new(),
-                vec![eval_hook(eval_op(5, 0.5))],
-                Vec::new(),
-                Vec::new(),
-            ]),
-        );
-        assert!(rejected.is_err(), "unsupported refresh must be rejected");
+        let mut rejected_program = eval_program([
+            Vec::new(),
+            vec![eval_hook(eval_op(0, 0.5))],
+            Vec::new(),
+            Vec::new(),
+        ]);
+        rejected_program.python_callbacks = vec![vec![py.None()]];
+        let rejected = super::install_hook_program(&mut session, rejected_program);
+        assert!(rejected.is_err(), "callback refresh must be rejected");
         assert_eq!(
             session.hooks.op_types, host_before,
             "rejected refresh polluted the host program"
@@ -1301,4 +1280,349 @@ fn session_device_hook_stop_if_zero_after_mutation_matches_cpu() {
     assert_eq!(gpu.0, cpu.0, "stop tick must match");
     assert_eq!(gpu.0, 0, "stop must fire at tick 0");
     eval_assert_close(&(gpu.2, gpu.3), &(cpu.2, cpu.3), 1.2e-5, "stop_if_zero");
+}
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for P7.2 device STOP_IF_* gating.
+// ---------------------------------------------------------------------------
+
+/// Run a stop-program on both engines and assert the stop tick, stop flag, and
+/// resulting partial state agree.
+fn eval_stop_pair<F: Fn() -> HookProgram>(
+    make: F,
+    ticks: i64,
+    label: &str,
+) -> (i64, bool, Vec<f64>) {
+    let gpu = eval_run_flow(make(), ticks, true);
+    let cpu = eval_run_flow(make(), ticks, false);
+    assert_eq!(
+        gpu.0, cpu.0,
+        "{label}: stop tick device {} vs cpu {}",
+        gpu.0, cpu.0
+    );
+    assert_eq!(
+        gpu.1, cpu.1,
+        "{label}: stopped flag device {} vs cpu {}",
+        gpu.1, cpu.1
+    );
+    eval_assert_close(
+        &(gpu.2.clone(), gpu.3.clone()),
+        &(cpu.2.clone(), cpu.3.clone()),
+        1.2e-5,
+        label,
+    );
+    (gpu.0, gpu.1, cpu.2)
+}
+
+#[test]
+fn evaluator_device_stop_above_below_zero_extinction_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+
+    // early STOP_IF_ABOVE(0): the nonzero state stops tick 0 after reproduction.
+    let above = || {
+        eval_program([
+            Vec::new(),
+            vec![eval_hook(eval_op(8, 0.0))],
+            Vec::new(),
+            Vec::new(),
+        ])
+    };
+    let (tick, stopped, _) = eval_stop_pair(above, 5, "early stop_if_above");
+    assert!(stopped, "stop_if_above must fire");
+    assert_eq!(tick, 0);
+
+    // first STOP_IF_BELOW(1e9) gated on tick>=1: stops before reproduction at tick 1.
+    let below = || {
+        let mut op = eval_op(7, 1e9);
+        op.cond = vec![(3, 1)];
+        eval_program([vec![eval_hook(op)], Vec::new(), Vec::new(), Vec::new()])
+    };
+    let (tick, stopped, _) = eval_stop_pair(below, 5, "first stop_if_below");
+    assert!(stopped, "stop_if_below must fire");
+    assert_eq!(tick, 1);
+
+    // first SET(0) then late STOP_IF_ZERO: zeros the state, then stops at tick 0.
+    let zero = || {
+        eval_program([
+            vec![eval_hook(eval_op(1, 0.0))],
+            Vec::new(),
+            vec![eval_hook(eval_op(6, 0.0))],
+            Vec::new(),
+        ])
+    };
+    let (tick, stopped, _) = eval_stop_pair(zero, 5, "late stop_if_zero");
+    assert!(stopped, "stop_if_zero must fire");
+    assert_eq!(tick, 0);
+
+    // first SET(0) then early STOP_IF_EXTINCTION: the all-zero state stops at tick 0.
+    let extinct = || {
+        eval_program([
+            vec![eval_hook(eval_op(1, 0.0))],
+            vec![eval_hook(eval_op(9, 0.0))],
+            Vec::new(),
+            Vec::new(),
+        ])
+    };
+    let (tick, stopped, _) = eval_stop_pair(extinct, 5, "early stop_if_extinction");
+    assert!(stopped, "stop_if_extinction must fire");
+    assert_eq!(tick, 0);
+
+    // late STOP_IF_ABOVE gated on tick==3: no stop before tick 3.
+    let late = || {
+        let mut op = eval_op(8, 0.0);
+        op.cond = vec![(1, 3)];
+        eval_program([Vec::new(), Vec::new(), vec![eval_hook(op)], Vec::new()])
+    };
+    let (tick, stopped, _) = eval_stop_pair(late, 6, "late stop_if_above tick==3");
+    assert!(stopped, "late stop_if_above must fire");
+    assert_eq!(tick, 3);
+}
+
+#[test]
+fn evaluator_device_stop_selector_subset_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+
+    // A female age-1 z0 subset is below a huge threshold: stops at tick 0.
+    let subset = || {
+        let mut op = eval_op(7, 1e9);
+        op.sex = [true, false];
+        op.ages = vec![1];
+        op.zidx = vec![0];
+        eval_program([Vec::new(), vec![eval_hook(op)], Vec::new(), Vec::new()])
+    };
+    let (tick, stopped, _) = eval_stop_pair(subset, 4, "subset stop_if_below");
+    assert!(stopped && tick == 0);
+
+    // The same subset above a huge threshold never fires: parity must hold and
+    // the run must not be reported stopped.
+    let no_fire = || {
+        let mut op = eval_op(8, 1e9);
+        op.sex = [true, false];
+        op.ages = vec![1];
+        op.zidx = vec![0];
+        eval_program([Vec::new(), vec![eval_hook(op)], Vec::new(), Vec::new()])
+    };
+    let (tick, stopped, _) = eval_stop_pair(no_fire, 4, "subset stop_if_above no fire");
+    assert!(!stopped, "threshold must not be exceeded");
+    assert_eq!(tick, 4);
+}
+
+#[test]
+fn evaluator_device_stop_aborts_later_hooks_and_events() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    // Event 1 holds two hooks: the first zeroes z0 and then stops; the second
+    // would set z1 to 100. The stop must abort the second hook as well as every
+    // later event.
+    let build = || {
+        let killer = EvalHook {
+            ops: vec![
+                {
+                    let mut zero = eval_op(1, 0.0);
+                    zero.zidx = vec![0];
+                    zero
+                },
+                eval_op(7, 1e9),
+            ],
+            deme_type: 0,
+            deme_data: Vec::new(),
+        };
+        let survivor = EvalHook {
+            ops: vec![{
+                let mut set = eval_op(1, 100.0);
+                set.zidx = vec![1];
+                set
+            }],
+            deme_type: 0,
+            deme_data: Vec::new(),
+        };
+        eval_program([
+            Vec::new(),
+            vec![killer, survivor],
+            vec![eval_hook(eval_op(1, 999.0))],
+            Vec::new(),
+        ])
+    };
+    let (tick, stopped, cpu_ind) = eval_stop_pair(build, 3, "abort later hooks");
+    assert!(stopped && tick == 0, "must stop at tick 0");
+    // The later event's SET(999) must not have run: no cell is 999.
+    assert!(
+        cpu_ind.iter().all(|value| *value < 500.0),
+        "a later event ran after the stop"
+    );
+}
+
+#[test]
+fn evaluator_device_stop_flag_does_not_leak_across_runs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        // A stop op that can never fire (state stays positive): the run must
+        // complete all ticks and never report stopped.
+        let build = || {
+            let mut op = eval_op(6, 0.0); // STOP_IF_ZERO
+            op.cond = vec![(1, 0)]; // only at tick 0, where the state is nonzero
+            eval_program([vec![eval_hook(op)], Vec::new(), Vec::new(), Vec::new()])
+        };
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let mut session = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        session.hooks = build();
+        session.enable_gpu().expect("enable gpu");
+        for _ in 0..3 {
+            let (_, _, stopped) = session.run_inner(py, 2, 0, None, 0).expect("device run");
+            assert!(!stopped, "stop flag leaked into a later run");
+        }
+        assert_eq!(session.state_tick, 6);
+
+        let mut reference = make_session(blueprint, params, genetics, ind, sperm);
+        reference.hooks = build();
+        reference.run_inner(py, 6, 0, None, 0).expect("cpu run");
+        eval_assert_close(
+            &(session.state_ind, session.state_sperm),
+            &(reference.state_ind, reference.state_sperm),
+            1.2e-5,
+            "repeated stop-program runs",
+        );
+    });
+}
+
+#[test]
+fn session_device_hook_set_param_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // First-event `SET_PARAM(carrying_capacity, K * 0.5)` escalating on `first`
+    // every tick, which later reproduction/survival stages must observe.
+    let build = || {
+        let mut p = eval_program([
+            vec![eval_hook(eval_op(10, 0.0))],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ]);
+        p.sp_param_ids = vec![0];
+        p.sp_every = vec![1];
+        p.sp_start = vec![0];
+        p.rpn_offsets = vec![0, 3];
+        p.rpn_kinds = vec![1, 0, 4];
+        p.rpn_payload = vec![0, 0, 0];
+        p.sp_literals = vec![0.5];
+        p.has_set_param = true;
+        p
+    };
+    let gpu = eval_run_flow(build(), 3, true);
+    let cpu = eval_run_flow(build(), 3, false);
+    assert_eq!(gpu.0, cpu.0, "tick must match");
+
+    // The hook must change the trajectory relative to a hook-free device run.
+    let plain = eval_run_flow(
+        eval_program([Vec::new(), Vec::new(), Vec::new(), Vec::new()]),
+        3,
+        true,
+    );
+    let changed = gpu
+        .2
+        .iter()
+        .zip(plain.2.iter())
+        .any(|(a, b)| (a - b).abs() > 1e-3 * b.abs().max(1.0));
+    assert!(changed, "set_param must change the trajectory");
+
+    eval_assert_close(&(gpu.2, gpu.3), &(cpu.2, cpu.3), 1.2e-5, "set_param");
+}
+
+#[test]
+fn session_device_stochastic_hooks_reproducible_and_execute() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // A SAMPLE hook on a stochastic model: sampling uses the device RNG.
+    let build = || {
+        eval_program([
+            Vec::new(),
+            vec![eval_hook(eval_op(5, 10.0))],
+            Vec::new(),
+            Vec::new(),
+        ])
+    };
+    let stochastic_fixture = || {
+        let (mut blueprint, params, genetics) = fixture();
+        blueprint.stochastic = true;
+        (blueprint, params, genetics)
+    };
+    let run = |gpu: bool| -> (i64, bool, Vec<f64>, Vec<f64>) {
+        let (blueprint, params, genetics) = stochastic_fixture();
+        let (ind, sperm) = initial_state();
+        let mut session = make_session(blueprint, params, genetics, ind, sperm);
+        session.hooks = build();
+        if gpu {
+            session.enable_gpu().expect("enable gpu");
+        }
+        pyo3::prepare_freethreaded_python();
+        let stopped = Python::with_gil(|py| {
+            session
+                .run_inner(py, 4, 0, None, 0)
+                .expect("stochastic hook run")
+                .2
+        });
+        (
+            session.state_tick,
+            stopped,
+            session.state_ind,
+            session.state_sperm,
+        )
+    };
+    let first = run(true);
+    let second = run(true);
+    assert_eq!(first.0, second.0);
+    assert!(!first.1 && !second.1);
+    assert_eq!(
+        first.2.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        second.2.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "same-seed device hook run must be bit-reproducible"
+    );
+    assert_eq!(
+        first.3.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        second.3.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+        "same-seed device sperm must be bit-reproducible"
+    );
+
+    // Hook-free stochastic device run differs, proving the hook executed.
+    let (blueprint, params, genetics) = stochastic_fixture();
+    let (ind, sperm) = initial_state();
+    let mut plain_session = make_session(blueprint, params, genetics, ind, sperm);
+    plain_session.enable_gpu().expect("enable gpu");
+    Python::with_gil(|py| {
+        plain_session
+            .run_inner(py, 4, 0, None, 0)
+            .expect("plain run");
+    });
+    let changed = first
+        .2
+        .iter()
+        .zip(plain_session.state_ind.iter())
+        .any(|(a, b)| (a - b).abs() > 1e-3 * b.abs().max(1.0));
+    assert!(changed, "SAMPLE must change the stochastic trajectory");
 }

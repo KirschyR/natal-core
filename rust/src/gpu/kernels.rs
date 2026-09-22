@@ -2241,15 +2241,14 @@ extern "C" __global__ void discrete_survival(
 }
 "#;
 
-/// Device opcode interpreter for declarative hooks (P7.1).
+/// Device opcode interpreter for declarative hooks.
 ///
-/// Faithful port of the deterministic branch of
-/// `crate::hooks::interpreter::HookProgram::execute_event` for
-/// `SCALE`/`SET`/`ADD`/`SUBTRACT`/`KILL` (`0..=4`) and `CONVERT` (`11`). One
-/// thread owns one batch element and walks the event's CSR slots in the same
-/// priority order the CPU uses; conditions and selectors are evaluated exactly
-/// as on the host. Stochastic opcodes (`SAMPLE`, `STOP_IF_*`, `SET_PARAM`) are
-/// rejected at eligibility, so no RNG is needed here.
+/// Walks the event's CSR slots in the same priority order the CPU uses and
+/// evaluates conditions and selectors exactly as on the host. Deterministic
+/// and stochastic models are supported: mutation reductions, `SAMPLE`, and
+/// `CONVERT` sample from the counter-based device RNG; `STOP_IF_*` sets a
+/// device flag; `SET_PARAM` writes the ecology scratch. One thread owns one
+/// batch element.
 const HOOK_SOURCE: &str = r#"
 __device__ __forceinline__ float hook_clamp01(float x)
 {
@@ -2259,6 +2258,109 @@ __device__ __forceinline__ float hook_clamp01(float x)
         return 1.0f;
     }
     return x;
+}
+
+// Host `sample_survivors`: deterministic probability, discrete binomial, or
+// continuous (Dirichlet) binomial.
+__device__ __forceinline__ float hook_sample_survivors(
+    RngState* rng, float n_base, float prob, int stochastic, int continuous)
+{
+    if (n_base <= 0.0f) {
+        return 0.0f;
+    }
+    if (stochastic) {
+        if (continuous) {
+            return sample_continuous_binomial(rng, n_base, prob);
+        }
+        return sample_binomial(rng, roundf(n_base), prob);
+    }
+    return n_base * prob;
+}
+
+// Host `apply_target_without_sperm` for a male / no-sperm slot.
+__device__ __forceinline__ float hook_apply_target_without_sperm(
+    RngState* rng, float current_count, float target_count, int stochastic, int continuous)
+{
+    float current = (stochastic && !continuous) ? roundf(current_count) : current_count;
+    if (target_count >= current) {
+        return target_count;
+    }
+    if (current <= 0.0f) {
+        return 0.0f;
+    }
+    float p = hook_clamp01(target_count / current);
+    return hook_sample_survivors(rng, current, p, stochastic, continuous);
+}
+
+// Host `apply_target_with_sperm`: reducing a female slot also samples each
+// stored-sperm bucket and the virgin remainder. `row_base` is the first bucket
+// of the `(age, ztype)` row in the batch-minor sperm plane, `stride` is
+// `n_batch`, and `Z` is the zygote-type count.
+__device__ __forceinline__ float hook_apply_target_with_sperm(
+    RngState* rng,
+    float current_count,
+    float target_count,
+    float* sperm,
+    long long row_base,
+    int stride,
+    int Z,
+    int stochastic,
+    int continuous)
+{
+    float current = (stochastic && !continuous) ? roundf(current_count) : current_count;
+    if (target_count >= current) {
+        return target_count;
+    }
+    if (current <= 0.0f) {
+        for (int mz = 0; mz < Z; ++mz) {
+            sperm[row_base + (long long)mz * stride] = 0.0f;
+        }
+        return 0.0f;
+    }
+    float p = hook_clamp01(target_count / current);
+    if (!stochastic) {
+        for (int mz = 0; mz < Z; ++mz) {
+            sperm[row_base + (long long)mz * stride] *= p;
+        }
+        return target_count;
+    }
+    float total_sperm = 0.0f;
+    for (int mz = 0; mz < Z; ++mz) {
+        total_sperm += sperm[row_base + (long long)mz * stride];
+    }
+    float n_virgins_raw = current - total_sperm;
+    if (n_virgins_raw < 0.0f) {
+        // The host errors on a meaningfully negative count; a valid state only
+        // drifts negative through f32 rounding, which clamps to zero.
+        n_virgins_raw = 0.0f;
+    }
+    float n_virgins = continuous ? n_virgins_raw : roundf(n_virgins_raw);
+    float new_sum = 0.0f;
+    for (int mz = 0; mz < Z; ++mz) {
+        long long index = row_base + (long long)mz * stride;
+        float n_sperm = continuous ? sperm[index] : roundf(sperm[index]);
+        float survived = hook_sample_survivors(rng, n_sperm, p, 1, continuous);
+        sperm[index] = survived;
+        new_sum += survived;
+    }
+    return new_sum + hook_sample_survivors(rng, n_virgins, p, 1, continuous);
+}
+
+// Host `convert_count`: deterministic `n * prob`, discrete binomial, or
+// continuous binomial.
+__device__ __forceinline__ float hook_convert_count(
+    RngState* rng, float n_base, float prob, int stochastic, int continuous)
+{
+    if (n_base <= 0.0f) {
+        return 0.0f;
+    }
+    if (stochastic) {
+        if (continuous) {
+            return sample_continuous_binomial(rng, n_base, prob);
+        }
+        return sample_binomial(rng, roundf(n_base), prob);
+    }
+    return n_base * prob;
 }
 
 __device__ __forceinline__ int hook_atomic_condition(int type, int param, long long tick)
@@ -2339,6 +2441,56 @@ __device__ __forceinline__ int hook_eval_condition(
     return depth == 1 && stack[0] != 0;
 }
 
+__device__ __forceinline__ float hook_eval_rpn(
+    const int* rpn_offsets,
+    const int* rpn_kinds,
+    const int* rpn_payload,
+    const float* sp_literals,
+    const float* eco,
+    int op)
+{
+    int start = rpn_offsets[op];
+    int end = rpn_offsets[op + 1];
+    float stack[64];
+    int depth = 0;
+    for (int idx = start; idx < end; ++idx) {
+        int kind = rpn_kinds[idx];
+        if (kind == 0) {
+            if (depth >= 64) {
+                return 0.0f / 0.0f;
+            }
+            stack[depth++] = sp_literals[rpn_payload[idx]];
+        } else if (kind == 1) {
+            if (depth >= 64) {
+                return 0.0f / 0.0f;
+            }
+            stack[depth++] = eco[rpn_payload[idx]];
+        } else {
+            float rhs = depth > 0 ? stack[--depth] : (0.0f / 0.0f);
+            float lhs = depth > 0 ? stack[--depth] : (0.0f / 0.0f);
+            float value;
+            if (kind == 2) {
+                value = lhs + rhs;
+            } else if (kind == 3) {
+                value = lhs - rhs;
+            } else if (kind == 4) {
+                value = lhs * rhs;
+            } else if (kind == 5) {
+                value = lhs / rhs;
+            } else {
+                value = 0.0f / 0.0f;
+            }
+            if (depth >= 64) {
+                return 0.0f / 0.0f;
+            }
+            stack[depth++] = value;
+        }
+    }
+    // The host evaluator returns the bottom of the stack; a well-formed program
+    // leaves exactly one value there.
+    return depth > 0 ? stack[0] : (0.0f / 0.0f);
+}
+
 __device__ __forceinline__ int hook_deme_matches(
     const int* selector_types,
     const int* selector_offsets,
@@ -2378,6 +2530,7 @@ extern "C" __global__ void apply_hook_event(
     float* ind,
     float* sperm,
     int* stop_flag,
+    float* eco,
     const int* hook_offsets,
     const int* op_offsets,
     const int* op_types,
@@ -2395,16 +2548,32 @@ extern "C" __global__ void apply_hook_event(
     const int* deme_selector_data,
     const int* convert_source_z,
     const int* convert_target_z,
+    const int* sp_param_ids,
+    const int* sp_every,
+    const int* sp_start,
+    const int* rpn_offsets,
+    const int* rpn_kinds,
+    const int* rpn_payload,
+    const float* sp_literals,
     int n_ages,
     int n_ztypes,
     int n_batch,
     int event_id,
+    int stochastic,
+    int continuous,
+    unsigned int key0,
+    unsigned int key1,
+    unsigned int site,
     long long tick)
 {
     int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_batch) {
         return;
     }
+    // One reproducible counter-based stream per batch element; hook draws use
+    // a site that does not collide with the lifecycle stages.
+    RngState rng;
+    rng_init(&rng, (unsigned long long)b, key0, key1, site);
     int hook_start = hook_offsets[event_id];
     int hook_end = hook_offsets[event_id + 1];
     for (int hook = hook_start; hook < hook_end; ++hook) {
@@ -2427,7 +2596,7 @@ extern "C" __global__ void apply_hook_event(
             int ze = zidx_offsets[op + 1];
             int as = age_offsets[op];
             int ae = age_offsets[op + 1];
-            if (op_type <= 4) {
+            if (op_type <= 5) {
                 for (int sex = 0; sex < 2; ++sex) {
                     if (!sex_masks[op * 2 + sex]) {
                         continue;
@@ -2453,30 +2622,27 @@ extern "C" __global__ void apply_hook_event(
                                 target = fmaxf(current + param, 0.0f);
                             } else if (op_type == 3) {
                                 target = fmaxf(current - param, 0.0f);
-                            } else {
+                            } else if (op_type == 4) {
                                 target = fmaxf(current * (1.0f - param), 0.0f);
+                            } else {
+                                target = fminf(current, fmaxf(param, 0.0f));
                             }
                             if (sex == 0) {
-                                if (target >= current) {
-                                    ind[flat] = target;
-                                } else if (current <= 0.0f) {
-                                    ind[flat] = 0.0f;
-                                    for (int mz = 0; mz < n_ztypes; ++mz) {
-                                        int sflat =
-                                            ((age * n_ztypes + z) * n_ztypes + mz) * n_batch + b;
-                                        sperm[sflat] = 0.0f;
-                                    }
-                                } else {
-                                    float p = hook_clamp01(target / current);
-                                    ind[flat] = target;
-                                    for (int mz = 0; mz < n_ztypes; ++mz) {
-                                        int sflat =
-                                            ((age * n_ztypes + z) * n_ztypes + mz) * n_batch + b;
-                                        sperm[sflat] *= p;
-                                    }
-                                }
+                                long long row_base =
+                                    (long long)((age * n_ztypes + z) * n_ztypes) * n_batch + b;
+                                ind[flat] = hook_apply_target_with_sperm(
+                                    &rng,
+                                    current,
+                                    target,
+                                    sperm,
+                                    row_base,
+                                    n_batch,
+                                    n_ztypes,
+                                    stochastic,
+                                    continuous);
                             } else {
-                                ind[flat] = target;
+                                ind[flat] = hook_apply_target_without_sperm(
+                                    &rng, current, target, stochastic, continuous);
                             }
                         }
                     }
@@ -2489,7 +2655,8 @@ extern "C" __global__ void apply_hook_event(
                 }
                 for (int age = 0; age < n_ages; ++age) {
                     int male = ((1 * n_ages + age) * n_ztypes + src_z) * n_batch + b;
-                    float moved_male = ind[male] * param;
+                    float moved_male =
+                        hook_convert_count(&rng, ind[male], param, stochastic, continuous);
                     ind[male] -= moved_male;
                     ind[((1 * n_ages + age) * n_ztypes + dst_z) * n_batch + b] += moved_male;
 
@@ -2501,7 +2668,8 @@ extern "C" __global__ void apply_hook_event(
                     float moved_mated = 0.0f;
                     for (int mz = 0; mz < n_ztypes; ++mz) {
                         int bucket = ((age * n_ztypes + src_z) * n_ztypes + mz) * n_batch + b;
-                        float moved_bucket = sperm[bucket] * param;
+                        float moved_bucket =
+                            hook_convert_count(&rng, sperm[bucket], param, stochastic, continuous);
                         sperm[bucket] -= moved_bucket;
                         sperm[((age * n_ztypes + dst_z) * n_ztypes + mz) * n_batch + b] +=
                             moved_bucket;
@@ -2509,7 +2677,8 @@ extern "C" __global__ void apply_hook_event(
                     }
                     int src_female = ((0 * n_ages + age) * n_ztypes + src_z) * n_batch + b;
                     float virgins = fmaxf(ind[src_female] - sperm_row_sum, 0.0f);
-                    float moved_virgin = virgins * param;
+                    float moved_virgin =
+                        hook_convert_count(&rng, virgins, param, stochastic, continuous);
                     ind[src_female] -= moved_mated + moved_virgin;
                     ind[((0 * n_ages + age) * n_ztypes + dst_z) * n_batch + b] +=
                         moved_mated + moved_virgin;
@@ -2557,6 +2726,20 @@ extern "C" __global__ void apply_hook_event(
                         || (op_type == 8 && selected_total > param)) {
                         *stop_flag = 1;
                         return;
+                    }
+                }
+            } else if (op_type == 10) {
+                // OP_SET_PARAM: schedule-gated RPN write into the ecology
+                // scratch; later ops/events and host stages read the update.
+                int sp_start_tick = sp_start[op];
+                int sp_every_tick = sp_every[op];
+                if (tick >= (long long)sp_start_tick && sp_every_tick > 0
+                    && (tick - (long long)sp_start_tick) % (long long)sp_every_tick == 0) {
+                    float value = hook_eval_rpn(
+                        rpn_offsets, rpn_kinds, rpn_payload, sp_literals, eco, op);
+                    int param_id = sp_param_ids[op];
+                    if (param_id >= 0 && param_id < 5) {
+                        eco[param_id] = value;
                     }
                 }
             }
@@ -3909,11 +4092,17 @@ impl Kernels {
         ind: &mut CudaSlice<f32>,
         sperm: &mut CudaSlice<f32>,
         stop_flag: &mut CudaSlice<i32>,
+        eco: &mut CudaSlice<f32>,
         buffers: &HookEventBuffers<'_>,
         n_ages: usize,
         n_ztypes: usize,
         n_batch: usize,
         event_id: usize,
+        stochastic: bool,
+        continuous: bool,
+        key0: u32,
+        key1: u32,
+        site: u32,
         tick: u64,
     ) -> Result<(), String> {
         if n_batch == 0 {
@@ -3928,6 +4117,8 @@ impl Kernels {
         let n_ztypes_i = n_ztypes as i32;
         let n_batch_i = n_batch as i32;
         let event_i = event_id as i32;
+        let stochastic_i = i32::from(stochastic);
+        let continuous_i = i32::from(continuous);
         let tick_i = tick as i64;
         let config = LaunchConfig {
             grid_dim: ((n_batch as u32).div_ceil(64), 1, 1),
@@ -3938,6 +4129,7 @@ impl Kernels {
         launch.arg(&mut *ind);
         launch.arg(&mut *sperm);
         launch.arg(&mut *stop_flag);
+        launch.arg(&mut *eco);
         launch.arg(buffers.hook_offsets);
         launch.arg(buffers.op_offsets);
         launch.arg(buffers.op_types);
@@ -3955,10 +4147,22 @@ impl Kernels {
         launch.arg(buffers.deme_selector_data);
         launch.arg(buffers.convert_source_z);
         launch.arg(buffers.convert_target_z);
+        launch.arg(buffers.sp_param_ids);
+        launch.arg(buffers.sp_every);
+        launch.arg(buffers.sp_start);
+        launch.arg(buffers.rpn_offsets);
+        launch.arg(buffers.rpn_kinds);
+        launch.arg(buffers.rpn_payload);
+        launch.arg(buffers.sp_literals);
         launch.arg(&n_ages_i);
         launch.arg(&n_ztypes_i);
         launch.arg(&n_batch_i);
         launch.arg(&event_i);
+        launch.arg(&stochastic_i);
+        launch.arg(&continuous_i);
+        launch.arg(&key0);
+        launch.arg(&key1);
+        launch.arg(&site);
         launch.arg(&tick_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
@@ -4002,6 +4206,20 @@ pub struct HookEventBuffers<'a> {
     pub convert_source_z: &'a CudaSlice<i32>,
     /// Per-op convert target ztype (`-1` when not a convert).
     pub convert_target_z: &'a CudaSlice<i32>,
+    /// Per-op `SET_PARAM` target eco id (`-1` when not a set_param).
+    pub sp_param_ids: &'a CudaSlice<i32>,
+    /// Per-op `SET_PARAM` tick cadence.
+    pub sp_every: &'a CudaSlice<i32>,
+    /// Per-op `SET_PARAM` first tick.
+    pub sp_start: &'a CudaSlice<i32>,
+    /// Per-op RPN token ranges.
+    pub rpn_offsets: &'a CudaSlice<i32>,
+    /// RPN token kinds.
+    pub rpn_kinds: &'a CudaSlice<i32>,
+    /// RPN token payloads.
+    pub rpn_payload: &'a CudaSlice<i32>,
+    /// Shared RPN literal pool.
+    pub sp_literals: &'a CudaSlice<f32>,
 }
 
 #[cfg(test)]

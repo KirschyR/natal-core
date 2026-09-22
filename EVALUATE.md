@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 26 轮：**APPROVED**（§61；§59.4 两条 medium 修复——设备 tick 对齐 `state_tick`、设钩子重传/校验设备 CSR） |
-| 待回执 | §63（第 27 轮 P7.2：设备侧 `STOP_IF_*` 门控 + 按 opcode 放开 + §61.4 两处可选加固） |
-| 主 agent 处理 | 第 27 轮：P7.2 已实现并自测；P7.3 待启动 |
-| 待 evaluator 动作 | 按 §62 复核，把第 27 轮结论写入 §63 |
+| 最近回执 | 第 27 轮：**APPROVED**（§63；P7.2 设备侧 `STOP_IF_*` 门控 + 按 opcode 放开 + §61.4 加固） |
+| 待回执 | §65（第 28 轮 P7.3：`SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG） |
+| 主 agent 处理 | 第 28 轮：P7.3 已实现并自测；P7.4 待启动 |
+| 待 evaluator 动作 | 按 §64 复核，把第 28 轮结论写入 §65 |
 
 ## 0. 一句话目标
 
@@ -1603,6 +1603,68 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - stop 标志读取为每事件一次 D2H（仅含 stop op 的程序）；这是「停止点精确」与「零全量同步」的折衷。
 
 结论请追加为 **§63**。
+
+---
+
+## 64. 第 28 轮交接 — P7.3：`SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG
+
+- 日期：2026-09-22
+- 背景：§63 APPROVED（P7.2）。按 `GPU_STAGE_SUMMARY §11.5` 推进 **P7.3**；用户确认放开随机模型钩子（含设备 RNG）。
+- 风险分类：**高风险**（随机分布/设备 RNG、科学状态改写、生态参数同 tick 写入；CPU golden reference 不变）。
+
+### 64.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `HOOK_SOURCE`：新增 `hook_sample_survivors` / `hook_apply_target_without_sperm` / `hook_apply_target_with_sperm` / `hook_convert_count`（逐字移植 host `sample_survivors`/`apply_target_*`/`convert_count`，确定性分支行为与 P7.1/P7.2 完全一致）；新增 `hook_eval_rpn`（host `eval_rpn_value` 的设备镜像，含 IEEE 除零）与 `OP_SET_PARAM` 分支；`apply_hook_event` 增 `float* eco`、RNG 参数（`stochastic`/`continuous`/`key0`/`key1`/`site`）与 sp/RPN 数组，入口 `rng_init` 每 batch 一条流。 |
+| `rust/src/gpu/executor.rs` | `DeviceHooks` 增 `has_set_param`、sp/RPN 缓冲与 `eco_scratch`；`run_hook_event` 返回 `Result<bool>` 并传 `eco`/RNG（site = `4+event`，避开生命周期 0..3）；新增 `sync_eco_scratch`/`take_eco_scratch`/`apply_eco_values`/`take_pending_eco`；`EcoView`（`Plain`/`Commit`）实现 set_param 同 tick 可见：含 set_param 的 tick 用工作副本跑阶段并在事件边界提交。 |
+| `rust/src/hooks/interpreter.rs` | `DEVICE_SUPPORTED_OPS` 扩为全部 12 个 opcode（含 SAMPLE、SET_PARAM）。 |
+| `rust/src/sessions/age_structured.rs` | `validate_device_hooks` 去掉「随机模型拒绝」；`run_gpu` 改收 `&mut EcologyParams`，每 tick 后 `apply_eco_values` 提交 set_param（含停止时）。 |
+| 文档 | `docs/{en,zh} §11.1`、Rust/Python `enable_gpu` docstring、`HOOK_SOURCE` 注释：声明式钩子全部设备化，仅 Python 回调拒绝。 |
+| 测试 | Rust 新增 `session_device_hook_set_param_matches_cpu`（first SET_PARAM 复利，3 tick 对照 CPU + 与 hook-free 差异）、`session_device_stochastic_hooks_reproducible_and_execute`（随机模型 SAMPLE：同 seed GPU↔GPU 逐位、与 hook-free 差异）；更新两处 eligibility/refresh 用例（opcode 全接受、随机接受；拒绝改用 Python 回调程序）。Python `test_gpu_hooks_frontend.py`：`sample` 由拒绝改为可运行，新增随机模型可运行。 |
+
+### 64.2 行为
+
+- **随机模型钩子**：`blueprint.stochastic` 不再拒绝；确定性与随机模型共用同一设备解释器。降采样/SAMPLE/CONVERT
+  经设备 RNG 采样；同 seed/tick/event 的 **GPU↔GPU 逐位可复现**，与 CPU 为**统计等价**（RNG 不同源，按 `GPU_insert_PLAN §5.2` 禁止逐位）。
+- **`SET_PARAM` 同 tick 可见**：设备按 schedule 用 RPN 写 `eco_scratch`；host 在事件边界读回、校验 bounds 后写入工作生态，
+  后续阶段与下一 tick 均可见；tick 末把提交值写回会话 `params`（Python `params` 视图随之更新）。
+- **无 set_param 的钩子模型**：仍直接借用会话生态，无 clone、无额外同步；确定性 opcode 数值行为与 §63 逐位一致。
+- 资格：仅 Python 回调仍拒；SAMPLE/SET_PARAM/随机模型全部放开。
+
+### 64.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **210 passed, 0 failed**（含新增 2 个） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | **3620 passed**（含 `test_gpu_hooks_frontend.py` 5 passed） |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`，lcov DA 合并） | 聚合 **2858/2958 = 96.62%**；executor 95.8%、kernels 97.3%、probe 96.1%，其余 100% |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 64.4 请 evaluator 独立核对
+
+- **随机统计等价（重点）**：自造随机模型 + 钩子（至少覆盖 SAMPLE、随机降采样 SCALE/KILL、随机 CONVERT），
+  与 CPU 做分布/矩检验（KS/卡方或大样本均值方差）；确认参数扫描（p 接近 0/1、n 跨 f32 阈值、continuous 开关）
+  无系统性偏差。
+- **GPU↔GPU 可复现**：同 seed 两次运行逐位一致；不同 event/tick 的 RNG site 不重叠。
+- **`SET_PARAM` 同 tick 可见性**：`first` 写参数后 reproduction/survival 使用新值（与 CPU 对照）；`early` 写后 survival 可见；
+  schedule（start/every/条件）正确；RPN（算术/除零/多参数）正确；越界值显式 `Err`；提交值反映到会话 `params`/params_log（如适用）。
+- **确定性无回归**：P7.1/P7.2 的确定性用例（含 evaluate 的 9+ 个）应逐位/容差不变；确认随机化改造未改变 `stochastic=false` 路径的数值。
+- **资格**：Python 回调仍拒；SAMPLE/SET_PARAM/随机模型接受；空间/ensemble 钩子仍拒（P7.4）。
+- **CPU 不变性 / 门禁 / 覆盖率**同既往口径。
+
+### 64.5 残余风险（非阻塞）
+
+- 设备 RNG 与 CPU 不同源，仅统计等价（既有 D3 决定）。
+- `SET_PARAM` 写入在 host 事件边界提交：GPU 侧阶段用工作副本；停止发生在提交前时，已写 scratch 不再提交（与 CPU 事件内 set_param 后立即 stop 的边界语义需 evaluator 确认）。
+- `trigger_event` 在 GPU 活跃时仍执行 host 钩子（§59.4 finding 3，未改）；设备 `hook_deme_matches` 以 batch 当 deme（B=1 正确）。
+- `sync_eco_scratch` 每 tick 重新分配 5 元素缓冲（可优化为复用）。
+- 归约/stop 阈值仍用 f32（§63.5）。
+
+结论请追加为 **§65**。
 
 ---
 
@@ -3204,3 +3266,83 @@ opcode 正确放开且不支持的 opcode/回调/随机模型显式报错，测�
 
 第 26 轮两条修复正确、原子性合理、未引入回归，测试与门禁/覆盖率达标。**APPROVED**（范围为当前 HEAD
 `c2cf388` 与被审测试集；不声称任何历史基线失败消失）。§61.4 的 1/2 为可选加固，§61.4.3 为已知残余。
+
+---
+
+## 63. 第 27 轮结论（evaluator 独立执行，2026-09-22，HEAD=`5e60ca1`）
+
+### 63.1 裁定：**APPROVED**
+
+P7.2 设备侧 `STOP_IF_ZERO/BELOW/ABOVE/EXTINCTION` 门控（含每事件 stop 标志、停止点/部分状态/`state_tick`
+与 CPU 一致）经独立复核；资格按 opcode 放开正确，hook-free 与 P7.1 无 stop 程序零回归；§61.4 两处可选
+加固（校验单一化、`install_hook_program` 原子性）落实。CPU golden reference 未改。
+
+### 63.2 独立核对（停止语义）
+
+- **停止点/部分状态**：新增 4 个独立 evaluator 用例（保留在 `session.rs`）：
+  - `evaluator_device_stop_above_below_zero_extinction_match_cpu`：四种 stop opcode 分别置于
+    `first`/`early`/`late`，含条件门控（`tick>=1`、`tick==3`）：停止 tick、`stopped` 标志与部分状态
+    与 CPU 一致（above@early→tick0；below@first cond→tick1；zero after SET(0)→tick0；extinction after SET(0)→tick0；above@late tick==3→tick3）。
+  - `evaluator_device_stop_selector_subset_matches_cpu`：sex/age/z 子集归约；子集低于大阈值触发、高于大阈值不触发（`stopped=false`，跑满 tick）。
+  - `evaluator_device_stop_aborts_later_hooks_and_events`：同事件「先 SET(0) 后 STOP_IF_BELOW」中止同一 hook
+    后续 op；第二 hook 的 SET(100) 与后续事件的 SET(999) 均不得执行（与 CPU 一致，且断言无 999 残留）。
+  - `evaluator_device_stop_flag_does_not_leak_across_runs`：连续 3 次 `run_inner`，不可触发的 STOP_IF_ZERO
+    不得残留 stopped 标志，`state_tick` 正确累进，状态与 CPU 一致。
+- **停止点语义核对**：设备 `tick` 在 `first/early/late` 命中 stop 即返回且 `self.tick` 不前进；
+  `run_gpu` 用 `take_stopped()` 检测后 `break` 且不推进 `state_tick`；与 CPU `run_inner`（`result!=0` 时
+  `stopped=true` 且 `current_tick` 不增）逐点一致。无 stop op 的程序 `run_hook_event` 不做 D2H、恒返回 false。
+- **单调用者安全**：仅 `run_gpu` 消费 stop 标志；spatial `run_gpu_tick` 与 `run_gpu_ensemble` 也调用
+  `gpu.tick` 但**均拒绝钩子**（`spatial.rs:352`、`enable_gpu_ensemble`），故不存在停止标志被静默吞掉的路径。
+
+### 63.3 §61.4 加固核对
+
+- `validate_device_hooks` 抽出为单一资格函数，`enable_gpu` 与 `install_hook_program` 均复用（读码）。
+- `install_hook_program` 改为先 `configure_hooks` 成功再 `set_tick`（原子性）：失败时不再有「tick 已改、
+  程序未换」的部分副作用；host 程序仍在赋值前返回。前一版 evaluator 用例
+  `evaluator_device_rejected_program_refresh_is_atomic` 仍通过。
+
+### 63.4 独立端到端与门禁
+
+- 重编扩展（从 `5e60ca1`）；自写 `/tmp/l3_hooks_stop.py` 四场景全部 PASS：
+  `above`（tick>=1）both tick=1 max_rel 1.079e-07；`scale0 + stop_if_zero` both tick=0 max_rel 0；
+  `below`（tick>=2）both tick=2 max_rel 7.117e-08；`extinction`（不触发）both tick=6 max_rel 1.700e-07。
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **208 passed**（作者 204 + evaluator 4） |
+| `cargo test --features gpu evaluator_` | **41 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3620 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **2709/2800 = 96.75%**；executor 95.99%、kernels 97.22%、probe 96.13%、其余 100% |
+| 受保护 `evaluator_` 用例 | 未弱化/未删/无 `#[ignore]`；`executor.rs`/`kernels.rs`/`spatial_session.rs` 本轮未改动 |
+| Python 新增可执行行 | 无新增可执行源码行（`rust_backend.py` 仅 docstring；其余为文档/测试） |
+
+### 63.5 逐条发现（均非阻塞）
+
+1. **low / 归约精度（代码阅读）**：设备 STOP_IF_BELOW/ABOVE 的 `selected_total` 用 f32、extinction 全和用
+   f32，CPU 为 f64。整数计数且量级 <2²⁴ 时逐位一致；超大或近阈值残差可能分歧（与 §5.2 纯计数档一致）。建议文档声明。
+2. **low / `run_hook_event` take/restore（代码阅读）**：为规避借用而 `take()` 再恢复；若未来在恢复前引入
+   重入路径需重新评估。当前无重入，安全。
+3. **残余（§59.4 未改，非阻塞）**：`trigger_event` 在 GPU 活跃时仍执行 host 钩子；设备 `hook_deme_matches`
+   以 batch 当 deme（B=1 正确）；条件栈深 128；设备 CONVERT 恒假设有 sperm。均已在 §62.5 声明。
+
+### 63.6 阻塞项
+
+无。
+
+### 63.7 证据来源
+
+- **独立运行**：上表门禁、4 个新 evaluator 用例、`/tmp/l3_hooks_stop.py`、扩展重编、覆盖率采集、`evaluator_` 复核。
+- **仅代码阅读**：`HOOK_SOURCE` stop 归约与 `return` 语义、`executor.rs` stop 标志/`tick` 中止、
+  `run_gpu`/CPU `run_inner` 停止记账对照、spatial/ensemble 钩子资格、`validate_device_hooks`。
+
+### 63.8 结论
+
+P7.2 停止门控在受支持的确定性 panmictic 路径上与 CPU golden reference 的停止点、部分状态与 tick 记账一致，
+资格放开正确，P7.1/hook-free 无回归，测试与门禁/覆盖率达标。**APPROVED**（范围为当前 HEAD `5e60ca1`
+与被审测试集；不声称任何历史基线失败消失）。

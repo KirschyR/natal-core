@@ -281,9 +281,9 @@ print(pop.gpu_status())  # "enabled"
 pop.run(100)
 ```
 
-- **适用条件**：panmictic（`n_demes == 1`）、确定性、内置生长模式（0–4）。
-  确定性声明式钩子（SCALE/SET/ADD/SUBTRACT/KILL/CONVERT）与设备侧 `stop_if_*` 门控会在设备上按与 CPU 相同的事件点执行；
-  随机钩子（`sample`）、`set_param` 与 Python 回调暂不支持，会被显式拒绝。
+- **适用条件**：panmictic（`n_demes == 1`）、内置生长模式（0–4）。
+  声明式钩子（确定性增删改、`sample`、`stop_if_*`、`set_param`、`convert`）会在设备上按与 CPU 相同的事件点执行，
+  确定性与随机模型均支持。Python 回调不支持，会被显式拒绝。
   模型不合格时 `enable_gpu` 抛 `ValueError`，扩展未带 `gpu` feature 时抛 `RuntimeError`；
   设备路径**绝不静默回退 CPU**。
 - **设备路径不记录历史**：年龄结构设备分支只回传最终状态，**不记录 history，且忽略

@@ -54,19 +54,21 @@ pub const OP_SET_PARAM_PUBLIC: i64 = 10;
 
 /// Opcodes the device hook interpreter implements.
 ///
-/// Covers the deterministic state mutations and the stop-gating reductions;
-/// `SAMPLE` and `SET_PARAM` stay host-only until P7.3.
+/// All declarative opcodes now run on the device: deterministic mutations,
+/// `SAMPLE`, stop-gating, `SET_PARAM`, and `CONVERT`.
 #[cfg(feature = "gpu")]
-pub const DEVICE_SUPPORTED_OPS: [i64; 10] = [
+pub const DEVICE_SUPPORTED_OPS: [i64; 12] = [
     OP_SCALE,
     OP_SET,
     OP_ADD,
     OP_SUBTRACT,
     OP_KILL,
+    OP_SAMPLE,
     OP_STOP_IF_ZERO,
     OP_STOP_IF_BELOW,
     OP_STOP_IF_ABOVE,
     OP_STOP_IF_EXTINCTION,
+    OP_SET_PARAM,
     OP_CONVERT,
 ];
 

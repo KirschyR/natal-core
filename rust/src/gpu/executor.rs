@@ -1423,23 +1423,29 @@ impl GpuExecutor {
         stochastic: bool,
         continuous: bool,
     ) -> Result<(), String> {
-        if self.run_hook_event(0, stochastic, continuous)? {
+        // The CPU commits an event's `set_param` writes at the event boundary
+        // before it checks the stop result, so a `STOP_IF_*` must not skip the
+        // commit for its own event.
+        let stopped = self.run_hook_event(0, stochastic, continuous)?;
+        self.commit_eco(ecology)?;
+        if stopped {
             self.stopped = true;
             return Ok(());
         }
-        self.commit_eco(ecology)?;
         self.reproduction_tick(blueprint, ecology.get(), variants, deme_variants)?;
-        if self.run_hook_event(1, stochastic, continuous)? {
+        let stopped = self.run_hook_event(1, stochastic, continuous)?;
+        self.commit_eco(ecology)?;
+        if stopped {
             self.stopped = true;
             return Ok(());
         }
-        self.commit_eco(ecology)?;
         self.survival_tick(blueprint, ecology.get(), variants, deme_variants)?;
-        if self.run_hook_event(2, stochastic, continuous)? {
+        let stopped = self.run_hook_event(2, stochastic, continuous)?;
+        self.commit_eco(ecology)?;
+        if stopped {
             self.stopped = true;
             return Ok(());
         }
-        self.commit_eco(ecology)?;
         self.age_tick()?;
         self.tick = self.tick.wrapping_add(1);
         Ok(())

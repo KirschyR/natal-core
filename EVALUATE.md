@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 27 轮：**APPROVED**（§63；P7.2 设备侧 `STOP_IF_*` 门控 + 按 opcode 放开 + §61.4 加固） |
-| 待回执 | §65（第 28 轮 P7.3：`SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG） |
-| 主 agent 处理 | 第 28 轮：P7.3 已实现并自测；P7.4 待启动 |
-| 待 evaluator 动作 | 按 §64 复核，把第 28 轮结论写入 §65 |
+| 最近回执 | 第 28 轮：**NOT APPROVED**（§65；P7.3 阻塞项——`SET_PARAM` 在 stop 事件边界未提交，设备≠CPU） |
+| 待回执 | §67（第 29 轮：修复 §65 阻塞项——stop 事件边界仍提交 set_param；回归测试转绿） |
+| 主 agent 处理 | 第 29 轮修复已完成并自测；待复核 |
+| 待 evaluator 动作 | 按 §66 复核修复与受影响门禁，结论写入 §67；并补做 §65.5 的随机统计等价扫描 |
 
 ## 0. 一句话目标
 
@@ -1665,6 +1665,51 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 归约/stop 阈值仍用 f32（§63.5）。
 
 结论请追加为 **§65**。
+
+---
+
+## 66. 第 29 轮交接 — 修复 §65 阻塞项（stop 事件边界仍提交 `SET_PARAM`）
+
+- 日期：2026-09-22
+- 背景：§65 **NOT APPROVED**，阻塞项为「同事件内先 `SET_PARAM` 后 stop 时设备未提交该生态写入」。
+- 风险分类：**高风险修复**（生态参数同 tick 可见性/提交时机；科学状态持久分歧）。
+
+### 66.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | `run_tick_sequence`：三个事件点均改为「先 `run_hook_event` → **无条件 `commit_eco`** → 若 stopped 再 `return`」，与 CPU `run_tick` 的 `execute_event` → `ctx.commit` → 检查 result 顺序一致。这样 stop 命中的事件里已由 `SET_PARAM` 写入的 scratch 仍被读回并写入工作副本/`pending_eco`。 |
+| 测试 | 直接采用 evaluator 的回归测试 `evaluator_set_param_committed_on_stop_matches_cpu`（工作树中）；未削弱。 |
+
+### 66.2 行为
+
+- `SET_PARAM` 与 `STOP_IF_*` 同事件时，停止前提交该写入；会话 `params` 与后续 run 不再丢失（与 CPU 一致）。
+- 无 set_param 的路径（含 P7.1/P7.2 全部用例）行为不变：`commit_eco` 对 `has_set_param=false` 为 no-op。
+
+### 66.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu evaluator_set_param_committed_on_stop_matches_cpu` | **passed**（修复前失败：device 500 vs host 250） |
+| `cargo test --features gpu` | **211 passed, 0 failed**（作者 210 + evaluator 回归 1） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3620 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **2861/2961 = 96.62%**；executor 95.8%、kernels 97.3%、probe 96.1%，其余 100% |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 66.4 请 evaluator 独立核对
+
+- **阻塞项修复**：`evaluator_set_param_committed_on_stop_matches_cpu` 转绿；并请扩展覆盖「`early`/`late` 事件 stop + 同事件 set_param」「随机模型同场景」「stop 后连续多次 run 参数持续一致」。
+- **无回归**：P7.1/P7.2/P7.3 既有确定性/随机用例；无 set_param 路径数值不变。
+- **补 §65.5 未完成项**：随机钩子与 CPU 的统计等价全量扫描（正确改变种子；KS/卡方/大样本矩）。
+- CPU 不变性 / 门禁 / 覆盖率同既往口径。
+
+### 66.5 残余风险（非阻塞）
+
+- §65.3 已列残余不变：`hook_apply_target_with_sperm` 负 virgin 一律 clamp、设备 RNG 仅统计等价、`trigger_event` GPU 语义、deme=batch、归约 f32。
+- `sync_eco_scratch` 每 tick 分配 5 元素缓冲（可优化）。
+
+结论请追加为 **§67**。
 
 ---
 
@@ -3346,3 +3391,78 @@ P7.2 设备侧 `STOP_IF_ZERO/BELOW/ABOVE/EXTINCTION` 门控（含每事件 stop 
 P7.2 停止门控在受支持的确定性 panmictic 路径上与 CPU golden reference 的停止点、部分状态与 tick 记账一致，
 资格放开正确，P7.1/hook-free 无回归，测试与门禁/覆盖率达标。**APPROVED**（范围为当前 HEAD `5e60ca1`
 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 65. 第 28 轮结论（evaluator 独立执行，2026-09-22，HEAD=`22db184`）
+
+### 65.1 裁定：**NOT APPROVED**
+
+存在 1 个阻塞项：**`SET_PARAM` 在「同一事件内先写参数、后 stop」时，设备不把该写入提交到会话生态，而 CPU 会提交**。
+受影响文件（`rust/src/gpu/executor.rs` / `sessions/age_structured.rs`）属高风险；修复前不得宣称 P7.3 完成。
+其余大部分能力（随机钩子、SAMPLE、CONVERT、set_param 正常路径、确定性无回归）经独立复核通过，见下。
+
+### 65.2 阻塞项（附已实际运行且失败的回归测试）
+
+- **测试**：`rust/tests/unit/gpu/session.rs::evaluator_set_param_committed_on_stop_matches_cpu`（本轮 evaluator 新增，已提交到工作树）。
+- **命令**：`cargo test --features gpu evaluator_set_param_committed_on_stop_matches_cpu`
+- **预期**：事件 0 的 hook 先执行 `SET_PARAM(carrying_capacity*0.5)` 再 `STOP_IF_BELOW`；stop 命中后，CPU 在事件边界
+  **先提交** eco 值再返回 stop（`kernels/age_structured.rs:1115-1119`），故两端提交后的 `carrying_capacity` 应一致。
+- **实际**：`set_param committed on stop diverged: device 500 vs host 250`（夹具 K=500）。设备保持原值，CPU 变为 250。
+- **根因（读码）**：`executor.rs::run_tick_sequence` 在 `run_hook_event(0/1/2)?` 返回 `true` 时**立即 `return`，不调用
+  `commit_eco`**；而 CPU `run_tick` 每个事件都是「`execute_event` → `ctx.commit(eco_values)` → 检查 `result != 0`」，
+  即 stop 事件内的 set_param 已被 commit。设备 `tick` 随后用 `view.get()`（未包含被 stop 事件写入的工作副本）写
+  `pending_eco`，会话参数因此丢失该写入，且会持续影响后续 run。
+- **影响**：受支持配置（set_param + 同事件 stop，确定性或随机）下 CPU/GPU 静默不一致，且污染后续轨迹——属项目明令禁止的
+  「静默不一致」。修复方向：stop 命中后仍执行一次 `commit_eco`（读取 scratch 并写入工作副本/`pending_eco`），再返回；
+  注意 CPU 的语义是「stop 事件的 set_param 仍提交」。
+- **严重度**：high（科学状态持久分歧；sed / 后续 run 受影响）。
+
+### 65.3 其余独立核对（通过）
+
+- **确定性无回归**：P7.1/P7.2 evaluator 用例（opcode/selector/condition/CONVERT/stop）仍通过；`cargo test --features gpu`
+  210 passed（除新增回归 1 失败）。设备确定性 opcode 现经 `hook_apply_target_*` 移植，男性归约改为 `current*(target/current)`,
+  与 CPU `apply_target_without_sperm` 一致（P7.1 旧实现直接写 target；此为向 CPU 靠拢，非回归）。
+- **随机钩子可运行且可复现**：作者 `session_device_stochastic_hooks_reproducible_and_execute` 通过（同 seed GPU↔GPU 逐位）。
+- **`set_param` 正常路径**：作者 `session_device_hook_set_param_matches_cpu` 通过（first 写参数、3 tick 对照 CPU + 与 hook-free 差异）。
+- **资格**：全 12 opcode 设备支持，仅 Python 回调拒绝；空间/ensemble 仍拒钩子（读码 + 既有测试）。
+- **代码阅读核对**：`hook_sample_survivors`/`hook_apply_target_*`/`hook_convert_count` 逐字对应 host；`hook_eval_rpn`
+  除零用 IEEE、栈语义与 host 一致（`-0.0` 符号边缘仅影响 ±inf 符号，最终 bounds 校验同为 Err）；`SET_PARAM` schedule
+  `tick>=start && every>0 && (tick-start)%every==0` 与 CPU 等价；设备 `param_id<5` 与 `N_ECO_PARAMS=5` 一致；RNG site
+  `tick*16+(4+event)` 与生命周期 site 0..3 不重叠。
+- **残余（非阻塞，源自 §64.5 且未改）**：`hook_apply_target_with_sperm` 对负 `n_virgins` 一律 clamp 到 0（CPU 仅
+  `-EPS` 内 clamp、否则 panic），会掩盖不一致状态；设备 RNG 与 CPU 不同源，仅统计等价；`trigger_event` GPU 语义；
+  deme=batch（B=1）；stop/归约 f32。
+
+### 65.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **210 passed, 1 failed**（失败=本轮阻塞项回归测试；作者 210 + evaluator 新增回归 1） |
+| `python scripts/check_rust.py` | **EXIT=0**（需 `PYO3_PYTHON`/`PYTHONHOME`/`PYTHONPATH`；首次漏设导致 `-lpython3.13` 链接失败，属环境） |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3620 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **2858/2958 = 96.62%**；executor 95.76%、kernels 97.28%、probe 96.13%、其余 100% |
+
+### 65.5 未完成的检查（列明）
+
+- **随机统计等价全量扫描（KS/卡方/大样本矩）未完成**：本轮尝试的 Python 种子扫描因未正确改变 RNG 种子（各种子结果
+  恒定，sd=0）而不具统计意义，未纳入结论；我仅完成「确定性分支逐点对照 + 随机分支复用既有已验证设备采样器」的代码级核对。
+  该全量扫描应在阻塞项修复后一并补做。设备与 CPU RNG 不同源（D3），按 §5.2 只要求统计等价。
+
+### 65.6 证据来源
+
+- **独立运行**：上表门禁、`evaluator_set_param_committed_on_stop_matches_cpu`（失败）、作者 set_param/随机用例、
+  扩展重编、覆盖率采集。
+- **仅代码阅读**：`kernels.rs` 的 `hook_*` 移植与 `OP_SET_PARAM`/RPN、`executor.rs` 的 `EcoView`/`commit_eco`/
+  `run_tick_sequence`/`pending_eco`、CPU `run_tick` 的 commit 顺序、`rng_site`/`rng_key`、`N_ECO_PARAMS`。
+
+### 65.7 结论
+
+P7.3 的随机钩子/SAMPLE/CONVERT/set_param 正常路径大体正确，但由于 **stop 与 set_param 同事件时设备未提交生态写入**，
+CPU/GPU 存在静默持久分歧，**NOT APPROVED**。修复 `run_tick_sequence`（stop 返回前提交本事件 scratch）并保留/通过上述
+回归测试后，连同未完成的统计等价扫描一并回交复核（范围：HEAD `22db184` 与被审测试集；不声称历史基线失败消失）。

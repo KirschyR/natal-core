@@ -271,7 +271,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P7.1 | 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格（§58） | APPROVED（§59） |
 | P7.1-fix | §59.4 两条 medium：启用后设备 tick 对齐 + 设钩子重传设备 CSR（§60） | APPROVED（§61） |
 | P7.2 | 设备侧 `STOP_IF_*` 门控 + 按 opcode 放开（§62） | APPROVED（§63） |
-| P7.3 | `SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG（§64） | **已实现，待 §65 复核** |
+| P7.3 | `SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG（§64） | **§65 阻塞项已修复，待 §67 复核** |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -339,10 +339,10 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 - **分支/HEAD**：`feat/gpu-merge-test`；P7.1/P7.2 及 §59.4 修复已由用户提交并 §59/§61/§63 APPROVED；
   P7.3 与文档为**未提交工作树改动**（另有 evaluator 在各轮加的用例未提交）。
 - **最近回执**：§63（P7.2）**APPROVED**。
-- **待回执**：**§65**（P7.3：`SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG）——已实现并自测，**未批准**。
+- **待回执**：**§67**（P7.3 fix：stop 事件边界仍提交 set_param；回归测试转绿）——已修复并自测，**未批准**。
 - **后续未开始**：**P7.4**（空间 per-deme selector/调度 + ensemble 集成）；**B7** 低优先；
   **E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
-- **门禁基线（P7.3 自测）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **210**、
+- **门禁基线（P7.3 fix 自测）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **211**、
   `ruff`/`pyright` 通过、`pytest` **3620**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **96.62%**。
 - **P7.3 要点**：`HOOK_SOURCE` 增设备端 `hook_sample_survivors`/`hook_apply_target_*`/`hook_convert_count`、
   `hook_eval_rpn`（set_param）；内核接收 `eco`/RNG 参数；`DeviceHooks` 增 `has_set_param` 与 sp/RPN/eco 缓冲；

@@ -1626,3 +1626,64 @@ fn session_device_stochastic_hooks_reproducible_and_execute() {
         .any(|(a, b)| (a - b).abs() > 1e-3 * b.abs().max(1.0));
     assert!(changed, "SAMPLE must change the stochastic trajectory");
 }
+
+#[test]
+fn evaluator_set_param_committed_on_stop_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        // Event 0 runs SET_PARAM(carrying_capacity * 0.5) then STOP_IF_BELOW.
+        // The CPU commits the set_param at the event boundary before honoring
+        // the stop; the device must retain the same committed ecology.
+        let build = || {
+            let mut p = eval_program([
+                vec![EvalHook {
+                    ops: vec![eval_op(10, 0.0), eval_op(7, 1e9)],
+                    deme_type: 0,
+                    deme_data: Vec::new(),
+                }],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            ]);
+            p.sp_param_ids = vec![0, -1];
+            p.sp_every = vec![1, 1];
+            p.sp_start = vec![0, 0];
+            p.rpn_offsets = vec![0, 3, 3];
+            p.rpn_kinds = vec![1, 0, 4];
+            p.rpn_payload = vec![0, 0, 0];
+            p.sp_literals = vec![0.5];
+            p.has_set_param = true;
+            p
+        };
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.hooks = build();
+        gpu.enable_gpu().expect("enable gpu");
+        let (_, _, gpu_stopped) = gpu.run_inner(py, 1, 0, None, 0).expect("gpu run");
+        assert!(gpu_stopped, "gpu stop must fire");
+
+        let mut cpu = make_session(blueprint, params, genetics, ind, sperm);
+        cpu.hooks = build();
+        let (_, _, cpu_stopped) = cpu.run_inner(py, 1, 0, None, 0).expect("cpu run");
+        assert!(cpu_stopped, "cpu stop must fire");
+
+        let g = gpu.params.eco_value(0, 0);
+        let c = cpu.params.eco_value(0, 0);
+        assert!(
+            (g - c).abs() <= 1.2e-6 * c.abs().max(1.0),
+            "set_param committed on stop diverged: device {g} vs host {c}"
+        );
+    });
+}

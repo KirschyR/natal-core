@@ -331,6 +331,11 @@ impl AgeStructuredSession {
         )
         .map_err(map_lifecycle_error)?;
         executor.set_seed(self.seed);
+        // Hook conditions are keyed on the session tick; align the device
+        // clock when the host already advanced before enabling.
+        if self.hooks.n_hooks != 0 {
+            executor.set_tick(self.state_tick.max(0) as u64);
+        }
         executor
             .ensure_migration_budget(&self.blueprint)
             .map_err(map_lifecycle_error)?;
@@ -566,13 +571,13 @@ impl AgeStructuredSession {
     /// ## Parameters
     /// - `program`: Python CSR ``HookProgram``.
     fn set_hook_program(&mut self, program: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.hooks = HookProgram::from_python(program)?;
-        Ok(())
+        let next = HookProgram::from_python(program)?;
+        install_hook_program(self, next)
     }
 
     /// Clear all declarative hooks.
     fn clear_hook_program(&mut self) {
-        self.hooks = HookProgram::default();
+        let _ = install_hook_program(self, HookProgram::default());
     }
 
     /// Register Python callbacks interleaved with the CSR hooks.
@@ -1107,6 +1112,57 @@ impl AgeStructuredSession {
     fn truncate_checkpoints(&mut self, retain_until_tick: i64) {
         self.checkpoints.retain(|cp| cp.tick <= retain_until_tick);
     }
+}
+
+/// Replace a session's hook program, keeping an active device interpreter in sync.
+///
+/// ## Parameters
+/// - `session`: The session owning the program.
+/// - `next`: The replacement program.
+///
+/// ## Errors
+/// Returns ``PyValueError`` when the GPU path is active and `next` is not
+/// device-eligible.
+#[cfg(feature = "gpu")]
+fn install_hook_program(session: &mut AgeStructuredSession, next: HookProgram) -> PyResult<()> {
+    if let Some(gpu) = session.gpu.as_mut() {
+        if next.has_python_callbacks() {
+            return Err(PyValueError::new_err(
+                "GPU path does not support Python hook callbacks",
+            ));
+        }
+        if let Some(opcode) = next.first_unsupported_device_op() {
+            return Err(PyValueError::new_err(format!(
+                "GPU path does not support hook opcode {opcode}; supported \
+                 opcodes are SCALE, SET, ADD, SUBTRACT, KILL, CONVERT"
+            )));
+        }
+        if next.n_hooks != 0 && session.blueprint.stochastic {
+            return Err(PyValueError::new_err(
+                "GPU hooks require a deterministic model",
+            ));
+        }
+        if next.n_hooks != 0 {
+            gpu.set_tick(session.state_tick.max(0) as u64);
+        }
+        gpu.configure_hooks(&next).map_err(map_lifecycle_error)?;
+    }
+    session.hooks = next;
+    Ok(())
+}
+
+/// CPU build of [`install_hook_program`]: only stores the program.
+///
+/// ## Parameters
+/// - `session`: The session owning the program.
+/// - `next`: The replacement program.
+///
+/// ## Errors
+/// Never fails.
+#[cfg(not(feature = "gpu"))]
+fn install_hook_program(session: &mut AgeStructuredSession, next: HookProgram) -> PyResult<()> {
+    session.hooks = next;
+    Ok(())
 }
 
 impl AgeStructuredSession {

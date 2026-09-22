@@ -313,6 +313,18 @@ impl GpuExecutor {
         self.seed = seed;
     }
 
+    /// Override the device tick counter.
+    ///
+    /// Used when a session enables the device after advancing host ticks, so
+    /// tick-keyed hook conditions and the counter-based RNG share the session
+    /// clock.
+    ///
+    /// ## Parameters
+    /// - `tick`: Session tick to resume from.
+    pub fn set_tick(&mut self, tick: u64) {
+        self.tick = tick;
+    }
+
     /// Upload a declarative hook program for device-side event execution.
     ///
     /// A program with no hooks clears any uploaded program. The session is

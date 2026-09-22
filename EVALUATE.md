@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 24 轮：**APPROVED**（§57；B6 raw 设备历史 + max_rows 环、C8 阈值统一、C11 前置报错、A3 metadata） |
-| 待回执 | §59（第 25 轮 P7.1：设备侧确定性声明式钩子解释器 + 按 opcode 放开资格） |
-| 主 agent 处理 | 第 25 轮：P7.1 已实现并自测；P7.2 起未开始 |
-| 待 evaluator 动作 | 按 §58 复核，把第 25 轮结论写入 §59 |
+| 最近回执 | 第 25 轮：**APPROVED**（§59；P7.1 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格） |
+| 待回执 | §61（第 26 轮：§59.4 两条 medium 修复——设备 tick 对齐 `state_tick`、设钩子重传设备 CSR） |
+| 主 agent 处理 | 第 26 轮：§59.4 medium 修复已实现并自测；P7.2 待启动 |
+| 待 evaluator 动作 | 按 §60 复核，把第 26 轮结论写入 §61 |
 
 ## 0. 一句话目标
 
@@ -1494,6 +1494,58 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 60. 第 26 轮交接 — 处理 §59.4 两条 medium（设备 tick 对齐 + 设钩子重传设备 CSR）
+
+- 日期：2026-09-21
+- 背景：§59 APPROVED（P7.1）。按 §59.4 建议，在 P7.2 前对发现 1/2 加保护。
+- 风险分类：**局部代码修改**（会话接线；仅影响含钩子的确定性设备路径，hook-free 路径零改动）。
+
+### 60.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增 `GpuExecutor::set_tick(tick)`，覆盖设备 tick 计数器。 |
+| `rust/src/sessions/age_structured.rs` | `enable_gpu`：含钩子（`n_hooks != 0`）时用 `state_tick` 初始化设备 tick，使 `tick` 条件与 counter RNG 对齐会话时钟。`set_hook_program`/`clear_hook_program` 改为经自由函数 `install_hook_program`：GPU 活跃时先按 opcode/回调/随机模型重校验、重对齐 tick，再 `configure_hooks` 重传设备 CSR（不合规显式 `PyValueError`）；GPU 未启用只替换 host 程序。新增非 gpu 空实现。 |
+| 测试 | `session_device_hooks_enabled_after_cpu_ticks_align_tick`：CPU 先跑 2 tick 再启用 GPU，含 `tick >= 3` 条件的 late SET 在 tick 3 触发，整状态与纯 CPU 4 tick 对照。`session_device_hook_program_refresh_reuploads`：启用后以 `install_hook_program` 换成 SET(1) 并被设备采用（对照 CPU），且换入 SAMPLE 程序显式 `Err`。 |
+
+### 60.2 行为
+
+- **发现 1**：正常路径（启用前 tick=0）不变；「先 CPU 若干 tick 再启用 GPU」且含钩子时，设备 tick 现从 `state_tick` 续起，
+  tick 条件不再错位。hook-free 模型不调用 `set_tick`，RNG/行为零变化。
+- **发现 2**：`set_hook_program`/`clear_hook_program` 在 GPU 活跃时会同步设备 CSR（并复用 enable 时的资格校验）；
+  不再出现「host 换程序、设备仍用旧程序」的静默 desync。公开 Python 侧本无构建后注册钩子入口，此处为防御性加固。
+- `trigger_event`（§59.4 finding 3）未改：GPU 会话的手动事件仍为既有语义，记为残余（建议文档声明）。
+
+### 60.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **199 passed, 0 failed**（含新增 2 个；§59 evaluator 9 个仍在） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | **3619 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`，lcov DA 合并） | 聚合 **2679/2769 = 96.75%**；executor 96.0%、kernels 97.2%、probe 96.1%，其余 100% |
+| CPU 不变性 | 仅 Rust 会话/executor 改动；`kernels/model/contracts` 零改动 |
+
+### 60.4 请 evaluator 独立核对
+
+- **设备 tick 对齐**：含 tick 条件钩子的会话在「CPU 预跑 N tick 后启用 GPU」时，条件触发 tick 与纯 CPU 一致；
+  确认 hook-free 路径设备 tick 仍从 0 起、RNG 与既有结果逐位不变。
+- **CSR 重传**：启用后替换/清空钩子程序，设备使用新程序（与 CPU 对照）；不合格程序显式 `Err` 且不污染 host 程序。
+- **仅确认两点修复未引入回归**：既有 P7.1 evaluator 9 用例、hook-free 全链路、CPU 不变性。
+- 覆盖与门禁同既往口径。
+
+### 60.5 残余风险（非阻塞）
+
+- `trigger_event` 在 GPU 活跃时仍执行 host 钩子，下一次设备 `run` 会覆盖（§59.4 finding 3，未改）。
+- 设备 `hook_deme_matches` 以 batch 当 deme（B=1 正确；ensemble/空间拒绝钩子，P7.4 重做）。
+- 条件栈深 128、设备 CONVERT 恒假设有 sperm：同 §59.4 finding 5/6。
+
+结论请追加为 **§61**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -2925,3 +2977,95 @@ A3（boundary metadata）均通过独立复核；CPU 数值路径零改动，门
 
 第 24 轮四项改动正确、经独立用例与门禁确认，质量与覆盖率达标。**APPROVED**（范围为当前 HEAD `a7e930e`
 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 59. 第 25 轮结论（evaluator 独立执行，2026-09-21，HEAD=`c141f39`）
+
+### 59.1 裁定：**APPROVED**
+
+P7.1 设备侧确定性声明式钩子解释器（SCALE/SET/ADD/SUBTRACT/KILL/CONVERT）与按 opcode 放开资格均经独立
+复核；正常「先启用后运行」路径下设备与 CPU 一致（单 tick 达 1.2e-6，多 tick 达 1.2e-5 档内），CPU 数值路径
+零改动，门禁与覆盖率达标。已确认的残余风险均为非阻塞的既有集成边界（见 §59.4），应在文档声明。
+
+### 59.2 独立新增证伪用例（9 个，全部通过，已保留在 `rust/tests/unit/gpu/session.rs`）
+
+自建原始 CSR 构造器（不经过 Python 编译器，逐字段控制 selector/condition/CONVERT 端点），新增：
+
+- `evaluator_device_hook_each_opcode_matches_cpu`：0..=4 每个 opcode，单 tick（rtol **1.2e-6**）与 4 tick
+  （rtol 1.2e-5）对照 CPU。
+- `evaluator_device_hooks_actually_execute_on_device`：SET(5) 与 hook-free 设备运行的相对差 >1%，证明设备真的执行了钩子（而非两边都没跑）。
+- `evaluator_device_hook_conditions_gate_correctly`：`tick==N`、`tick%2==0`、RPN `AND/NOT`、`OR`；并断言
+  never-true 条件与 hook-free 设备运行**逐位一致**（证明条件被求值而非忽略）。
+- `evaluator_device_hook_selectors_match_cpu`：female-only / male-only / age+zidx 子集；空 sex mask 与 hook-free 逐位一致。
+- `evaluator_device_hook_deme_selector_matches_host`：selector `[0]` 命中、`[1]` 不命中（=hook-free 逐位一致）。
+- `evaluator_device_hook_female_sperm_scaling_matches_cpu`：女性 KILL 的 sperm 缩放/virgin 语义；相对 male-only KILL 的 sperm 差 >1。
+- `evaluator_device_hook_convert_matches_cpu_and_conserves`：z0↔z1 双向，rtol 1.2e-6，并核对总计数守恒。
+- `evaluator_device_hook_multi_event_order_matches_cpu`：first/early/late 多事件 + 单 hook 多 op 的顺序。
+- `evaluator_device_hook_eligibility_rejects_unsupported`：opcode 5/6/7/8/9/10、随机模型 + 钩子、Python 回调均显式 `Err`；受支持的确定性程序 `Ok`。
+
+### 59.3 独立端到端证据（重编扩展后）
+
+- `maturin develop --features "gpu,extension-module"`（从 HEAD 重建 `.so`，旧 `.so` 时间戳早于提交）。
+- `/tmp/l3_gpu.py` / `l3_spatial.py` / `l3_stochastic.py` / `l3_spatial_stochastic.py` 全部通过（原样复跑）。
+- 自写 `/tmp/l3_hooks_eval.py`（scale + female-kill + male-add + `when="tick >= 1"` subtract，5 tick）：
+  GPU vs CPU max_rel **3.505e-07**，hooked vs hook-free max_rel 7.5（证明设备执行）。
+- 自写 `/tmp/l3_hooks_convert.py`（WT|WT→WT|Dr 0.3，3 tick）：max_rel **1.396e-07**。
+- Python 门禁：`pytest -q` **3619 passed**（含 `test_gpu_hooks_frontend.py` 4 passed、`test_gpu_ensemble_frontend.py` 9 passed）。
+
+### 59.4 逐条发现（全部非阻塞）
+
+1. **medium / `sessions/age_structured.rs:enable_gpu`（设备 tick 起点）**：`enable_gpu` 构造执行器时
+   `GpuExecutor::new` 置 `tick=0`，未从 `state_tick` 同步。若在已推进若干 CPU tick 后再 `enable_gpu`，
+   含 tick 条件的钩子会错位。**已实际运行（临时探针，已删除）**：CPU 预跑 2 tick → `enable_gpu` → GPU 2 tick，
+   与纯 CPU 4 tick 对照，`maxdiff=9.33`（设备 tick=0、会话 tick=4）。正常路径（启用前 tick=0）不受影响，
+   我的 9 个用例均验证通过。建议：`enable_gpu` 用 `state_tick` 初始化设备 tick（`restore_device_state` 已有该能力），
+   或在 `state_tick>0` 且有 tick 条件钩子时显式报错。
+2. **medium / `set_hook_program`（设备 CSR 未刷新）**：`set_hook_program` 只替换 `self.hooks`，不重上传
+   `executor.hooks`。**已实际运行（同临时探针）**：启用时 SET(7)，之后把 `session.hooks` 换成 SET(1) 再运行，
+   与 CPU(SET 1) 对照 `maxdiff=29.1`（设备用了旧的 SET(7)）。**可达性**：公开 Python 侧不存在构建后注册钩子的
+   入口（`builder.hooks` 文档明确 "there is no post-construction hook registration"；`_hook_program` 仅在构造/克隆时赋值），
+   故正常流程不可触发。建议：`set_hook_program`/`configure_program` 在 `self.gpu.is_some()` 时重上传或使执行器失效。
+3. **low / `trigger_event`（仅代码阅读）**：GPU 已启用时 `trigger_event` 在 host `state_ind` 上执行钩子，
+   下一次 GPU `run` 从设备下载状态会覆盖该改动，效果静默丢失。`finish` 事件仅经此通道触发；建议文档声明
+   GPU 会话的手动事件语义，或直接拒绝。
+4. **low / `hook_deme_matches`（代码阅读）**：设备以 batch 索引 `b` 当 deme id，仅在 B=1 正确；ensemble/空间已显式
+   拒绝钩子，故当前无影响（P7.4 需重做 selector 调度）。
+5. **low / `hook_eval_condition` 栈深 128**：溢出发 0（不匹配）；CPU 无硬上限。编译器产出的程序远小于此，仅病态输入有差异。
+6. **low / 设备 CONVERT 恒假设有 sperm**：年龄结构恒有 sperm；discrete/空间已拒绝。f32 `n*prob` 与 CPU f64 同序，落在相对误差档。
+
+### 59.5 阻塞项
+
+无。未发现 CPU/设备在受支持路径上的不一致，未发现 CPU golden reference 改动，未发现被削弱的受保护用例。
+
+### 59.6 证据来源
+
+- **独立运行**：上表门禁、9 个新 Rust 用例、临时 tick 错位/陈旧 CSR 探针（已删除）、扩展重编、4 个 `/tmp/l3_*.py`、
+  自写 hooks/convert E2E、覆盖率采集。
+- **仅代码阅读**：`interpreter.rs` 逐 opcode/selector/condition 与 CUDA `HOOK_SOURCE` 对照；`_compile.py`/`types.py`
+  CSR 装配；`set_hook_program`/`configure_program`/`trigger_event` 调用链与前端可达性。
+
+### 59.7 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **197 passed**（作者 188 + evaluator 9） |
+| `cargo test --features gpu evaluator_` | **34 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3619 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **2676/2766 = 96.75%**；executor 95.96%、kernels 97.21%、probe 96.13%、其余 100% |
+| Python 新增可执行行 | 无（P7.1 仅改 docstring + 新增测试），无新增行覆盖缺口 |
+
+> 环境注记：`pytest` 首次运行因未导出 `LD_LIBRARY_PATH`（缺 `libnvrtc.so.13`）导致 7 个 GPU 前端用例 `PanicException`；
+> 按其规范导出 `/opt/conda/lib/python3.11/site-packages/nvidia/cu13/lib` 后全部通过——属环境问题，非回归。
+
+### 59.8 结论
+
+P7.1 的 opcode 移植、条件/selector 语义、女性 sperm 缩放与 CONVERT 与 CPU golden reference 一致，资格按
+opcode 正确放开且不支持的 opcode/回调/随机模型显式报错，测试与覆盖率充分。**APPROVED**（范围为当前 HEAD
+`c141f39` 与被审测试集；不声称任何历史基线失败消失）。§59.4 的 1/2 两条建议主 agent 在 P7.2/P7.4 前加保护或文档化。

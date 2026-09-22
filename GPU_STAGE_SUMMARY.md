@@ -214,7 +214,7 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **188**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  `cargo test --features gpu`（当前 **199**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
   （跳过硬件）、`ruff`、`pyright`、`pytest`（3619）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
@@ -267,7 +267,8 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | C8 | 设备连续采样阈值统一到 `NATAL_EPS=1e-10`（§56） | APPROVED（§57） |
 | C11 | `run_gpu_ensemble` 误用前置显式报错（§56） | APPROVED（§57） |
 | A3 | 设备 flush 按 tick 写 boundary metadata（随 B6，§56） | APPROVED（§57） |
-| P7.1 | 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格（§58） | **已实现，待 §59 复核** |
+| P7.1 | 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格（§58） | APPROVED（§59） |
+| P7.1-fix | §59.4 两条 medium：启用后设备 tick 对齐 + 设钩子重传设备 CSR（§60） | **已实现，待 §61 复核** |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -317,7 +318,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 | 阶段 | 内容 | 验收 |
 |---|---|---|
-| **P7.1** | 设备侧 opcode 解释器：上传 CSR 数据并执行 SCALE/SET/ADD/SUBTRACT/KILL/CONVERT（含 RPN 条件与 selector/wire bounds）；**同时按 opcode 放开资格**（仅无 Python 回调且只用已支持 opcode 的确定性模型；其余显式拒绝）。**已实现（§58）待复核** | 确定性 L2/L3 与 CPU 一致（相对误差档）；事件顺序/优先级一致；未支持 opcode/回调解仍 `Err` |
+| **P7.1** | 设备侧 opcode 解释器：上传 CSR 数据并执行 SCALE/SET/ADD/SUBTRACT/KILL/CONVERT（含 RPN 条件与 selector/wire bounds）；**同时按 opcode 放开资格**（仅无 Python 回调且只用已支持 opcode 的确定性模型；其余显式拒绝）。**APPROVED（§59）；§59.4 两条 medium 修复见 §60 待复核** | 确定性 L2/L3 与 CPU 一致（相对误差档）；事件顺序/优先级一致；未支持 opcode/回调解仍 `Err` |
 | **P7.2** | 设备侧 `STOP_IF_*` 门控（D6）：设备侧归约出 stop 标志，host 按需读取；停止点与 CPU 一致；放开 STOP_IF_* 资格 | 含 `stop_if_*` 模型的停止 tick 与 CPU 一致；零逐 tick 同步 |
 | **P7.3** | `OP_SET_PARAM` 同 tick 可见性 + `SAMPLE` 的设备 RNG site 对齐；放开二者资格 | later-stage 读取已更新参数；随机 op 可复现/统计等价 |
 | **P7.4** | 空间（per-deme selector + 调度）与 ensemble 集成 | 空间/多 B 的声明式钩子与 CPU 一致 |
@@ -333,18 +334,17 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 ### 11.6 接手状态快照（2026-09-21，上下文切换）
 
-- **分支/HEAD**：`feat/gpu-merge-test`；B6/C8/C11/A3 已由用户提交为 `a7e930e` 并 §57 APPROVED；
-  P7.1 与文档更新为**未提交工作树改动**（另有 evaluator 在 §57 加的 3 个 `spatial_session.rs` 用例未提交）。
-- **最近回执**：§57（B6/C8/C11/A3）**APPROVED**。
-- **待回执**：**§59**（P7.1 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格）——已实现并自测，**未批准**。
+- **分支/HEAD**：`feat/gpu-merge-test`；P7.1 已由用户提交为 `c141f39` 并 §59 APPROVED；
+  §59.4 两条 medium 修复与文档为**未提交工作树改动**（另有 evaluator 在 `session.rs`/`spatial_session.rs` 加的用例未提交）。
+- **最近回执**：§59（P7.1）**APPROVED**。
+- **待回执**：**§61**（§59.4 修复：启用后设备 tick 对齐 `state_tick`；设钩子重传/校验设备 CSR）——已实现并自测，**未批准**。
 - **后续未开始**：**P7.2**（`STOP_IF_*` 门控）→ **P7.3**（`SET_PARAM` 可见性 + `SAMPLE` RNG）→ **P7.4**
   （空间/ensemble）；**B7** 低优先；**E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
-- **门禁基线（P7.1 自测）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **188**、
+- **门禁基线（§59.4 修复自测）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **199**、
   `ruff`/`pyright` 通过、`pytest` **3619**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **96.75%**。
-- **P7.1 要点**：`gpu/kernels.rs` 新增 `HOOK_SOURCE`/`apply_hook_event` 与 `HookEventBuffers`；`GpuExecutor`
-  增 `configure_hooks`/`run_hook_event`，`tick` 按 `first→reproduction→early→survival→late→aging` 插入事件；
-  age `enable_gpu` 改为按 opcode 放开（拒 Python 回调、SAMPLE/STOP_IF_*/SET_PARAM、随机模型）；
-  新测试 `session_device_hooks_match_cpu`（Rust L3 对照）与 `tests/test_gpu_hooks_frontend.py`。
+- **§59.4 修复要点**：age `enable_gpu` 在含钩子时用 `state_tick` 初始化设备 tick；`set_hook_program`/`clear_hook_program`
+  改为经自由函数 `install_hook_program`，在 GPU 活跃时重校验并重传设备 CSR（不合规显式 `Err`）；
+  新测试 `session_device_hooks_enabled_after_cpu_ticks_align_tick`、`session_device_hook_program_refresh_reuploads`。
 - **证据入口**：每轮交接/回执在 `EVALUATE.md`（主 agent 交接区在前、evaluator 回执区在后；只追加不改写）。
 - **CPU 底线**：`rust/src/kernels`、`rust/src/model`、`src/natal/contracts`、`rust/src/lib.rs` 数值语义零改动；
   `phase0_baseline.py --check` 必须始终 bit-identical。

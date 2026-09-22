@@ -476,3 +476,582 @@ fn session_device_hooks_match_cpu() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests (P7.1 device declarative hook interpreter).
+//
+// These build raw CSR programs directly so every opcode, selector, condition
+// form, and CONVERT direction can be exercised against the CPU golden path
+// without going through the Python compiler.
+// ---------------------------------------------------------------------------
+
+/// One declarative operation in an evaluator-built CSR program.
+struct EvalOp {
+    op_type: i64,
+    zidx: Vec<i64>,
+    ages: Vec<i64>,
+    sex: [bool; 2],
+    param: f64,
+    cond: Vec<(i64, i64)>,
+    convert: Option<(i64, i64)>,
+}
+
+/// One hook slot (ops in execution order) plus its deme selector.
+struct EvalHook {
+    ops: Vec<EvalOp>,
+    deme_type: i64,
+    deme_data: Vec<i64>,
+}
+
+/// Build a CSR [`HookProgram`] from four events `[first, early, late, finish]`.
+fn eval_program(events: [Vec<EvalHook>; 4]) -> HookProgram {
+    let mut p = HookProgram::default();
+    p.n_events = 4;
+    p.hook_offsets = vec![0];
+    p.op_offsets = vec![0];
+    p.zidx_offsets = vec![0];
+    p.age_offsets = vec![0];
+    p.condition_offsets = vec![0];
+    p.deme_selector_offsets = vec![0];
+    let mut n_hooks = 0i64;
+    for ev in &events {
+        for hook in ev {
+            for op in &hook.ops {
+                p.op_types.push(op.op_type);
+                p.zidx_data.extend_from_slice(&op.zidx);
+                p.zidx_offsets.push(p.zidx_data.len() as i64);
+                p.age_data.extend_from_slice(&op.ages);
+                p.age_offsets.push(p.age_data.len() as i64);
+                p.sex_masks.push(op.sex[0]);
+                p.sex_masks.push(op.sex[1]);
+                p.params.push(op.param);
+                for &(t, q) in &op.cond {
+                    p.condition_types.push(t);
+                    p.condition_params.push(q);
+                }
+                p.condition_offsets.push(p.condition_types.len() as i64);
+                let (src, dst) = op.convert.unwrap_or((-1, -1));
+                p.convert_source_z.push(src);
+                p.convert_target_z.push(dst);
+            }
+            p.op_offsets.push(p.op_types.len() as i64);
+            p.deme_selector_types.push(hook.deme_type);
+            p.deme_selector_data.extend_from_slice(&hook.deme_data);
+            p.deme_selector_offsets
+                .push(p.deme_selector_data.len() as i64);
+        }
+        n_hooks += ev.len() as i64;
+        p.hook_offsets.push(n_hooks);
+    }
+    p.n_hooks = n_hooks;
+    p
+}
+
+/// A full-coverage operation (both sexes, every age, every ztype).
+fn eval_op(op_type: i64, param: f64) -> EvalOp {
+    EvalOp {
+        op_type,
+        zidx: vec![0, 1],
+        ages: vec![0, 1, 2, 3],
+        sex: [true, true],
+        param,
+        cond: Vec::new(),
+        convert: None,
+    }
+}
+
+/// Wrap one operation in a single-op, wildcard-deme hook.
+fn eval_hook(op: EvalOp) -> EvalHook {
+    EvalHook {
+        ops: vec![op],
+        deme_type: 0,
+        deme_data: Vec::new(),
+    }
+}
+
+/// Run `ticks` ticks on the fixture, on the device or the CPU.
+fn eval_run(program: HookProgram, ticks: i64, gpu: bool) -> (Vec<f64>, Vec<f64>) {
+    let (blueprint, params, genetics) = fixture();
+    let (ind, sperm) = initial_state();
+    let mut session = make_session(blueprint, params, genetics, ind, sperm);
+    session.hooks = program;
+    if gpu {
+        session.enable_gpu().expect("enable gpu");
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        session
+            .run_inner(py, ticks, 0, None, 0)
+            .expect("device/cpu run");
+    });
+    (session.state_ind, session.state_sperm)
+}
+
+/// Assert two `(ind, sperm)` pairs match within a relative tolerance.
+fn eval_assert_close(
+    got: &(Vec<f64>, Vec<f64>),
+    want: &(Vec<f64>, Vec<f64>),
+    rtol: f32,
+    label: &str,
+) {
+    for (index, (g, w)) in got.0.iter().zip(want.0.iter()).enumerate() {
+        let (g, w) = (*g as f32, *w as f32);
+        assert!(
+            (g - w).abs() <= rtol * w.abs().max(1.0),
+            "{label} ind[{index}]: device {g} vs host {w}"
+        );
+    }
+    for (index, (g, w)) in got.1.iter().zip(want.1.iter()).enumerate() {
+        let (g, w) = (*g as f32, *w as f32);
+        assert!(
+            (g - w).abs() <= rtol * w.abs().max(1.0),
+            "{label} sperm[{index}]: device {g} vs host {w}"
+        );
+    }
+}
+
+#[test]
+fn evaluator_device_hook_each_opcode_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let cases: [(i64, f64); 5] = [(0, 1.5), (1, 3.0), (2, 2.0), (3, 2.0), (4, 0.5)];
+    for (op_type, param) in cases {
+        for (ticks, rtol) in [(1i64, 1.2e-6f32), (4, 1.2e-5)] {
+            let make = || {
+                eval_program([
+                    vec![eval_hook(eval_op(op_type, param))],
+                    vec![],
+                    vec![],
+                    vec![],
+                ])
+            };
+            let got = eval_run(make(), ticks, true);
+            let want = eval_run(make(), ticks, false);
+            eval_assert_close(
+                &got,
+                &want,
+                rtol,
+                &format!("opcode {op_type} ticks {ticks}"),
+            );
+        }
+    }
+}
+
+#[test]
+fn evaluator_device_hooks_actually_execute_on_device() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let hooked = eval_run(
+        eval_program([vec![eval_hook(eval_op(1, 5.0))], vec![], vec![], vec![]]),
+        1,
+        true,
+    );
+    let free = eval_run(HookProgram::default(), 1, true);
+    let mut max_rel = 0.0f64;
+    for (h, f) in hooked.0.iter().zip(free.0.iter()) {
+        if f.abs() > 1.0 {
+            max_rel = max_rel.max(((h - f) / f).abs());
+        }
+    }
+    assert!(
+        max_rel > 0.01,
+        "device executed no hook effect (max relative change {max_rel})"
+    );
+}
+
+#[test]
+fn evaluator_device_hook_conditions_gate_correctly() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // ADD(4) only on tick 2.
+    let make_fire = || {
+        let mut op = eval_op(2, 4.0);
+        op.cond = vec![(1, 2)];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(make_fire(), 4, true);
+    let want = eval_run(make_fire(), 4, false);
+    eval_assert_close(&got, &want, 1.2e-5, "tick==2 condition");
+
+    // A never-true condition must leave the device state bit-identical to a
+    // hook-free device run, proving the condition is evaluated rather than
+    // ignored.
+    let make_never = || {
+        let mut op = eval_op(2, 4.0);
+        op.cond = vec![(1, 99)];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let never = eval_run(make_never(), 4, true);
+    let free = eval_run(HookProgram::default(), 4, true);
+    assert_eq!(never.0, free.0, "never-true condition mutated ind");
+    assert_eq!(never.1, free.1, "never-true condition mutated sperm");
+
+    // MOD condition: fire on every even tick.
+    let make_mod = || {
+        let mut op = eval_op(2, 1.0);
+        op.cond = vec![(2, 2)];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(make_mod(), 5, true);
+    let want = eval_run(make_mod(), 5, false);
+    eval_assert_close(&got, &want, 1.2e-5, "tick%2==0 condition");
+
+    // RPN: tick>=1 AND NOT(tick==2).
+    let make_rpn = || {
+        let mut op = eval_op(2, 4.0);
+        op.cond = vec![(3, 1), (1, 2), (102, 0), (100, 0)];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(make_rpn(), 4, true);
+    let want = eval_run(make_rpn(), 4, false);
+    eval_assert_close(&got, &want, 1.2e-5, "RPN AND/NOT condition");
+
+    // OR: tick<1 or tick==3.
+    let make_or = || {
+        let mut op = eval_op(2, 4.0);
+        op.cond = vec![(4, 1), (1, 3), (101, 0)];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(make_or(), 4, true);
+    let want = eval_run(make_or(), 4, false);
+    eval_assert_close(&got, &want, 1.2e-5, "RPN OR condition");
+}
+
+#[test]
+fn evaluator_device_hook_selectors_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // Female-only KILL.
+    let female = || {
+        let mut op = eval_op(4, 0.5);
+        op.sex = [true, false];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(female(), 2, true);
+    let want = eval_run(female(), 2, false);
+    eval_assert_close(&got, &want, 1.2e-5, "female-only KILL");
+
+    // Male-only SCALE.
+    let male = || {
+        let mut op = eval_op(0, 0.5);
+        op.sex = [false, true];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(male(), 2, true);
+    let want = eval_run(male(), 2, false);
+    eval_assert_close(&got, &want, 1.2e-5, "male-only SCALE");
+
+    // Age and genotype subsets.
+    let subset = || {
+        let mut op = eval_op(3, 1.0);
+        op.zidx = vec![1];
+        op.ages = vec![1, 2];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(subset(), 2, true);
+    let want = eval_run(subset(), 2, false);
+    eval_assert_close(&got, &want, 1.2e-5, "zidx/age subset SUBTRACT");
+
+    // No sex selected: the op is inert, so the device must be bit-identical to
+    // a hook-free device run.
+    let none = || {
+        let mut op = eval_op(4, 0.9);
+        op.sex = [false, false];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let inert = eval_run(none(), 2, true);
+    let free = eval_run(HookProgram::default(), 2, true);
+    assert_eq!(inert.0, free.0, "empty sex mask mutated ind");
+    assert_eq!(inert.1, free.1, "empty sex mask mutated sperm");
+}
+
+#[test]
+fn evaluator_device_hook_deme_selector_matches_host() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // Selector [0] matches the single panmictic deme.
+    let matches = || {
+        let mut hook = eval_hook(eval_op(1, 5.0));
+        hook.deme_type = 1;
+        hook.deme_data = vec![0];
+        eval_program([vec![hook], vec![], vec![], vec![]])
+    };
+    let got = eval_run(matches(), 1, true);
+    let want = eval_run(matches(), 1, false);
+    eval_assert_close(&got, &want, 1.2e-6, "deme 0 matcher");
+
+    // Selector [1] never matches in a panmictic run.
+    let misses = || {
+        let mut hook = eval_hook(eval_op(1, 5.0));
+        hook.deme_type = 1;
+        hook.deme_data = vec![1];
+        eval_program([vec![hook], vec![], vec![], vec![]])
+    };
+    let missed = eval_run(misses(), 1, true);
+    let free = eval_run(HookProgram::default(), 1, true);
+    assert_eq!(missed.0, free.0, "non-matching deme selector ran the hook");
+}
+
+#[test]
+fn evaluator_device_hook_female_sperm_scaling_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // A female-only reduction must scale stored sperm and virgin margin.
+    let make = || {
+        let mut op = eval_op(4, 0.5);
+        op.sex = [true, false];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let got = eval_run(make(), 1, true);
+    let want = eval_run(make(), 1, false);
+    eval_assert_close(&got, &want, 1.2e-6, "female KILL sperm scaling");
+
+    // Sperm is materially reduced versus a male-only KILL (which leaves the
+    // female axis and its sperm untouched).
+    let male_only = || {
+        let mut op = eval_op(4, 0.5);
+        op.sex = [false, true];
+        eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+    };
+    let male = eval_run(male_only(), 1, true);
+    let sperm_delta: f64 = got
+        .1
+        .iter()
+        .zip(male.1.iter())
+        .map(|(a, b)| (a - b).abs())
+        .sum();
+    assert!(
+        sperm_delta > 1.0,
+        "female KILL did not scale sperm relative to male-only KILL (delta {sperm_delta})"
+    );
+}
+
+#[test]
+fn evaluator_device_hook_convert_matches_cpu_and_conserves() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    for (src, dst, prob) in [(0i64, 1i64, 0.3f64), (1, 0, 0.4)] {
+        let make = || {
+            let mut op = eval_op(11, prob);
+            op.convert = Some((src, dst));
+            eval_program([vec![eval_hook(op)], vec![], vec![], vec![]])
+        };
+        let got = eval_run(make(), 1, true);
+        let want = eval_run(make(), 1, false);
+        eval_assert_close(&got, &want, 1.2e-6, &format!("convert z{src}->z{dst}"));
+        let g_total: f64 = got.0.iter().sum::<f64>() + got.1.iter().sum::<f64>();
+        let c_total: f64 = want.0.iter().sum::<f64>() + want.1.iter().sum::<f64>();
+        assert!(
+            (g_total - c_total).abs() <= 1e-3 * c_total.abs().max(1.0),
+            "convert z{src}->z{dst} totals: device {g_total} vs host {c_total}"
+        );
+    }
+}
+
+#[test]
+fn evaluator_device_hook_multi_event_order_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let make = || {
+        let scale = eval_op(0, 0.9);
+        let add = eval_op(2, 2.0);
+        let kill_z0 = {
+            let mut op = eval_op(4, 0.5);
+            op.zidx = vec![0];
+            op
+        };
+        let set_z1 = {
+            let mut op = eval_op(1, 1.0);
+            op.zidx = vec![1];
+            op
+        };
+        eval_program([
+            vec![eval_hook(scale)],
+            vec![eval_hook(add)],
+            vec![EvalHook {
+                ops: vec![kill_z0, set_z1],
+                deme_type: 0,
+                deme_data: vec![],
+            }],
+            vec![],
+        ])
+    };
+    let got = eval_run(make(), 4, true);
+    let want = eval_run(make(), 4, false);
+    eval_assert_close(&got, &want, 1.2e-5, "multi-event/multi-op ordering");
+}
+
+#[test]
+fn evaluator_device_hook_eligibility_rejects_unsupported() {
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (ind, sperm) = initial_state();
+
+        // Every host-only opcode is rejected explicitly.
+        for op_type in [5i64, 6, 7, 8, 9, 10] {
+            let (blueprint, params, genetics) = fixture();
+            let mut session = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+            session.hooks = eval_program([
+                vec![eval_hook(eval_op(op_type, 1.0))],
+                vec![],
+                vec![],
+                vec![],
+            ]);
+            assert!(
+                session.enable_gpu().is_err(),
+                "opcode {op_type} must be rejected"
+            );
+        }
+
+        // A supported opcode on a stochastic blueprint is rejected.
+        let (mut blueprint, params, genetics) = fixture();
+        blueprint.stochastic = true;
+        let mut stochastic = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+        stochastic.hooks = eval_program([vec![eval_hook(eval_op(0, 0.5))], vec![], vec![], vec![]]);
+        assert!(
+            stochastic.enable_gpu().is_err(),
+            "stochastic hooks must be rejected"
+        );
+
+        // Python callbacks are rejected even without declarative ops.
+        let (blueprint, params, genetics) = fixture();
+        let mut callbacks = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+        callbacks.hooks.python_callbacks = vec![vec![py.None()]];
+        assert!(
+            callbacks.enable_gpu().is_err(),
+            "python callbacks must be rejected"
+        );
+
+        // The supported deterministic program is accepted.
+        let (blueprint, params, genetics) = fixture();
+        let mut ok = make_session(blueprint, params, genetics, ind, sperm);
+        ok.hooks = eval_program([vec![eval_hook(eval_op(0, 0.5))], vec![], vec![], vec![]]);
+        assert!(
+            ok.enable_gpu().is_ok(),
+            "supported deterministic hooks must be accepted"
+        );
+    });
+}
+
+#[test]
+fn session_device_hooks_enabled_after_cpu_ticks_align_tick() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        // Late SET(3.0) gated on `tick >= 3`: it must fire on tick 3 whichever
+        // engine advances that tick.
+        let build = || {
+            let mut op = eval_op(1, 3.0);
+            op.cond = vec![(3, 3)];
+            eval_program([Vec::new(), Vec::new(), vec![eval_hook(op)], Vec::new()])
+        };
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        // Two CPU ticks, then switch to the device for two more.
+        let mut mixed = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        mixed.hooks = build();
+        mixed.run_inner(py, 2, 0, None, 0).expect("cpu warmup");
+        mixed.enable_gpu().expect("enable gpu");
+        mixed
+            .run_inner(py, 2, 0, None, 0)
+            .expect("gpu continuation");
+
+        let mut reference = make_session(blueprint, params, genetics, ind, sperm);
+        reference.hooks = build();
+        reference
+            .run_inner(py, 4, 0, None, 0)
+            .expect("cpu reference");
+
+        eval_assert_close(
+            &(mixed.state_ind, mixed.state_sperm),
+            &(reference.state_ind, reference.state_sperm),
+            1.2e-5,
+            "hooks enabled after cpu ticks",
+        );
+    });
+}
+
+#[test]
+fn session_device_hook_program_refresh_reuploads() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let early_set = |value: f64| {
+            eval_program([
+                Vec::new(),
+                vec![eval_hook(eval_op(1, value))],
+                Vec::new(),
+                Vec::new(),
+            ])
+        };
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        let mut session = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        session.hooks = early_set(7.0);
+        session.enable_gpu().expect("enable gpu");
+        // Replacing the program after enabling must reach the device.
+        super::install_hook_program(&mut session, early_set(1.0)).expect("refresh program");
+        // An unsupported replacement is rejected while the device is active.
+        assert!(
+            super::install_hook_program(
+                &mut session,
+                eval_program([
+                    Vec::new(),
+                    vec![eval_hook(eval_op(5, 0.5))],
+                    Vec::new(),
+                    Vec::new()
+                ])
+            )
+            .is_err(),
+            "unsupported refresh must be rejected"
+        );
+        session.run_inner(py, 2, 0, None, 0).expect("gpu run");
+
+        let mut reference = make_session(blueprint, params, genetics, ind, sperm);
+        reference.hooks = early_set(1.0);
+        reference.run_inner(py, 2, 0, None, 0).expect("cpu run");
+
+        eval_assert_close(
+            &(session.state_ind, session.state_sperm),
+            &(reference.state_ind, reference.state_sperm),
+            1.2e-5,
+            "refreshed hook program",
+        );
+    });
+}

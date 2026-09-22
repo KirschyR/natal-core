@@ -291,12 +291,12 @@ pop.run(100)
 
 - **Eligibility**: panmictic (`n_demes == 1`), deterministic, and built-in
   growth modes (0–4). Deterministic declarative hooks
-  (SCALE/SET/ADD/SUBTRACT/KILL/CONVERT) run on the device at the same event
-  points as the CPU engine; stochastic hooks, `stop_if_*`, `set_param`, and
-  Python callbacks are not yet supported and are rejected. `enable_gpu` raises
-  `ValueError` when the model is ineligible, or `RuntimeError` when the
-  extension was built without the `gpu` cargo feature; the device path never
-  silently falls back to the CPU.
+  (SCALE/SET/ADD/SUBTRACT/KILL/CONVERT) and device-side `stop_if_*` gating run
+  on the device at the same event points as the CPU engine; stochastic hooks
+  (`sample`), `set_param`, and Python callbacks are not yet supported and are
+  rejected. `enable_gpu` raises `ValueError` when the model is ineligible, or
+  `RuntimeError` when the extension was built without the `gpu` cargo feature;
+  the device path never silently falls back to the CPU.
 - **No history on the device path**: the age-structured device run copies the
   final state back but does **not** record history and ignores `record_every`.
   Use the CPU path (leave the GPU disabled) or the ensemble below when history

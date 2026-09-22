@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 25 轮：**APPROVED**（§59；P7.1 设备侧确定性声明式钩子解释器 + 按 opcode 放开资格） |
-| 待回执 | §61（第 26 轮：§59.4 两条 medium 修复——设备 tick 对齐 `state_tick`、设钩子重传设备 CSR） |
-| 主 agent 处理 | 第 26 轮：§59.4 medium 修复已实现并自测；P7.2 待启动 |
-| 待 evaluator 动作 | 按 §60 复核，把第 26 轮结论写入 §61 |
+| 最近回执 | 第 26 轮：**APPROVED**（§61；§59.4 两条 medium 修复——设备 tick 对齐 `state_tick`、设钩子重传/校验设备 CSR） |
+| 待回执 | §63（第 27 轮 P7.2：设备侧 `STOP_IF_*` 门控 + 按 opcode 放开 + §61.4 两处可选加固） |
+| 主 agent 处理 | 第 27 轮：P7.2 已实现并自测；P7.3 待启动 |
+| 待 evaluator 动作 | 按 §62 复核，把第 27 轮结论写入 §63 |
 
 ## 0. 一句话目标
 
@@ -1546,6 +1546,66 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 
 ---
 
+## 62. 第 27 轮交接 — P7.2：设备侧 `STOP_IF_*` 门控 + 按 opcode 放开资格
+
+- 日期：2026-09-22
+- 背景：§61 APPROVED。按 `GPU_STAGE_SUMMARY §11.5` 推进 **P7.2**（D6 停止门控），并顺手落实 §61.4 的两条可选加固。
+- 风险分类：**高风险**（钩子控制停止点与部分阶段执行；设备/host 停止语义需与 CPU 一致）。
+
+### 62.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | `HOOK_SOURCE` 的 `apply_hook_event` 增 `int* stop_flag` 参数；新增 STOP_IF_ZERO/BELOW/ABOVE（6/7/8）选择子归约与 STOP_IF_EXTINCTION（9）全状态归约；触发时写 `*stop_flag=1` 并 `return`（中止本事件余下 op/hook）。启动器增 `stop_flag` 参数。 |
+| `rust/src/gpu/executor.rs` | `DeviceHooks` 增 `has_stop`/`stop_flag`；`run_hook_event` 返回 `Result<bool>`（有 stop op 时每事件前归零、后读 4 字节标志）；`tick` 在 `first/early/late` 事件点若 stopped 则中止且**不前进 tick**；新增 `stopped` 字段与 `take_stopped()`。 |
+| `rust/src/hooks/interpreter.rs` | `DEVICE_SUPPORTED_OPS` 扩为 10 项，加入 STOP_IF_ZERO/BELOW/ABOVE/EXTINCTION（SAMPLE/SET_PARAM 仍拒）。 |
+| `rust/src/sessions/age_structured.rs` | `run_gpu` 返回 `bool`（stopped）：停止时不推进 `state_tick`、下载部分状态；`run_inner` 设备分支把 stopped 传回。抽出单一 `validate_device_hooks`（§61.4.2），`enable_gpu` 与 `install_hook_program` 复用；`install_hook_program` 改为先 `configure_hooks` 成功再 `set_tick`（§61.4.1 原子性）。 |
+| 文档 | `docs/{en,zh}/4_simulation_engine.md §11.1`、Rust/Python `enable_gpu` docstring：停止门控已设备化，仅 `sample`/`set_param`/Python 回调仍拒绝。 |
+| 测试 | Rust `session_device_hook_stop_if_above_matches_cpu`（early `STOP_IF_ABOVE` + `tick>=2`：两引擎停止 tick 与状态一致）、`session_device_hook_stop_if_zero_after_mutation_matches_cpu`（first SET(0) 后 late `STOP_IF_ZERO`，覆盖 op 顺序）；更新 evaluator 的 `evaluator_device_hook_eligibility_rejects_unsupported`（5/10 仍拒，6–9 现接受）；Python `test_gpu_hooks_unsupported_opcode_rejected` 改用 `sample`，新增 `test_gpu_hooks_stop_gating_matches_cpu`。 |
+
+### 62.2 行为
+
+- **停止语义与 CPU 一致**：`STOP_IF_*` 触发时中止当前事件余下 op/hook，并跳过该 tick 尚未执行的阶段；`state_tick` 不前进，保留已发生的部分变更（如 early 停止时已跑 reproduction）。
+- **零逐 tick 全量同步**：仅在程序含 stop op 时，于每个事件后读 4 字节标志；无 stop op 的 P7.1 程序零额外同步。
+- 资格：STOP_IF_* 放开；SAMPLE/SET_PARAM/Python 回调/随机模型仍显式 `Err`。
+- §61.4 加固：校验逻辑单一化；`install_hook_program` 原子性（configure 成功后才改 tick）。
+
+### 62.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **204 passed, 0 failed**（含新增 2 个停止用例） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff check src demos tests` / `pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 pytest -q` | **3620 passed**（含 `test_gpu_hooks_frontend.py` 5 passed） |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`，lcov DA 合并） | 聚合 **2707/2800 = 96.68%**；executor 95.8%、kernels 97.2%、probe 96.1%，其余 100% |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 62.4 请 evaluator 独立核对
+
+- **停止点一致性（重点）**：自造含 `STOP_IF_ZERO/BELOW/ABOVE/EXTINCTION` 的确定性程序，覆盖：
+  - 事件位置（`first`/`early`/`late`）停止；确认后续阶段被跳过、`state_tick` 不前进、部分状态与 CPU 一致；
+  - 同 hook 内「先 mutation 后 stop」的顺序；
+  - 多 hook/多 op 时提前中止（后续 hook 不执行）；
+  - 条件门控（`tick == N` / `>= N`）下停止 tick 与 CPU 一致；
+  - extinction 全状态归约。
+- **资格**：SAMPLE(5)/SET_PARAM(10)/Python 回调/随机模型仍显式 `Err`；STOP_IF_* 现在启用成功。
+- **标志语义**：stop 标志每事件归零；无 stop op 的 P7.1 程序不受影响（行为与 §61 逐位一致）。
+- **§61.4 加固**：`validate_device_hooks` 单一来源；`install_hook_program` 失败时 host 程序与设备均不被污染（原子性）。
+- **CPU 不变性 / 门禁 / 覆盖率**同既往口径。
+
+### 62.5 残余风险（非阻塞）
+
+- `trigger_event` 在 GPU 活跃时仍执行 host 钩子、下一次设备 `run` 覆盖（§59.4 finding 3，未改）。
+- 设备 `hook_deme_matches` 以 batch 当 deme（B=1 正确；ensemble/空间拒绝钩子，P7.4 重做）。
+- 条件栈深 128、设备 CONVERT 恒假设有 sperm：同 §59.4 finding 5/6。
+- stop 标志读取为每事件一次 D2H（仅含 stop op 的程序）；这是「停止点精确」与「零全量同步」的折衷。
+
+结论请追加为 **§63**。
+
+---
+
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 第 1 轮结论见上方 **§9**（已有内容）。为保持时间顺序，**第 2 轮及以后请追加到本区末尾**，
@@ -3069,3 +3129,78 @@ P7.1 设备侧确定性声明式钩子解释器（SCALE/SET/ADD/SUBTRACT/KILL/CO
 P7.1 的 opcode 移植、条件/selector 语义、女性 sperm 缩放与 CONVERT 与 CPU golden reference 一致，资格按
 opcode 正确放开且不支持的 opcode/回调/随机模型显式报错，测试与覆盖率充分。**APPROVED**（范围为当前 HEAD
 `c141f39` 与被审测试集；不声称任何历史基线失败消失）。§59.4 的 1/2 两条建议主 agent 在 P7.2/P7.4 前加保护或文档化。
+
+---
+
+## 61. 第 26 轮结论（evaluator 独立执行，2026-09-22，HEAD=`c2cf388`）
+
+### 61.1 裁定：**APPROVED**
+
+§59.4 的两条 medium 均已修复并经独立复核：启用后设备 tick 对齐 `state_tick`（含钩子时），以及
+`set_hook_program`/`clear_hook_program` 在 GPU 活跃时重校验并重传设备 CSR。未引入回归：hook-free 路径
+（`n_hooks==0` 不调 `set_tick`）结构上零变化，CPU golden reference 未改，既有 P7.1 用例与全门禁通过。
+
+### 61.2 独立核对
+
+**发现 1（tick 对齐）**
+- 读码：`age_structured.rs:enable_gpu` 在 `self.hooks.n_hooks != 0` 时 `executor.set_tick(self.state_tick.max(0) as u64)`；
+  hook-free 不调用，RNG/行为不变。`executor.rs:set_tick` 仅覆写 `self.tick`。
+- **独立复现（原始探针场景，临时探针已删除）**：CPU 预跑 2 tick → `enable_gpu` → GPU 2 tick，`tick==2` 条件 ADD，
+  与纯 CPU 4 tick 对照 `maxdiff` 由修复前的 **9.33 → 5.83e-5**（f32 累积档内，相对状态量约 1e-6）。
+- **独立保留用例** `evaluator_device_tick_alignment_matches_cpu_after_warmup`：CPU 预跑 3 tick → GPU 续跑 3 tick 的
+  `tick % 2 == 0` 条件（与作者 `tick>=3` 不同），6 tick 全状态与 CPU 在 1.2e-5 内一致。通过。
+
+**发现 2（CSR 重传）**
+- 读码：`install_hook_program`（gpu）在 `session.gpu.is_some()` 时按回调/opcode/随机模型重校验，含钩子时
+  `gpu.set_tick(state_tick)`，再 `gpu.configure_hooks(&next)`，**成功后才** `session.hooks = next`；失败在赋值前
+  `return Err`，host 程序不被污染。CPU 构建为仅存程序的空实现。
+- **独立复现（临时探针已删除）**：启用 SET(7)，`install_hook_program` 换 SET(1)，与 CPU(SET 1) 对照 `maxdiff`
+  由修复前 **29.1 → 2.9e-8**。
+- **独立保留用例**：
+  - `evaluator_device_rejected_program_refresh_is_atomic`：换入 SAMPLE 程序 `Err`，`session.hooks.op_types` 不变，
+    随后设备仍按旧 SET(7) 运行并与 CPU 对照一致（证明 host 与 device 均未被污染）。
+  - `evaluator_device_program_clear_matches_hook_free`：启用 SET(7) 后清空程序，设备行为与 hook-free CPU 逐一致（1.2e-5）。
+
+### 61.3 独立端到端与门禁
+
+- 重编扩展 `maturin develop --features "gpu,extension-module"`（从 `c2cf388`），自写
+  `/tmp/l3_hooks_eval.py`（max_rel **3.505e-07**）、`/tmp/l3_hooks_convert.py`（max_rel **1.396e-07**）仍 PASS。
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **202 passed**（作者 199 + evaluator 3） |
+| `cargo test --features gpu evaluator_device_` | **13 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3619 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **2679/2769 = 96.75%**；executor 95.97%、kernels 97.21%、probe 96.13%、其余 100% |
+| Python 新增可执行行 | 无新增可执行源码行（仅会话/executor Rust 与文档） |
+
+### 61.4 逐条发现（均非阻塞）
+
+1. **low / `install_hook_program`（代码阅读）**：若 `configure_hooks` 在 `set_tick` 之后失败（i32 溢出/上传失败），
+   设备 tick 已被改写而程序未替换。因 `state_tick` 与设备 tick 本应相等，实际无影响；建议把 `set_tick` 放在
+   `configure_hooks` 成功之后以保持原子性。
+2. **low / 校验逻辑重复（代码阅读）**：`enable_gpu` 与 `install_hook_program` 各维护一份回调/opcode/随机模型校验，
+   未来易漂移；建议抽成单一资格函数。
+3. **残余（§59.4 未改，非阻塞）**：`trigger_event` 在 GPU 活跃时仍执行 host 钩子、下一次设备 `run` 会覆盖；
+   设备 `hook_deme_matches` 以 batch 当 deme（B=1 正确）；条件栈深 128；设备 CONVERT 恒假设有 sperm。
+
+### 61.5 阻塞项
+
+无。
+
+### 61.6 证据来源
+
+- **独立运行**：上表门禁、3 个新 evaluator 用例、修复前后临时探针（已删除）、扩展重编、两个自写 Python E2E、覆盖率采集。
+- **仅代码阅读**：`executor.rs:set_tick`、`age_structured.rs:enable_gpu`/`install_hook_program` 及调用链、
+  `set_hook_program`/`clear_hook_program` 的静态分支。
+
+### 61.7 结论
+
+第 26 轮两条修复正确、原子性合理、未引入回归，测试与门禁/覆盖率达标。**APPROVED**（范围为当前 HEAD
+`c2cf388` 与被审测试集；不声称任何历史基线失败消失）。§61.4 的 1/2 为可选加固，§61.4.3 为已知残余。

@@ -903,8 +903,10 @@ fn evaluator_device_hook_eligibility_rejects_unsupported() {
     Python::with_gil(|py| {
         let (ind, sperm) = initial_state();
 
-        // Every host-only opcode is rejected explicitly.
-        for op_type in [5i64, 6, 7, 8, 9, 10] {
+        // Host-only opcodes are rejected explicitly. Stop-gating opcodes are
+        // now device-supported (P7.2), so only SAMPLE (5) and SET_PARAM (10)
+        // remain rejected.
+        for op_type in [5i64, 10] {
             let (blueprint, params, genetics) = fixture();
             let mut session = make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
             session.hooks = eval_program([
@@ -917,6 +919,25 @@ fn evaluator_device_hook_eligibility_rejects_unsupported() {
                 session.enable_gpu().is_err(),
                 "opcode {op_type} must be rejected"
             );
+        }
+
+        // Stop-gating opcodes now enable on the device.
+        if hardware_required() {
+            for op_type in [6i64, 7, 8, 9] {
+                let (blueprint, params, genetics) = fixture();
+                let mut session =
+                    make_session(blueprint, params, genetics, ind.clone(), sperm.clone());
+                session.hooks = eval_program([
+                    vec![eval_hook(eval_op(op_type, 1.0))],
+                    vec![],
+                    vec![],
+                    vec![],
+                ]);
+                assert!(
+                    session.enable_gpu().is_ok(),
+                    "stop opcode {op_type} must be accepted"
+                );
+            }
         }
 
         // A supported opcode on a stochastic blueprint is rejected.
@@ -1054,4 +1075,230 @@ fn session_device_hook_program_refresh_reuploads() {
             "refreshed hook program",
         );
     });
+}
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for the §60 tick-alignment / CSR-refresh fixes.
+// ---------------------------------------------------------------------------
+
+/// A `tick % 2 == 0` ADD must fire on the same session ticks after a CPU warmup
+/// switches the session to the device mid-run.
+#[test]
+fn evaluator_device_tick_alignment_matches_cpu_after_warmup() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let build = || {
+            let mut op = eval_op(2, 5.0);
+            op.cond = vec![(2, 2)];
+            eval_program([Vec::new(), vec![eval_hook(op)], Vec::new(), Vec::new()])
+        };
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        let mut mixed = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        mixed.hooks = build();
+        mixed.run_inner(py, 3, 0, None, 0).expect("cpu warmup");
+        assert_eq!(mixed.state_tick, 3);
+        mixed.enable_gpu().expect("enable gpu");
+        mixed
+            .run_inner(py, 3, 0, None, 0)
+            .expect("gpu continuation");
+
+        let mut reference = make_session(blueprint, params, genetics, ind, sperm);
+        reference.hooks = build();
+        reference
+            .run_inner(py, 6, 0, None, 0)
+            .expect("cpu reference");
+
+        eval_assert_close(
+            &(mixed.state_ind, mixed.state_sperm),
+            &(reference.state_ind, reference.state_sperm),
+            1.2e-5,
+            "tick%2 alignment after warmup",
+        );
+    });
+}
+
+/// A rejected refresh must leave both the host program and the device program
+/// untouched, and the device must keep running the previously installed one.
+#[test]
+fn evaluator_device_rejected_program_refresh_is_atomic() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let set = |value: f64| {
+            eval_program([
+                Vec::new(),
+                vec![eval_hook(eval_op(1, value))],
+                Vec::new(),
+                Vec::new(),
+            ])
+        };
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let mut session = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        session.hooks = set(7.0);
+        session.enable_gpu().expect("enable gpu");
+
+        let host_before = session.hooks.op_types.clone();
+        let rejected = super::install_hook_program(
+            &mut session,
+            eval_program([
+                Vec::new(),
+                vec![eval_hook(eval_op(5, 0.5))],
+                Vec::new(),
+                Vec::new(),
+            ]),
+        );
+        assert!(rejected.is_err(), "unsupported refresh must be rejected");
+        assert_eq!(
+            session.hooks.op_types, host_before,
+            "rejected refresh polluted the host program"
+        );
+
+        session.run_inner(py, 2, 0, None, 0).expect("gpu run");
+        let mut reference = make_session(blueprint, params, genetics, ind, sperm);
+        reference.hooks = set(7.0);
+        reference.run_inner(py, 2, 0, None, 0).expect("cpu run");
+        eval_assert_close(
+            &(session.state_ind, session.state_sperm),
+            &(reference.state_ind, reference.state_sperm),
+            1.2e-5,
+            "device kept the installed program after a rejected refresh",
+        );
+    });
+}
+
+/// Clearing the program on a live device session must make it behave exactly
+/// like a hook-free run.
+#[test]
+fn evaluator_device_program_clear_matches_hook_free() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let set = eval_program([
+            Vec::new(),
+            vec![eval_hook(eval_op(1, 7.0))],
+            Vec::new(),
+            Vec::new(),
+        ]);
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let mut session = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        session.hooks = set;
+        session.enable_gpu().expect("enable gpu");
+        super::install_hook_program(&mut session, HookProgram::default()).expect("clear program");
+        session.run_inner(py, 2, 0, None, 0).expect("gpu run");
+
+        let mut reference = make_session(blueprint, params, genetics, ind, sperm);
+        reference
+            .run_inner(py, 2, 0, None, 0)
+            .expect("cpu hook-free");
+        eval_assert_close(
+            &(session.state_ind, session.state_sperm),
+            &(reference.state_ind, reference.state_sperm),
+            1.2e-5,
+            "cleared program behaves hook-free",
+        );
+    });
+}
+
+/// Run `ticks` ticks and return `(state_tick, stopped, ind, sperm)`.
+fn eval_run_flow(program: HookProgram, ticks: i64, gpu: bool) -> (i64, bool, Vec<f64>, Vec<f64>) {
+    let (blueprint, params, genetics) = fixture();
+    let (ind, sperm) = initial_state();
+    let mut session = make_session(blueprint, params, genetics, ind, sperm);
+    session.hooks = program;
+    if gpu {
+        session.enable_gpu().expect("enable gpu");
+    }
+    pyo3::prepare_freethreaded_python();
+    let stopped = Python::with_gil(|py| {
+        let (_, _, stopped) = session
+            .run_inner(py, ticks, 0, None, 0)
+            .expect("device/cpu run");
+        stopped
+    });
+    (
+        session.state_tick,
+        stopped,
+        session.state_ind,
+        session.state_sperm,
+    )
+}
+
+#[test]
+fn session_device_hook_stop_if_above_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // Early STOP_IF_ABOVE gated on `tick >= 2`: reproduction runs, then the
+    // event stops the tick before survival/aging.
+    let build = || {
+        let mut stop = eval_op(8, 0.0);
+        stop.cond = vec![(3, 2)];
+        eval_program([Vec::new(), vec![eval_hook(stop)], Vec::new(), Vec::new()])
+    };
+    let gpu = eval_run_flow(build(), 6, true);
+    let cpu = eval_run_flow(build(), 6, false);
+    assert!(gpu.1, "device must report stopped");
+    assert!(cpu.1, "cpu must report stopped");
+    assert_eq!(gpu.0, cpu.0, "stop tick must match");
+    assert_eq!(gpu.0, 2, "stop must fire at tick 2");
+    eval_assert_close(&(gpu.2, gpu.3), &(cpu.2, cpu.3), 1.2e-5, "stop_if_above");
+}
+
+#[test]
+fn session_device_hook_stop_if_zero_after_mutation_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // First-event SET(0) then a late STOP_IF_ZERO: the same tick stops after
+    // the mutation, exercising intra-hook/op ordering.
+    let build = || {
+        let zero = eval_op(1, 0.0);
+        let stop = eval_op(6, 0.0);
+        eval_program([
+            vec![eval_hook(zero)],
+            Vec::new(),
+            vec![eval_hook(stop)],
+            Vec::new(),
+        ])
+    };
+    let gpu = eval_run_flow(build(), 3, true);
+    let cpu = eval_run_flow(build(), 3, false);
+    assert!(gpu.1 && cpu.1, "both must stop");
+    assert_eq!(gpu.0, cpu.0, "stop tick must match");
+    assert_eq!(gpu.0, 0, "stop must fire at tick 0");
+    eval_assert_close(&(gpu.2, gpu.3), &(cpu.2, cpu.3), 1.2e-5, "stop_if_zero");
 }

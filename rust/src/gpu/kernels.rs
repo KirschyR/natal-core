@@ -2377,6 +2377,7 @@ __device__ __forceinline__ int hook_deme_matches(
 extern "C" __global__ void apply_hook_event(
     float* ind,
     float* sperm,
+    int* stop_flag,
     const int* hook_offsets,
     const int* op_offsets,
     const int* op_types,
@@ -2512,6 +2513,51 @@ extern "C" __global__ void apply_hook_event(
                     ind[src_female] -= moved_mated + moved_virgin;
                     ind[((0 * n_ages + age) * n_ztypes + dst_z) * n_batch + b] +=
                         moved_mated + moved_virgin;
+                }
+            } else if (op_type >= 6 && op_type <= 9) {
+                // STOP_IF_ZERO/BELOW/ABOVE (6/7/8) reduce the selected cells;
+                // STOP_IF_EXTINCTION (9) reduces the whole individual state.
+                if (op_type == 9) {
+                    float total = 0.0f;
+                    for (int sex = 0; sex < 2; ++sex) {
+                        for (int age = 0; age < n_ages; ++age) {
+                            for (int z = 0; z < n_ztypes; ++z) {
+                                total +=
+                                    ind[((sex * n_ages + age) * n_ztypes + z) * n_batch + b];
+                            }
+                        }
+                    }
+                    if (total <= 0.0f) {
+                        *stop_flag = 1;
+                        return;
+                    }
+                } else {
+                    float selected_total = 0.0f;
+                    for (int sex = 0; sex < 2; ++sex) {
+                        if (!sex_masks[op * 2 + sex]) {
+                            continue;
+                        }
+                        for (int ap = as; ap < ae; ++ap) {
+                            int age = age_data[ap];
+                            if (age < 0 || age >= n_ages) {
+                                continue;
+                            }
+                            for (int zp = zs; zp < ze; ++zp) {
+                                int z = zidx_data[zp];
+                                if (z < 0 || z >= n_ztypes) {
+                                    continue;
+                                }
+                                selected_total +=
+                                    ind[((sex * n_ages + age) * n_ztypes + z) * n_batch + b];
+                            }
+                        }
+                    }
+                    if ((op_type == 6 && selected_total <= 0.0f)
+                        || (op_type == 7 && selected_total < param)
+                        || (op_type == 8 && selected_total > param)) {
+                        *stop_flag = 1;
+                        return;
+                    }
                 }
             }
         }
@@ -3848,6 +3894,7 @@ impl Kernels {
     /// - `stream`: Stream the launch is ordered on.
     /// - `ind`: Batch-minor individual counts, `(2, A, Z, B)`.
     /// - `sperm`: Batch-minor stored sperm, `(A, Z, Z, B)`.
+    /// - `stop_flag`: One-element flag set when a `STOP_IF_*` op fires.
     /// - `buffers`: Uploaded CSR arrays for the hook program.
     /// - `n_ages`, `n_ztypes`, `n_batch`: Model dimensions.
     /// - `event_id`: Lifecycle event index (first/early/late/finish).
@@ -3861,6 +3908,7 @@ impl Kernels {
         stream: &Arc<CudaStream>,
         ind: &mut CudaSlice<f32>,
         sperm: &mut CudaSlice<f32>,
+        stop_flag: &mut CudaSlice<i32>,
         buffers: &HookEventBuffers<'_>,
         n_ages: usize,
         n_ztypes: usize,
@@ -3889,6 +3937,7 @@ impl Kernels {
         let mut launch = stream.launch_builder(&self.apply_hook_event);
         launch.arg(&mut *ind);
         launch.arg(&mut *sperm);
+        launch.arg(&mut *stop_flag);
         launch.arg(buffers.hook_offsets);
         launch.arg(buffers.op_offsets);
         launch.arg(buffers.op_types);

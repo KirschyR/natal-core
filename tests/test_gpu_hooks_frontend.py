@@ -84,22 +84,50 @@ def test_gpu_hooks_match_cpu() -> None:
 
 
 def test_gpu_hooks_unsupported_opcode_rejected() -> None:
-    """A stop-gating hook is reserved for P7.2 and must be rejected explicitly."""
+    """Sampling hooks are reserved for P7.3 and must be rejected explicitly."""
     pop = _build_hooked_pop(
-        "__gpu_hooks_stop__",
+        "__gpu_hooks_sample__",
         [
             (
-                (
-                    nt.Op.stop_if_above(
-                        genotypes="WT|WT", threshold=0.0, when="tick >= 0"
-                    ),
-                ),
+                (nt.Op.sample(genotypes="*", size=1),),
                 {"event": "early"},
             )
         ],
     )
     with pytest.raises((RuntimeError, ValueError), match="opcode"):
         pop.enable_gpu()
+
+
+def test_gpu_hooks_stop_gating_matches_cpu() -> None:
+    """A device STOP_IF_* stops at the same tick as the CPU engine."""
+    hooks = [
+        (
+            (
+                nt.Op.stop_if_above(
+                    genotypes="*", threshold=0.0, when="tick >= 2"
+                ),
+            ),
+            {"event": "early"},
+        )
+    ]
+    gpu_pop = _build_hooked_pop("__gpu_hooks_stopgate__", hooks)
+    try:
+        gpu_pop.enable_gpu()
+    except (RuntimeError, ValueError) as exc:  # CPU-only host.
+        pytest.skip(f"GPU unavailable: {exc}")
+    gpu_pop.run(6)
+
+    cpu_pop = _build_hooked_pop("__cpu_hooks_stopgate__", hooks)
+    cpu_pop.run(6)
+
+    assert gpu_pop.tick == cpu_pop.tick
+    assert gpu_pop.tick == 2
+    np.testing.assert_allclose(
+        gpu_pop.state.individual_count,
+        cpu_pop.state.individual_count,
+        rtol=1.2e-5,
+        atol=1e-4,
+    )
 
 
 def test_gpu_hooks_stochastic_model_rejected() -> None:

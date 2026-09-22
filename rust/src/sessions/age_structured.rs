@@ -276,11 +276,11 @@ impl AgeStructuredSession {
     ///
     /// The device path currently covers deterministic, panmictic age-structured
     /// models. Deterministic declarative hooks (SCALE/SET/ADD/SUBTRACT/KILL/
-    /// CONVERT) execute on the device at the same event points as the CPU
-    /// engine; stochastic hooks, stop-gating, `set_param`, and Python callbacks
-    /// are rejected. The current state is uploaded once; subsequent ``run``
-    /// calls execute the whole tick on the device and copy the final state
-    /// back. Refuses explicitly (never silently falls back to CPU).
+    /// CONVERT) and `STOP_IF_*` gating execute on the device at the same event
+    /// points as the CPU engine; stochastic hooks, `set_param`, and Python
+    /// callbacks are rejected. The current state is uploaded once; subsequent
+    /// ``run`` calls execute the whole tick on the device and copy the final
+    /// state back. Refuses explicitly (never silently falls back to CPU).
     ///
     /// ## Errors
     /// Returns ``PyValueError`` when the model is ineligible, or a runtime
@@ -292,22 +292,7 @@ impl AgeStructuredSession {
                 "GPU path currently supports panmictic models only",
             ));
         }
-        if self.hooks.has_python_callbacks() {
-            return Err(PyValueError::new_err(
-                "GPU path does not support Python hook callbacks",
-            ));
-        }
-        if let Some(opcode) = self.hooks.first_unsupported_device_op() {
-            return Err(PyValueError::new_err(format!(
-                "GPU path does not support hook opcode {opcode}; supported opcodes \
-                 are SCALE, SET, ADD, SUBTRACT, KILL, CONVERT"
-            )));
-        }
-        if self.hooks.n_hooks != 0 && self.blueprint.stochastic {
-            return Err(PyValueError::new_err(
-                "GPU hooks require a deterministic model",
-            ));
-        }
+        validate_device_hooks(&self.hooks, self.blueprint.stochastic)?;
         if self
             .params
             .growth_mode
@@ -331,17 +316,17 @@ impl AgeStructuredSession {
         )
         .map_err(map_lifecycle_error)?;
         executor.set_seed(self.seed);
-        // Hook conditions are keyed on the session tick; align the device
-        // clock when the host already advanced before enabling.
-        if self.hooks.n_hooks != 0 {
-            executor.set_tick(self.state_tick.max(0) as u64);
-        }
         executor
             .ensure_migration_budget(&self.blueprint)
             .map_err(map_lifecycle_error)?;
         executor
             .configure_hooks(&self.hooks)
             .map_err(map_lifecycle_error)?;
+        // Hook conditions are keyed on the session tick; align the device
+        // clock when the host already advanced before enabling.
+        if self.hooks.n_hooks != 0 {
+            executor.set_tick(self.state_tick.max(0) as u64);
+        }
         self.gpu = Some(executor);
         Ok(())
     }
@@ -1114,6 +1099,39 @@ impl AgeStructuredSession {
     }
 }
 
+/// Reject hook programs the device interpreter cannot run.
+///
+/// Shared by `enable_gpu` and [`install_hook_program`] so the eligibility
+/// contract has a single definition.
+///
+/// ## Parameters
+/// - `hooks`: The candidate program.
+/// - `stochastic`: Whether the owning blueprint samples stochastically.
+///
+/// ## Errors
+/// Returns ``PyValueError`` for Python callbacks, unsupported opcodes, or
+/// hooks on a stochastic model.
+#[cfg(feature = "gpu")]
+fn validate_device_hooks(hooks: &HookProgram, stochastic: bool) -> PyResult<()> {
+    if hooks.has_python_callbacks() {
+        return Err(PyValueError::new_err(
+            "GPU path does not support Python hook callbacks",
+        ));
+    }
+    if let Some(opcode) = hooks.first_unsupported_device_op() {
+        return Err(PyValueError::new_err(format!(
+            "GPU path does not support hook opcode {opcode}; supported opcodes \
+             are SCALE, SET, ADD, SUBTRACT, KILL, CONVERT, STOP_IF_*"
+        )));
+    }
+    if hooks.n_hooks != 0 && stochastic {
+        return Err(PyValueError::new_err(
+            "GPU hooks require a deterministic model",
+        ));
+    }
+    Ok(())
+}
+
 /// Replace a session's hook program, keeping an active device interpreter in sync.
 ///
 /// ## Parameters
@@ -1126,26 +1144,11 @@ impl AgeStructuredSession {
 #[cfg(feature = "gpu")]
 fn install_hook_program(session: &mut AgeStructuredSession, next: HookProgram) -> PyResult<()> {
     if let Some(gpu) = session.gpu.as_mut() {
-        if next.has_python_callbacks() {
-            return Err(PyValueError::new_err(
-                "GPU path does not support Python hook callbacks",
-            ));
-        }
-        if let Some(opcode) = next.first_unsupported_device_op() {
-            return Err(PyValueError::new_err(format!(
-                "GPU path does not support hook opcode {opcode}; supported \
-                 opcodes are SCALE, SET, ADD, SUBTRACT, KILL, CONVERT"
-            )));
-        }
-        if next.n_hooks != 0 && session.blueprint.stochastic {
-            return Err(PyValueError::new_err(
-                "GPU hooks require a deterministic model",
-            ));
-        }
+        validate_device_hooks(&next, session.blueprint.stochastic)?;
+        gpu.configure_hooks(&next).map_err(map_lifecycle_error)?;
         if next.n_hooks != 0 {
             gpu.set_tick(session.state_tick.max(0) as u64);
         }
-        gpu.configure_hooks(&next).map_err(map_lifecycle_error)?;
     }
     session.hooks = next;
     Ok(())
@@ -1500,16 +1503,21 @@ impl AgeStructuredSession {
         state_sperm: &mut Vec<f64>,
         state_tick: &mut i64,
         n_ticks: i64,
-    ) -> Result<(), String> {
+    ) -> Result<bool, String> {
         let variants = [genetics.clone()];
         let deme_variants = [0usize];
+        let mut stopped = false;
         for _ in 0..n_ticks.max(0) {
             gpu.tick(blueprint, params, &variants, &deme_variants)?;
+            if gpu.take_stopped() {
+                stopped = true;
+                break;
+            }
             *state_tick += 1;
         }
         *state_ind = gpu.download_ind()?.into_iter().map(f64::from).collect();
         *state_sperm = gpu.download_sperm()?.into_iter().map(f64::from).collect();
-        Ok(())
+        Ok(stopped)
     }
 
     fn run_inner<'py>(
@@ -1535,9 +1543,9 @@ impl AgeStructuredSession {
                 n_ticks,
             );
             self.gpu = Some(gpu);
-            outcome.map_err(map_lifecycle_error)?;
+            let stopped = outcome.map_err(map_lifecycle_error)?;
             let empty = PyArray2::zeros(py, [0, 0], false);
-            return Ok((self.state_tick, empty, false));
+            return Ok((self.state_tick, empty, stopped));
         }
         // Run the Rust batch loop directly on the session-owned state and
         // copy the flattened history into a NumPy 2-D array.  The lifecycle

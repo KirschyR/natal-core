@@ -52,13 +52,23 @@ pub use crate::generated::ecology_parameters::N_ECO_PARAMS;
 /// (e.g. session deserialization flagging programs with param writes).
 pub const OP_SET_PARAM_PUBLIC: i64 = 10;
 
-/// Opcodes the P7.1 device hook interpreter implements.
+/// Opcodes the device hook interpreter implements.
 ///
-/// Deliberately only the deterministic state mutations: `SAMPLE`,
-/// `STOP_IF_*`, and `SET_PARAM` stay host-only until P7.2/P7.3.
+/// Covers the deterministic state mutations and the stop-gating reductions;
+/// `SAMPLE` and `SET_PARAM` stay host-only until P7.3.
 #[cfg(feature = "gpu")]
-pub const DEVICE_SUPPORTED_OPS: [i64; 6] =
-    [OP_SCALE, OP_SET, OP_ADD, OP_SUBTRACT, OP_KILL, OP_CONVERT];
+pub const DEVICE_SUPPORTED_OPS: [i64; 10] = [
+    OP_SCALE,
+    OP_SET,
+    OP_ADD,
+    OP_SUBTRACT,
+    OP_KILL,
+    OP_STOP_IF_ZERO,
+    OP_STOP_IF_BELOW,
+    OP_STOP_IF_ABOVE,
+    OP_STOP_IF_EXTINCTION,
+    OP_CONVERT,
+];
 
 /// One audited ``OP_SET_PARAM`` transition handed to the session:
 /// ``(tick, param_id, old, new)``, recorded only when the committed value

@@ -56,6 +56,8 @@ pub struct GpuExecutor {
     seed: u64,
     /// Number of device ticks completed, used to vary draw sites per tick.
     tick: u64,
+    /// Set when a device hook `STOP_IF_*` reduction fired during the last tick.
+    stopped: bool,
     /// Cached static migration buffers for the current CSR, if any.
     migration_cache: Option<MigrationCache>,
     /// Device-staged observation history rows for the current run, if any.
@@ -222,6 +224,10 @@ struct DeviceHooks {
     convert_source_z: DeviceBuffer<i32>,
     /// Per-op convert target ztype (`-1` when not a convert).
     convert_target_z: DeviceBuffer<i32>,
+    /// Whether the program contains any `STOP_IF_*` op (flag read needed).
+    has_stop: bool,
+    /// One-element stop flag written by `STOP_IF_*` reductions.
+    stop_flag: DeviceBuffer<i32>,
 }
 
 /// Narrow an `i64` CSR column to the device `i32` width.
@@ -299,6 +305,7 @@ impl GpuExecutor {
             sperm_scratch,
             seed: 0,
             tick: 0,
+            stopped: false,
             migration_cache: None,
             history: None,
             hooks: None,
@@ -397,6 +404,8 @@ impl GpuExecutor {
                 &stream,
                 &to_i32_vec(&program.convert_target_z)?,
             )?,
+            has_stop: program.op_types.iter().any(|op| (6..=9).contains(op)),
+            stop_flag: DeviceBuffer::from_host(&stream, &[0i32])?,
         });
         Ok(())
     }
@@ -408,43 +417,70 @@ impl GpuExecutor {
     /// ## Parameters
     /// - `event_id`: Lifecycle event index (first/early/late/finish).
     ///
+    /// ## Returns
+    /// `true` when a `STOP_IF_*` op fired during the event.
+    ///
     /// ## Errors
-    /// Returns a description when the launch fails.
-    pub fn run_hook_event(&mut self, event_id: usize) -> Result<(), String> {
-        let Some(hooks) = self.hooks.as_ref() else {
-            return Ok(());
+    /// Returns a description when the launch or flag read fails.
+    pub fn run_hook_event(&mut self, event_id: usize) -> Result<bool, String> {
+        let Some(mut hooks) = self.hooks.take() else {
+            return Ok(false);
         };
         let stream = self.context.stream();
-        let buffers = crate::gpu::kernels::HookEventBuffers {
-            hook_offsets: hooks.hook_offsets.slice(),
-            op_offsets: hooks.op_offsets.slice(),
-            op_types: hooks.op_types.slice(),
-            zidx_offsets: hooks.zidx_offsets.slice(),
-            zidx_data: hooks.zidx_data.slice(),
-            age_offsets: hooks.age_offsets.slice(),
-            age_data: hooks.age_data.slice(),
-            sex_masks: hooks.sex_masks.slice(),
-            params: hooks.params.slice(),
-            condition_offsets: hooks.condition_offsets.slice(),
-            condition_types: hooks.condition_types.slice(),
-            condition_params: hooks.condition_params.slice(),
-            deme_selector_types: hooks.deme_selector_types.slice(),
-            deme_selector_offsets: hooks.deme_selector_offsets.slice(),
-            deme_selector_data: hooks.deme_selector_data.slice(),
-            convert_source_z: hooks.convert_source_z.slice(),
-            convert_target_z: hooks.convert_target_z.slice(),
-        };
-        self.kernels.apply_hook_event(
-            &stream,
-            self.ind.slice_mut(),
-            self.sperm.slice_mut(),
-            &buffers,
-            self.n_ages,
-            self.n_ztypes,
-            self.n_batch,
-            event_id,
-            self.tick,
-        )
+        let result = (|| -> Result<bool, String> {
+            if hooks.has_stop {
+                stream
+                    .memset_zeros(&mut *hooks.stop_flag.slice_mut())
+                    .map_err(|err| format!("stop flag reset failed: {err}"))?;
+            }
+            let buffers = crate::gpu::kernels::HookEventBuffers {
+                hook_offsets: hooks.hook_offsets.slice(),
+                op_offsets: hooks.op_offsets.slice(),
+                op_types: hooks.op_types.slice(),
+                zidx_offsets: hooks.zidx_offsets.slice(),
+                zidx_data: hooks.zidx_data.slice(),
+                age_offsets: hooks.age_offsets.slice(),
+                age_data: hooks.age_data.slice(),
+                sex_masks: hooks.sex_masks.slice(),
+                params: hooks.params.slice(),
+                condition_offsets: hooks.condition_offsets.slice(),
+                condition_types: hooks.condition_types.slice(),
+                condition_params: hooks.condition_params.slice(),
+                deme_selector_types: hooks.deme_selector_types.slice(),
+                deme_selector_offsets: hooks.deme_selector_offsets.slice(),
+                deme_selector_data: hooks.deme_selector_data.slice(),
+                convert_source_z: hooks.convert_source_z.slice(),
+                convert_target_z: hooks.convert_target_z.slice(),
+            };
+            self.kernels.apply_hook_event(
+                &stream,
+                self.ind.slice_mut(),
+                self.sperm.slice_mut(),
+                hooks.stop_flag.slice_mut(),
+                &buffers,
+                self.n_ages,
+                self.n_ztypes,
+                self.n_batch,
+                event_id,
+                self.tick,
+            )?;
+            if hooks.has_stop {
+                let flag = hooks.stop_flag.to_host(&stream)?;
+                Ok(flag.first().copied().unwrap_or(0) != 0)
+            } else {
+                Ok(false)
+            }
+        })();
+        self.hooks = Some(hooks);
+        result
+    }
+
+    /// Take the stop flag set by the last device tick, clearing it.
+    ///
+    /// ## Returns
+    /// `true` when a `STOP_IF_*` op fired during that tick.
+    pub fn take_stopped(&mut self) -> bool {
+        std::mem::take(&mut self.stopped)
     }
 
     /// Build an executor running `n_replicates` independent copies of one
@@ -1176,11 +1212,22 @@ impl GpuExecutor {
         variants: &[GeneticsTensors],
         deme_variants: &[usize],
     ) -> Result<(), String> {
-        self.run_hook_event(0)?;
+        // A hook STOP_IF_* aborts the tick at its event point exactly like the
+        // CPU engine: later stages are skipped and the tick is not advanced.
+        if self.run_hook_event(0)? {
+            self.stopped = true;
+            return Ok(());
+        }
         self.reproduction_tick(blueprint, ecology, variants, deme_variants)?;
-        self.run_hook_event(1)?;
+        if self.run_hook_event(1)? {
+            self.stopped = true;
+            return Ok(());
+        }
         self.survival_tick(blueprint, ecology, variants, deme_variants)?;
-        self.run_hook_event(2)?;
+        if self.run_hook_event(2)? {
+            self.stopped = true;
+            return Ok(());
+        }
         self.age_tick()?;
         self.tick = self.tick.wrapping_add(1);
         Ok(())

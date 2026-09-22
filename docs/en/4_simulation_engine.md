@@ -354,26 +354,30 @@ callbacks are rejected.
 
 ### 11.4 GPU particles (per-particle parameters)
 
-`AgeStructuredPopulation.enable_gpu_particles(param_sets)` advances `B` particles
-**together on the device batch axis, each with its own parameter overrides**
-(keyed by `Params` field names such as `carrying_capacity`, `eggs_per_female`,
-`survival_rates`, `mating_rates`). This differs from `enable_gpu_ensemble`, which
-runs many random realizations of **one** parameter set: particles support
-per-particle parameter combos (e.g. parameter sweeps / inference batches).
+`AgeStructuredPopulation.enable_gpu_particles(param_sets, n_replicates=1)`
+advances `B` particles **together on the device batch axis, each with its own
+parameter overrides** (keyed by `Params` field names such as `carrying_capacity`,
+`eggs_per_female`, `survival_rates`, `mating_rates`). Each particle may also run
+`n_replicates` independent realizations, so the device batch is the flattened
+`(particle, replicate)` pair — useful for parameter-combo batches (e.g. ABC-SMC
+particles). This differs from `enable_gpu_ensemble`, which runs many random
+realizations of **one** parameter set.
 
 ```python
 pop.enable_gpu_particles(
     [
         {"carrying_capacity": 300.0},
         {"carrying_capacity": 800.0, "eggs_per_female": 12.0},
-    ]
+    ],
+    n_replicates=3,
 )
 tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
-# individual_count: (n_particles, 2, n_ages, n_ztypes)
+# individual_count: (n_particles, n_replicates, 2, n_ages, n_ztypes)
 ```
 
-- **Shared**: the initial state and genetics are shared across particles; each
-  particle keeps its own ecology column on the device.
+- **Shared**: the initial state and genetics are shared across the whole
+  `(particle, replicate)` batch; each particle keeps its own ecology column on
+  the device.
 - **Hooks**: declarative hooks run per particle (Python callbacks are rejected).
   Particles are panmictic, so a hook's deme selector is evaluated against
   **deme 0** for every particle (matching `B` independent single-population CPU

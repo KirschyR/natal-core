@@ -330,23 +330,25 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 
 ### 11.4 GPU particle（每个 particle 独立参数）
 
-`AgeStructuredPopulation.enable_gpu_particles(param_sets)` 让 `B` 个 particle **在设备 batch 轴上一起推进，
+`AgeStructuredPopulation.enable_gpu_particles(param_sets, n_replicates=1)` 让 `B` 个 particle **在设备 batch 轴上一起推进，
 每个 particle 携带自己的参数覆盖**（键为 `Params` 字段名，如 `carrying_capacity`、`eggs_per_female`、
-`survival_rates`、`mating_rates`）。这与 `enable_gpu_ensemble`（同一套参数的多次随机实现）不同：
-particle 支持不同参数 combo（例如参数扫描/推断批）。
+`survival_rates`、`mating_rates`）。每个 particle 还可带 `n_replicates` 条独立实现，因此设备 batch 是
+`(particle, replicate)` 的拍平——适合参数 combo 批（如 ABC-SMC 的粒子）。这与 `enable_gpu_ensemble`
+（同一套参数的多次随机实现）不同。
 
 ```python
 pop.enable_gpu_particles(
     [
         {"carrying_capacity": 300.0},
         {"carrying_capacity": 800.0, "eggs_per_female": 12.0},
-    ]
+    ],
+    n_replicates=3,
 )
 tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
-# individual_count: (n_particles, 2, n_ages, n_ztypes)
+# individual_count: (n_particles, n_replicates, 2, n_ages, n_ztypes)
 ```
 
-- **共享**：初始状态与 genetics 在所有 particle 间共享；每个 particle 在设备上保留自己的生态列。
+- **共享**：初始状态与 genetics 在整个 `(particle, replicate)` 批次间共享；每个 particle 在设备上保留自己的生态列。
 - **钩子**：声明式钩子按 particle 执行（Python 回调被拒绝）。particle 是 panmictic，钩子的 deme selector 对每个
   particle 都按 **deme 0** 解释（与 `B` 个独立单群体 CPU 运行一致）。
 - **适用条件**：panmictic、内置生长模式（0–4）。空列表或模型不合格时 `enable_gpu_particles` 抛 `ValueError`；

@@ -75,11 +75,35 @@ def test_gpu_particles_shapes_and_distinct_parameters() -> None:
     tick, ind, sperm = pop.run_gpu_particles(3)
 
     assert tick == 3
-    assert ind.shape == (2, 2, 4, 3)
-    assert sperm.shape == (2, 4, 3, 3)
+    assert ind.shape == (2, 1, 2, 4, 3)
+    assert sperm.shape == (2, 1, 4, 3, 3)
     assert np.isfinite(ind).all()
     assert np.isfinite(sperm).all()
-    assert not np.allclose(ind[0], ind[1]), "particles must diverge"
+    assert not np.allclose(ind[0, 0], ind[1, 0]), "particles must diverge"
+
+
+def test_gpu_particles_with_inner_replicates_shapes() -> None:
+    """Each particle can carry an inner replicate axis on the device batch."""
+    pop = _build_pop("__gpu_particles_reps__")
+    try:
+        pop.enable_gpu_particles(
+            [{"carrying_capacity": 300.0}, {"carrying_capacity": 800.0}],
+            n_replicates=3,
+        )
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    tick, ind, sperm = pop.run_gpu_particles(2)
+    assert tick == 2
+    assert ind.shape == (2, 3, 2, 4, 3)
+    assert sperm.shape == (2, 3, 4, 3, 3)
+    assert np.isfinite(ind).all()
+
+
+def test_enable_gpu_particles_rejects_zero_replicates() -> None:
+    """``n_replicates`` must be positive even before any device work."""
+    pop = _build_pop("__gpu_particles_zero_reps__")
+    with pytest.raises(ValueError):
+        pop.enable_gpu_particles([{"carrying_capacity": 300.0}], n_replicates=0)
 
 
 def test_particles_backend_requires_gpu_build() -> None:

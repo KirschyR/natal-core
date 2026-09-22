@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 31 轮：**APPROVED**（§71；P9 GPU particle，per-particle 参数公开入口 + 逐 particle/逐字段与独立 CPU 一致） |
-| 待回执 | §73（第 32 轮：修 §71.5 的 selector 语义——panmictic 路径 deme=0，仅空间用 deme=b） |
-| 主 agent 处理 | 第 32 轮：P9 selector 语义已修复并自测；待复核 |
-| 待 evaluator 动作 | 按 §72 复核，把第 32 轮结论写入 §73 |
+| 最近回执 | 第 32 轮：**APPROVED**（§73；§71.5 selector 语义修复——panmictic 路径 deme=0，空间仍 deme=b） |
+| 待回执 | §75（第 33 轮 P9b：粒子 replicate 轴，`P×R` 拍平，`enable_gpu_particles(param_sets, n_replicates=R)`） |
+| 主 agent 处理 | 第 33 轮：P9b 已实现并自测；待复核 |
+| 待 evaluator 动作 | 按 §74 复核，把第 33 轮结论写入 §75 |
 
 ## 0. 一句话目标
 
@@ -1872,6 +1872,60 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 已灭绝 particle 不跳阶段；初始状态/genetics 共享（P9 v1 边界）。
 
 结论请追加为 **§73**。
+
+---
+
+## 74. 第 33 轮交接 — P9b：粒子 replicate 轴（`P×R` 拍平，ABC-SMC/参数 combo 批）
+
+- 日期：2026-09-22
+- 背景：§73 APPROVED。按用户需求（ABC-SMC：每轮提出 P 个参数 combo 的粒子，每个粒子再跑 R 条随机实现，R 通常 ≤5），
+  在 P9 的 `enable_gpu_particles` 上增加 per-particle replicate 轴。
+- 风险分类：**高风险**（公开 API 形状变化 + 设备 batch 组织 + Python/Rust 交换）。
+
+### 74.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/sessions/age_structured.rs` | 新增 `enable_gpu_particles_ecologies_replicated(parts, n_replicates)`：设备 `n_batch = P·R`，**particle-major 展开**（batch 索引 = `p·R + r`），每个 particle 的生态列重复 `R` 份，状态平铺到 `P·R`；`enable_gpu_particles` pyo3 增 `n_replicates=1`（`n_replicates=0` 显式报错）；保留 1 参 wrapper（`#[cfg(all(feature="gpu", test))]`，供既有测试）。 |
+| `src/natal/backends/rust/rust_backend.py` | `enable_gpu_particles(params_list, n_replicates=1)` 透传。 |
+| `src/natal/frontend/population/age_structured.py` | `enable_gpu_particles(param_sets, n_replicates=1)`（校验 ≥1、记录 replicate 数）；`run_gpu_particles` 返回 `(P, R, 2, A, Z)` / `(P, R, A, Z, Z)`。 |
+| 文档 | `docs/{en,zh}/4_simulation_engine.md` §11.4：`n_replicates`、`(P,R,…)` 形状、ABC-SMC 说明。 |
+| 测试 | Rust `session_gpu_particles_with_replicates_match_cpu`（P=2、R=3：逐 `(p,r)` 与独立 CPU session 对照，验证 particle-major 顺序）；Python `test_gpu_particles_with_inner_replicates_shapes`、`test_enable_gpu_particles_rejects_zero_replicates`，并更新 P9 形状用例为 `(P,1,…)`。 |
+
+### 74.2 行为
+
+- `enable_gpu_particles(param_sets, n_replicates=R)` 把 `P·R` 个独立模拟放到设备一维 batch 上：每个 particle 的参数列重复 R 份、各自 R 条 counter-based 随机流；初始状态/genetics 整个批次共享；钩子同一程序应用于全部 `P·R`。
+- `run_gpu_particles` 返回 `(P, R, 2, A, Z)` / `(P, R, A, Z, Z)`（`R=1` 时仍带 replicate 轴）。
+- 面向 ABC-SMC：每轮用新组合调用一次 `enable_gpu_particles(new_combos, R)` 即可。
+- 既有 `enable_gpu`/`enable_gpu_ensemble`/空间路径不变。
+
+### 74.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **228 passed, 0 failed**（含新增 P×R 对照用例） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3627 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **96.66%**（新增代码在 `sessions/age_structured.rs`） |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 74.4 请 evaluator 独立核对
+
+- **顺序/边界的正确性**：`P` 个 particle × `R` 个 replicate，验证设备 batch 索引 `p·R+r` 与返回 `(P,R,…)` 的对应；
+  逐 `(p,r)` 与「用 particle p 参数构建的独立 CPU session」对照（确定性容差；随机统计等价，且同一 particle 的 R 条互不相关）。
+- **公开 API**：`n_replicates=0` 显式 `ValueError`；空列表报错；`(P,R,…)` 形状；不静默回退。
+- **钩子**：同一程序作用于全部 `P·R`（含 per-particle `SET_PARAM`）。
+- **无回归**：既有 P9/P7/空间/phase0 用例不变。
+- **Python 新增行覆盖率**。
+- 文档中英同步。
+
+### 74.5 残余风险（非阻塞）
+
+- 每次 `enable_gpu_particles` 重建执行器（每个 ABC 迭代重传参数）；如需跨迭代复用可后续优化。
+- 已灭绝 particle/replicate 不跳阶段；`run_gpu_particles` 不更新会话 `state_tick`（P9 已知边界）。
+- 初始状态/genetics 整个 `P·R` 共享。
+
+结论请追加为 **§75**。
 
 ---
 
@@ -3850,3 +3904,61 @@ CPU session 逐 particle、逐 cell 一致（覆盖全部标量/向量字段）�
 P9 per-particle 参数公开入口在受支持路径上与独立 CPU session 逐 particle/逐字段一致，钩子与错误路径正确，
 无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `eca167b` 与被审测试集；不声称任何历史基线失败消失）。
 §71.5 为已知非阻塞边界。
+
+---
+
+## 73. 第 32 轮结论（evaluator 独立执行，2026-09-22，HEAD=`b9a19df`）
+
+### 73.1 裁定：**APPROVED**
+
+§71.5 finding 2（particle 批次把 particle 索引当 deme）已修复：panmictic 批次（单群体 B=1、particle；ensemble 无钩子）
+的钩子 deme selector 统一按 **deme 0** 求值，与 B 个独立单群体 CPU session 语义一致；空间路径仍 `deme=b`。全部 5 处
+`configure_hooks` 调用点已按模式标注，无遗漏。CPU golden reference 未改，无回归。
+
+### 73.2 独立核对
+
+- **修复核对（读码）**：`apply_hook_event` 增 `panmictic`，`int deme_id = panmictic ? 0 : b;`，`hook_deme_matches(..., deme_id)`；
+  `configure_hooks(program, panmictic)` 记录到 `DeviceHooks.panmictic`；5 个调用点：`age_structured` 的 `enable_gpu`/
+  `install_hook_program`/`enable_gpu_particles_ecologies` = `true`，`spatial` 的 `enable_gpu`/`install_hook_program` = `false`。
+  `enable_gpu_ensemble` 未调用 `configure_hooks`（钩子仍拒绝），`DeviceHooks` 为 `None`。
+- **独立新增回归用例** `evaluator_gpu_particles_deme_selectors_follow_deme_zero`（已保留）：particle 路径下 selector
+  类型 1 `[0]`、类型 2 `[0,1)`、类型 3 `[0,2]` 命中（deme 0），而 `[1]`、`[1,2)` **不命中**且结果与 hook-free **逐位一致**；
+  每例均与 3 个独立 CPU session 逐 cell 对照。此用例在修复前会因 particle 1 命中 `[1]` 而失败——正是被修 bug 的证伪。
+- **空间无回归**：`evaluator_spatial_hook_deme_selectors_match_cpu`（range/list/global，deme=b）仍通过。
+- **P7.1–P7.3 panmictic 无回归**：B=1 时 `b=0`，`deme_id` 两种取值相同；既有用例与 `/tmp/l3_particles.py`（max_rel 1.16e-07）通过。
+
+### 73.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **227 passed**（作者 226 + evaluator 1） |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3625 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3009/3113 = 96.66%**；executor 95.89%、kernels 97.27%、probe 96.13%、其余 100% |
+
+### 73.4 逐条发现（非阻塞）
+
+1. **low / `run_gpu_particles` 不更新会话 `state_tick`**（§71.5 finding 1 未改，与 `run_gpu_ensemble` 同）。
+2. **low / ensemble 的 `panmictic` 语义**：`enable_gpu_ensemble` 未调用 `configure_hooks`，其钩子仍被拒绝；注释称
+   「ensemble 的 selector 按 deme 0」在钩子放开（P7.4b）后需确保 `configure_hooks(..., true)`。当前无影响。
+3. **low / P9 v1 边界**：已灭绝 particle 不跳阶段、初始状态/genetics 共享。
+
+### 73.5 阻塞项
+
+无。
+
+### 73.6 证据来源
+
+- **独立运行**：上表门禁、新增 selector 回归用例、空间 selector 用例、particle 用例、`/tmp/l3_particles.py`、扩展重编、覆盖率采集。
+- **仅代码阅读**：`apply_hook_event` 的 `panmictic`/`deme_id`、`configure_hooks` 5 个调用点、
+  `hook_deme_matches` 与 CPU `deme_matches` 对照。
+
+### 73.7 结论
+
+§71.5 selector 语义修复正确且完整，panmictic（含 particle）与空间路径的 selector 语义分别与各自 CPU 参考一致，
+无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `b9a19df` 与被审测试集；不声称任何历史基线失败消失）。

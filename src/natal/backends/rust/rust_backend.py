@@ -307,11 +307,12 @@ class RustLifecycleBackend:
         tick, ind, sperm = _session_call(lambda: run(int(n_ticks)))
         return int(tick), ind, sperm
 
-    def enable_gpu_particles(self, params_list: list[Params]) -> None:
+    def enable_gpu_particles(self, params_list: list[Params], n_replicates: int = 1) -> None:
         """Enable the GPU particle path (one parameter combo per particle).
 
         Args:
             params_list: One ``Params`` object per particle.
+            n_replicates: Independent realizations per particle (>= 1).
 
         Raises:
             RuntimeError: The installed extension has no GPU particle support.
@@ -322,7 +323,7 @@ class RustLifecycleBackend:
                 "this _engine_rs build has no GPU particle support; rebuild with "
                 "`maturin develop --features gpu`"
             )
-        enable(list(params_list))
+        enable(list(params_list), int(n_replicates))
 
     def run_gpu_particles(
         self, n_ticks: int

@@ -539,18 +539,23 @@ impl AgeStructuredSession {
     ///
     /// ## Parameters
     /// - `params_list`: One Python `Params` object per particle.
+    /// - `n_replicates`: Independent realizations per particle (>= 1).
     ///
     /// ## Errors
     /// Returns ``PyValueError`` for ineligible models, or a runtime error when
     /// the device is unavailable.
     #[cfg(feature = "gpu")]
-    #[pyo3(signature = (params_list,))]
-    fn enable_gpu_particles(&mut self, params_list: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
+    #[pyo3(signature = (params_list, n_replicates=1))]
+    fn enable_gpu_particles(
+        &mut self,
+        params_list: Vec<Bound<'_, PyAny>>,
+        n_replicates: usize,
+    ) -> PyResult<()> {
         let mut parts = Vec::with_capacity(params_list.len());
         for object in &params_list {
             parts.push(EcologyParams::from_python(object, 1)?);
         }
-        self.enable_gpu_particles_ecologies(parts)
+        self.enable_gpu_particles_ecologies_replicated(parts, n_replicates)
     }
 
     /// Advance every particle by `n_ticks` and return the stacked final state.
@@ -1321,24 +1326,59 @@ impl AgeStructuredSession {
     /// ## Errors
     /// Returns ``PyValueError`` for ineligible models, or a runtime error when
     /// the device is unavailable.
-    #[cfg(feature = "gpu")]
+    #[cfg(all(feature = "gpu", test))]
     pub(crate) fn enable_gpu_particles_ecologies(
         &mut self,
         parts: Vec<EcologyParams>,
     ) -> PyResult<()> {
-        let n = parts.len();
-        if n == 0 {
+        self.enable_gpu_particles_ecologies_replicated(parts, 1)
+    }
+
+    /// Particle setup with an inner replicate factor.
+    ///
+    /// The device batch axis is the flattened `(particle, replicate)` pair, so
+    /// each particle's ecology columns are repeated `n_replicates` times and
+    /// the initial state is shared across the whole `P · R` batch.
+    ///
+    /// ## Parameters
+    /// - `parts`: One single-deme `EcologyParams` per particle.
+    /// - `n_replicates`: Independent realizations per particle (>= 1).
+    ///
+    /// ## Errors
+    /// Returns ``PyValueError`` for ineligible models, or a runtime error when
+    /// the device is unavailable.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn enable_gpu_particles_ecologies_replicated(
+        &mut self,
+        parts: Vec<EcologyParams>,
+        n_replicates: usize,
+    ) -> PyResult<()> {
+        let n_particles = parts.len();
+        if n_particles == 0 {
             return Err(PyValueError::new_err(
                 "enable_gpu_particles needs at least one particle",
             ));
         }
+        if n_replicates == 0 {
+            return Err(PyValueError::new_err("n_replicates must be >= 1"));
+        }
+        let n_batch = n_particles
+            .checked_mul(n_replicates)
+            .ok_or_else(|| PyValueError::new_err("particle x replicate batch overflows"))?;
         if self.blueprint.n_demes != 1 || self.params.n_demes != 1 {
             return Err(PyValueError::new_err(
                 "GPU particles support a single panmictic model",
             ));
         }
         validate_device_hooks(&self.hooks)?;
-        let ecology = stack_ecologies(&parts).map_err(map_lifecycle_error)?;
+        // Particle-major expansion: batch index = particle * R + replicate.
+        let mut expanded = Vec::with_capacity(n_batch);
+        for part in &parts {
+            for _ in 0..n_replicates {
+                expanded.push(part.clone());
+            }
+        }
+        let ecology = stack_ecologies(&expanded).map_err(map_lifecycle_error)?;
         if ecology
             .growth_mode
             .iter()
@@ -1351,11 +1391,13 @@ impl AgeStructuredSession {
         let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let ind_one: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
         let sperm_one: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
-        let ind_all: Vec<f32> = (0..n).flat_map(|_| ind_one.iter().copied()).collect();
-        let sperm_all: Vec<f32> = (0..n).flat_map(|_| sperm_one.iter().copied()).collect();
+        let ind_all: Vec<f32> = (0..n_batch).flat_map(|_| ind_one.iter().copied()).collect();
+        let sperm_all: Vec<f32> = (0..n_batch)
+            .flat_map(|_| sperm_one.iter().copied())
+            .collect();
         let mut executor = crate::gpu::executor::GpuExecutor::new(
             context,
-            n,
+            n_batch,
             self.blueprint.n_ages,
             self.blueprint.n_ztypes,
             &ind_all,

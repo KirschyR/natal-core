@@ -1494,3 +1494,292 @@ fn spatial_device_hook_stop_freezes_tick_and_keeps_other_demes() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for P7.4a spatial per-deme hooks.
+// ---------------------------------------------------------------------------
+
+/// One operation in an evaluator-built spatial hook program.
+struct SpOp {
+    op_type: i64,
+    param: f64,
+    zidx: Vec<i64>,
+    ages: Vec<i64>,
+    sex: [bool; 2],
+    cond: Vec<(i64, i64)>,
+    convert: Option<(i64, i64)>,
+}
+
+/// One hook slot plus its deme selector.
+struct SpHook {
+    ops: Vec<SpOp>,
+    sel_type: i64,
+    sel_data: Vec<i64>,
+}
+
+fn sp_op(op_type: i64, param: f64) -> SpOp {
+    SpOp {
+        op_type,
+        param,
+        zidx: vec![0, 1],
+        ages: vec![0, 1, 2, 3],
+        sex: [true, true],
+        cond: Vec::new(),
+        convert: None,
+    }
+}
+
+/// Build a CSR [`HookProgram`] from four events `[first, early, late, finish]`.
+fn sp_program(events: [Vec<SpHook>; 4]) -> HookProgram {
+    let mut p = HookProgram::default();
+    p.n_events = 4;
+    p.hook_offsets = vec![0];
+    p.op_offsets = vec![0];
+    p.zidx_offsets = vec![0];
+    p.age_offsets = vec![0];
+    p.condition_offsets = vec![0];
+    p.deme_selector_offsets = vec![0];
+    let mut n_hooks = 0i64;
+    for ev in &events {
+        for hook in ev {
+            for op in &hook.ops {
+                p.op_types.push(op.op_type);
+                p.zidx_data.extend_from_slice(&op.zidx);
+                p.zidx_offsets.push(p.zidx_data.len() as i64);
+                p.age_data.extend_from_slice(&op.ages);
+                p.age_offsets.push(p.age_data.len() as i64);
+                p.sex_masks.push(op.sex[0]);
+                p.sex_masks.push(op.sex[1]);
+                p.params.push(op.param);
+                for &(t, q) in &op.cond {
+                    p.condition_types.push(t);
+                    p.condition_params.push(q);
+                }
+                p.condition_offsets.push(p.condition_types.len() as i64);
+                let (src, dst) = op.convert.unwrap_or((-1, -1));
+                p.convert_source_z.push(src);
+                p.convert_target_z.push(dst);
+            }
+            p.op_offsets.push(p.op_types.len() as i64);
+            p.deme_selector_types.push(hook.sel_type);
+            p.deme_selector_data.extend_from_slice(&hook.sel_data);
+            p.deme_selector_offsets
+                .push(p.deme_selector_data.len() as i64);
+        }
+        n_hooks += ev.len() as i64;
+        p.hook_offsets.push(n_hooks);
+    }
+    p.n_hooks = n_hooks;
+    p
+}
+
+fn sp_assert_close(got: &(Vec<f64>, Vec<f64>), want: &(Vec<f64>, Vec<f64>), label: &str) {
+    for (index, (g, w)) in got.0.iter().zip(want.0.iter()).enumerate() {
+        let (g, w) = (*g as f32, *w as f32);
+        assert!(
+            (g - w).abs() <= 1.2e-5f32 * w.abs().max(1.0),
+            "{label} ind[{index}]: device {g} vs host {w}"
+        );
+    }
+    for (index, (g, w)) in got.1.iter().zip(want.1.iter()).enumerate() {
+        let (g, w) = (*g as f32, *w as f32);
+        assert!(
+            (g - w).abs() <= 1.2e-5f32 * w.abs().max(1.0),
+            "{label} sperm[{index}]: device {g} vs host {w}"
+        );
+    }
+}
+
+fn sp_run(
+    program: HookProgram,
+    ticks: i64,
+    gpu: bool,
+    discrete: bool,
+) -> (i64, bool, Vec<f64>, Vec<f64>) {
+    let (blueprint, ecology, genetics) = fixture();
+    let mut session = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        discrete,
+    );
+    session.hooks = program;
+    if gpu {
+        session.enable_gpu().expect("spatial enable_gpu");
+    }
+    let (tick, stopped) = session.run_steps(ticks, 0).expect("spatial run_steps");
+    (tick, stopped, session.state_ind, session.state_sperm)
+}
+
+#[test]
+fn evaluator_spatial_hook_deme_selectors_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // first: SCALE 0.9 on demes [0,2) (type 2 range); early: ADD 3 on deme 2
+    // (type 3 list); late: SET 7 on all demes (type 0).
+    let build = || {
+        let range = SpHook {
+            ops: vec![sp_op(0, 0.9)],
+            sel_type: 2,
+            sel_data: vec![0, 2],
+        };
+        let list = SpHook {
+            ops: vec![sp_op(2, 3.0)],
+            sel_type: 3,
+            sel_data: vec![2],
+        };
+        let global = SpHook {
+            ops: vec![sp_op(1, 7.0)],
+            sel_type: 0,
+            sel_data: Vec::new(),
+        };
+        sp_program([vec![range], vec![list], vec![global], Vec::new()])
+    };
+    let gpu = sp_run(build(), 2, true, false);
+    let cpu = sp_run(build(), 2, false, false);
+    assert_eq!(gpu.0, cpu.0, "tick");
+    assert_eq!(gpu.1, cpu.1, "stopped");
+    sp_assert_close(&(gpu.2, gpu.3), &(cpu.2, cpu.3), "deme selectors");
+}
+
+#[test]
+fn evaluator_spatial_multiple_demes_stop_same_tick_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // Deme 0 stops at `first`, deme 2 stops at `late`, deme 1 never stops.
+    let build = || {
+        let stop0 = SpHook {
+            ops: vec![sp_op(8, 0.0)],
+            sel_type: 1,
+            sel_data: vec![0],
+        };
+        let stop2 = SpHook {
+            ops: vec![sp_op(8, 0.0)],
+            sel_type: 1,
+            sel_data: vec![2],
+        };
+        sp_program([vec![stop0], Vec::new(), vec![stop2], Vec::new()])
+    };
+    let gpu = sp_run(build(), 2, true, false);
+    let cpu = sp_run(build(), 2, false, false);
+    assert!(gpu.1 && cpu.1, "both must stop");
+    assert_eq!(gpu.0, cpu.0, "stop tick");
+    assert_eq!(gpu.0, 0, "stop at tick 0");
+    sp_assert_close(&(gpu.2, gpu.3), &(cpu.2, cpu.3), "multi-deme stop");
+}
+
+#[test]
+fn evaluator_spatial_set_param_per_deme_matches_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // SET_PARAM(carrying_capacity * 0.5) on deme 1 only.
+    let build = || {
+        let hook = SpHook {
+            ops: vec![sp_op(10, 0.0)],
+            sel_type: 1,
+            sel_data: vec![1],
+        };
+        let mut p = sp_program([vec![hook], Vec::new(), Vec::new(), Vec::new()]);
+        p.sp_param_ids = vec![0];
+        p.sp_every = vec![1];
+        p.sp_start = vec![0];
+        p.rpn_offsets = vec![0, 3];
+        p.rpn_kinds = vec![1, 0, 4];
+        p.rpn_payload = vec![0, 0, 0];
+        p.sp_literals = vec![0.5];
+        p.has_set_param = true;
+        p
+    };
+    let (blueprint, ecology, genetics) = fixture();
+    let mut gpu = make_session(
+        blueprint.clone(),
+        ecology.clone(),
+        vec![genetics.clone()],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    gpu.hooks = build();
+    gpu.enable_gpu().expect("spatial enable_gpu");
+    gpu.run_steps(1, 0).expect("gpu run_steps");
+
+    let mut cpu = make_session(
+        blueprint,
+        ecology,
+        vec![genetics],
+        vec![0, 0, 0],
+        false,
+        false,
+    );
+    cpu.hooks = build();
+    cpu.run_steps(1, 0).expect("cpu run_steps");
+
+    for deme in 0..3 {
+        let g = gpu.ecology.eco_value(0, deme);
+        let c = cpu.ecology.eco_value(0, deme);
+        assert!(
+            (g - c).abs() <= 1.2e-6 * c.abs().max(1.0),
+            "deme {deme}: device {g} vs host {c}"
+        );
+    }
+    assert!(
+        (gpu.ecology.eco_value(0, 1) - 250.0).abs() < 1e-3,
+        "deme 1 halved"
+    );
+    assert!(
+        (gpu.ecology.eco_value(0, 0) - 500.0).abs() < 1e-3,
+        "deme 0 unchanged"
+    );
+    sp_assert_close(
+        &(gpu.state_ind, gpu.state_sperm),
+        &(cpu.state_ind, cpu.state_sperm),
+        "per-deme set_param",
+    );
+}
+
+#[test]
+fn evaluator_spatial_discrete_hooks_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    // Discrete spatial lifecycle with a per-deme SCALE hook.
+    let build = || {
+        let hook = SpHook {
+            ops: vec![sp_op(0, 0.8)],
+            sel_type: 1,
+            sel_data: vec![1],
+        };
+        sp_program([vec![hook], Vec::new(), Vec::new(), Vec::new()])
+    };
+    let run = |gpu: bool| -> (i64, bool, Vec<f64>, Vec<f64>) {
+        let (blueprint, ecology, genetics) = discrete_fixture();
+        let mut session = make_discrete_session(
+            blueprint,
+            ecology,
+            vec![genetics],
+            vec![0, 0, 0],
+            false,
+            true,
+        );
+        session.hooks = build();
+        if gpu {
+            session.enable_gpu().expect("spatial enable_gpu");
+        }
+        let (tick, stopped) = session.run_steps(2, 0).expect("discrete run_steps");
+        (tick, stopped, session.state_ind, session.state_sperm)
+    };
+    let gpu = run(true);
+    let cpu = run(false);
+    assert_eq!(gpu.0, cpu.0, "discrete tick");
+    assert_eq!(gpu.1, cpu.1, "discrete stopped");
+    sp_assert_close(&(gpu.2, gpu.3), &(cpu.2, cpu.3), "discrete spatial hooks");
+}

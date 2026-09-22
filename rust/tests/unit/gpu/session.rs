@@ -1955,3 +1955,100 @@ fn evaluator_device_stochastic_hooks_statistically_match_cpu() {
     // Two-sample KS at n=100: 5% critical value is ~0.19.
     assert!(ks < 0.25, "stochastic hook ECDFs differ: ks={ks:.3}");
 }
+
+#[test]
+fn session_gpu_particles_match_independent_cpu_runs() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let base = make_session(
+            blueprint.clone(),
+            params,
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        )
+        .params
+        .clone();
+        let particle = |k: f64, eggs: f64| {
+            let mut p = base.clone();
+            p.carrying_capacity[0] = k;
+            p.eggs_per_female[0] = eggs;
+            p
+        };
+        let particles = vec![
+            particle(300.0, 8.0),
+            particle(500.0, 10.0),
+            particle(800.0, 12.0),
+        ];
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.enable_gpu_particles_ecologies(particles.clone())
+            .expect("enable particles");
+        let (_, ind_flat, sperm_flat) = gpu.run_gpu_particles(py, 3).expect("run particles");
+        let ind_values: Vec<f64> = ind_flat.readonly().as_slice().expect("ind slice").to_vec();
+        let sperm_values: Vec<f64> = sperm_flat
+            .readonly()
+            .as_slice()
+            .expect("sperm slice")
+            .to_vec();
+
+        let ind_block = 2 * 4 * 2;
+        let sperm_block = 4 * 2 * 2;
+        assert_eq!(ind_values.len(), particles.len() * ind_block);
+        assert_eq!(sperm_values.len(), particles.len() * sperm_block);
+
+        for (index, part) in particles.iter().enumerate() {
+            let mut cpu = make_session(
+                blueprint.clone(),
+                part.clone(),
+                genetics.clone(),
+                ind.clone(),
+                sperm.clone(),
+            );
+            cpu.run_inner(py, 3, 0, None, 0).expect("cpu run");
+            for (cell, (got, want)) in ind_values[index * ind_block..(index + 1) * ind_block]
+                .iter()
+                .zip(cpu.state_ind.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "particle {index} ind[{cell}]: device {got} vs host {want}"
+                );
+            }
+            for (cell, (got, want)) in sperm_values[index * sperm_block..(index + 1) * sperm_block]
+                .iter()
+                .zip(cpu.state_sperm.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "particle {index} sperm[{cell}]: device {got} vs host {want}"
+                );
+            }
+        }
+
+        // Distinct parameters must produce distinct trajectories.
+        assert_ne!(
+            &ind_values[..ind_block],
+            &ind_values[ind_block..2 * ind_block],
+            "particles with different parameters must differ"
+        );
+    });
+}

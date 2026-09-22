@@ -307,6 +307,43 @@ class RustLifecycleBackend:
         tick, ind, sperm = _session_call(lambda: run(int(n_ticks)))
         return int(tick), ind, sperm
 
+    def enable_gpu_particles(self, params_list: list[Params]) -> None:
+        """Enable the GPU particle path (one parameter combo per particle).
+
+        Args:
+            params_list: One ``Params`` object per particle.
+
+        Raises:
+            RuntimeError: The installed extension has no GPU particle support.
+        """
+        enable = getattr(self._session, "enable_gpu_particles", None)
+        if enable is None:
+            raise RuntimeError(
+                "this _engine_rs build has no GPU particle support; rebuild with "
+                "`maturin develop --features gpu`"
+            )
+        enable(list(params_list))
+
+    def run_gpu_particles(
+        self, n_ticks: int
+    ) -> tuple[int, NDArray[np.float64], NDArray[np.float64]]:
+        """Advance every GPU particle and return the stacked final state.
+
+        Args:
+            n_ticks: Number of ticks to run.
+
+        Returns:
+            ``(n_ticks, ind_flat, sperm_flat)``; the caller reshapes.
+        """
+        run = getattr(self._session, "run_gpu_particles", None)
+        if run is None:
+            raise RuntimeError(
+                "this _engine_rs build has no GPU particle support; rebuild with "
+                "`maturin develop --features gpu`"
+            )
+        tick, ind, sperm = _session_call(lambda: run(int(n_ticks)))
+        return int(tick), ind, sperm
+
     def refresh_params(self, fields: list[str], params_obj: Params) -> None:
         """Pull exactly *fields* from the contract params into the session.
 

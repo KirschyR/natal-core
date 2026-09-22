@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 29 轮：**APPROVED**（§67；§65 阻塞项已修复——stop 事件边界仍提交 `SET_PARAM`；§65.5 统计等价扫描补完） |
-| 待回执 | §69（第 30 轮 P7.4a：空间声明式钩子 + per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过） |
-| 主 agent 处理 | 第 30 轮：P7.4a 已实现并自测；P7.4b（ensemble）待启动 |
-| 待 evaluator 动作 | 按 §68 复核，把第 30 轮结论写入 §69 |
+| 最近回执 | 第 30 轮：**APPROVED**（§69；P7.4a 空间 per-deme 声明式钩子 + per-batch stop 冻结/恢复 + 迁移跳过） |
+| 待回执 | §71（第 31 轮 P9：GPU particle，per-particle 参数 `enable_gpu_particles`/`run_gpu_particles`） |
+| 主 agent 处理 | 第 31 轮：P9 已实现并自测；P7.4b（同参数 ensemble 钩子）暂缓 |
+| 待 evaluator 动作 | 按 §70 复核，把第 31 轮结论写入 §71 |
 
 ## 0. 一句话目标
 
@@ -1764,6 +1764,64 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - §65.3 既有残余不变（负 virgin clamp、RNG 仅统计等价、trigger_event、归约 f32）。
 
 结论请追加为 **§69**。
+
+---
+
+## 70. 第 31 轮交接 — P9：GPU particle（per-particle 参数，新公开入口 `enable_gpu_particles`）
+
+- 日期：2026-09-22
+- 背景：§69 APPROVED（P7.4a）。用户澄清其「非空间大 B」场景实为**每个 replicate 一套参数 combo 的 particle**，
+  而现有 `ensemble` 是同一套参数平铺，不满足该需求。经用户批准新增公开入口 `enable_gpu_particles`（v1 仅 per-particle 参数）。
+- 风险分类：**高风险**（新增公开 API、Python/Rust 参数交换、科学参数逐 particle 生效、状态 batch 化）。
+
+### 70.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/sessions/age_structured.rs` | 新增 `stack_ecologies`（把 `B` 个单 deme `EcologyParams` 拼成 `n_demes=B` 的批量列）；新增 pyo3 `enable_gpu_particles(params_list)`（对每个 `Params` `EcologyParams::from_python(_,1)` 后拼接，`GpuExecutor::new(context,B,...)`，`set_seed`/`ensure_migration_budget`/`configure_hooks`/`set_tick`）与其 Rust 核心 `enable_gpu_particles_ecologies`；新增 `run_gpu_particles(n_ticks)`（逐 tick 用 per-particle 生态推进、提交 per-particle `SET_PARAM`、导出堆叠结果）；结构体增 `particle_ecology` 字段。 |
+| `src/natal/backends/rust/rust_backend.py` | `RustLifecycleBackend.enable_gpu_particles(params_list)` / `run_gpu_particles(n_ticks)` 透传。 |
+| `src/natal/frontend/population/age_structured.py` | `AgeStructuredPopulation.enable_gpu_particles(param_sets)`（对基座 `materialize_params` 用 `dataclasses.replace` 施加每个 particle 的覆盖）与 `run_gpu_particles(n_ticks)`（reshape 成 `(B,2,A,Z)`/`(B,A,Z,Z)`）。 |
+| 文档 | `docs/{en,zh}/4_simulation_engine.md` 新增 §11.4（GPU particle，示例 + 共享/钩子/资格）。 |
+| 测试 | Rust `session_gpu_particles_match_independent_cpu_runs`（3 个不同 `carrying_capacity`/`eggs_per_female` 的 particle，3 tick 与 **B 个独立 CPU session** 逐 particle 对照 + 互异）；Python `tests/test_gpu_particles_frontend.py`（空列表报错、未启用报错、形状/互异）。 |
+
+### 70.2 行为
+
+- **每个 particle 独立参数**：设备 batch 轴 = particle；各 particle 的生态列来自其 `Params`，内核本就按 batch 读取，
+  因而 per-particle 参数与初始状态共享（v1）。与 `enable_gpu_ensemble`（同一参数多随机实现）语义区分清楚。
+- **钩子**：声明式钩子按 particle 执行（复用 P7 设备解释器；`SET_PARAM` 写各自生态列并在 tick 间提交）；Python 回调拒绝。
+- **资格**：panmictic、内置生长模式（0–4）；空列表/不合法显式报错。
+- 不影响既有 `enable_gpu`/`enable_gpu_ensemble`/空间路径（`particle_ecology` 在它们启用时被清除）。
+
+### 70.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **222 passed, 0 failed**（含新增 particle 对照用例） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3623 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **96.65%**（新增代码在 `sessions/age_structured.rs`，不计入 `src/gpu`） |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 70.4 请 evaluator 独立核对
+
+- **per-particle 参数正确**：自造 `B` 个不同参数 combo 的 particle，与 `B` 个独立 CPU session 逐 particle/逐 cell 对照
+  （确定性容差、随机统计等价）；确认 batch 轴顺序与返回堆叠顺序一致；标量与各向量字段（`survival_rates`/`mating_rates`/
+  `reproduction_rates`/`fertility`/`competition_weights`/`carrying_capacity`/`eggs_per_female`/`sex_ratio`/…）逐 particle 生效。
+- **公开 API 合同**：`enable_gpu_particles` 空列表/非 panmictic/自定义生长模式显式报错；未启用即 `run_gpu_particles` 报错；
+  无 GPU feature 的扩展给出可操作 `RuntimeError`；不静默回退 CPU。
+- **钩子**：含声明式钩子（含 `SET_PARAM`）的 particle 路径按 particle 正确执行并与 CPU 对照。
+- **无回归**：既有 `enable_gpu`/`enable_gpu_ensemble`/空间/phase0 全部不变。
+- **文档中英同步**：§11.4 两版对应、示例可运行。
+- **Python 新增行覆盖率**：`enable_gpu_particles`/`run_gpu_particles` 及 backend 透传的新增可执行行。
+
+### 70.5 残余风险 / 已知边界（非阻塞）
+
+- v1 初始状态与 genetics 在 particle 间**共享**；per-particle 初始状态/genetics 未做（可后续）。
+- 已灭绝 particle 的 **stage 算力跳过**未做（与 P7.4b 同）；停止仍按设备解释器（`STOP_IF_*` 每 particle 冻结，保存/恢复）。
+- `materialize_params(self.config)` 基座取自当前 population 配置；`param_sets` 的键必须匹配 `Params` 字段名（未知键由 `dataclasses.replace` 报错）。
+- 设备 RNG 仅统计等价（D3）；归约/停止阈值 f32（§63.5）。
+
+结论请追加为 **§71**。
 
 ---
 
@@ -3592,3 +3650,74 @@ n=300 时方差比 **0.996**、均值差 `t=0.98`、KS=0.083（远低于 n=300 �
 §65 阻塞项已修复且不引入回归；`SET_PARAM` 与 stop 的边界提交语义现与 CPU 一致（middle/late/随机/多次 run 均验证）；
 §65.5 统计等价扫描补齐并通过（n=300 方差比 0.996、KS 0.083）。**APPROVED**（范围：当前 HEAD `bb9a55c` 与被审测试集；
 不声称任何历史基线失败消失）。
+
+---
+
+## 69. 第 30 轮结论（evaluator 独立执行，2026-09-22，HEAD=`1c761ab`）
+
+### 69.1 裁定：**APPROVED**
+
+P7.4a 空间 per-deme 声明式钩子、per-deme selector、per-deme `SET_PARAM`、per-batch stop 冻结/恢复与迁移跳过，
+经独立复核与新增用例确认与 CPU golden reference 一致；panmictic / hook-free / 离散路径无回归；CPU 未改。
+`validate_device_hooks` 单一化与空间 `install_hook_program`（设备活跃时重传）正确。
+
+### 69.2 独立新增空间证伪用例（4 个，全部通过，已保留在 `spatial_session.rs`）
+
+自建空间 CSR 构造器（`sp_program`/`SpHook`/`SpOp`，逐字段控制 selector 与 opcode），新增：
+
+- `evaluator_spatial_hook_deme_selectors_match_cpu`：同一 program 混合 selector 类型 2（range `[0,2)`）、类型 3（list `[2]`）与类型 0（全局），3 deme、2 tick，整状态与 CPU 一致——覆盖 `hook_deme_matches` 三种 selector。
+- `evaluator_spatial_multiple_demes_stop_same_tick_match_cpu`：deme 0 在 `first` 停止、deme 2 在 `late` 停止、deme 1 不停；验证停止 tick=0、`stopped=true`、各 stop 边界状态冻结（含不同事件点 capture）与 CPU 一致——覆盖「同一 tick 内多 deme 不同事件停止」。
+- `evaluator_spatial_set_param_per_deme_matches_cpu`：`SET_PARAM(carrying_capacity*0.5)` 仅 deme 1；断言 deme1=250、deme0/2=500 且与 CPU 逐 deme 一致，整状态一致（验证按 deme 写读 + 同 tick 可见）。
+- `evaluator_spatial_discrete_hooks_match_cpu`：离散（two-age）空间 fixture + per-deme SCALE；验证 `discrete_tick` 现走同一事件序列后离散路径与 CPU 一致。
+
+### 69.3 独立核对（读码）
+
+- **停止冻结语义与 CPU 一致**：CPU `schedule_deme_ticks` 让每个 deme 跑完自身生命周期，停止 deme 在其停止事件处短路；`run_spatial_tick_*` 返回非 0 时跳过迁移且不前进 tick。设备 `run_tick_sequence` 改为「每事件后 `capture_stopped` 保存新停止 deme 的 ind/sperm → 无条件 `commit_eco` → tick 末 `restore_stopped`」；停止 deme 的后续阶段效果被 restore 抵消，最终状态=停止边界状态（含停止事件中 stop op 之前的 mutation），与 CPU 一致；`restore_stopped` 返回任一停止则 `self.stopped=true` 且不前进设备 tick；`run_gpu_tick` 检出 stop 后跳过迁移、不前进 `state_tick`。
+- **per-deme 生态**：`eco_scratch` 改 `(B, N_ECO_PARAMS)` batch-major，内核 `eco_row`；`sync/take/apply_eco` 按 batch。host `apply_eco_values` 逐 (batch,id) 校验 bounds 后 `set_eco_value(id,batch)`。CPU 在 `code.is_ok()` 时对所有 deme 写回 `eco_all`（含 stop），设备 `pending_eco` 同样整幅提交。
+- **selector 映射**：`apply_hook_event` 以 `b`（=deme）调用 `hook_deme_matches`；设备 batch 轴与 `deme_variants` 顺序一致（`enable_gpu` 校验 `n_demes == deme_variants.len()`）。
+- **无回归**：`reset_stop_mask`/`capture_stopped`/`restore_stopped` 在 hooks 为 `None` 或 `has_stop=false` 时全为 no-op；hook-free 连续/离散路径仅多 3 次空事件调用，数值不变（既有 P5/P7.1–P7.3 用例与 phase0 全过）。
+- **受保护用例**：`spatial_session.rs` 的 §6 保护用例（`evaluator_single_tick_syncs_host_state`、`evaluator_device_history_*`、`evaluator_raw_device_*`）本轮 diff 未触及（0 行改动）。
+
+### 69.4 端到端与门禁
+
+- 重编扩展（`1c761ab`）；`/tmp/l3_spatial.py`（max_rel 9.14e-07）、`/tmp/l3_spatial_stochastic.py`、`/tmp/l3_gpu.py`、`/tmp/l3_stochastic.py` 全部通过。
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **221 passed**（作者 217 + evaluator 4） |
+| `cargo test --features gpu evaluator_spatial` | **4 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3620 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3003/3107 = 96.65%**；executor 95.88%、kernels 97.26%、probe 96.13%、其余 100% |
+
+### 69.5 逐条发现（均非阻塞）
+
+1. **low / 停止保存缓冲未纳入显存预算（§68.5 已知）**：`saved_ind`/`saved_sperm` 在首次停止时按整幅 `ind`/`sperm`
+   分配并跨 tick 复用，未加入 `ensure_migration_budget`。大模型首次停止可能在该点 OOM——但为**显式报错**、非静默回退。
+   建议后续把 `2·state_bytes` 计入启用预算或提供开关。
+2. **low / 每事件 D2H**：含 stop op 的程序每 tick 每事件读一次 `stop_mask`（最多 3 次 D2H），仅影响含 stop 的程序。
+3. **low / §65.3 既有残余不变**：`hook_apply_target_with_sperm` 负 virgin 一律 clamp；设备 RNG 仅统计等价、
+   `trigger_event` GPU 语义、归约 f32；ensemble 钩子仍不支持（P7.4b）。
+
+### 69.6 阻塞项
+
+无。
+
+### 69.7 证据来源
+
+- **独立运行**：上表门禁、4 个新空间用例、4 个 L3 脚本、扩展重编、覆盖率采集。
+- **仅代码阅读**：`HOOK_SOURCE` 的 `stop_mask`/`eco_row`/`hook_copy_batch`、`executor.rs` 的
+  `run_tick_sequence`/`capture_stopped`/`restore_stopped`/`reset_stop_mask`/`run_full_tick`、
+  `spatial.rs` 的 `run_gpu_tick`/`advance_tick`/`schedule_deme_ticks`、CPU/设备停止与迁移跳过对照、
+  `validate_device_hooks`/`install_hook_program`。
+
+### 69.8 结论
+
+P7.4a 空间 per-deme 钩子（selector/opcode/stop/set_param/迁移跳过）在受支持路径上与 CPU golden reference 一致，
+panmictic/hook-free/离散无回归，测试与门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `1c761ab` 与被审测试集；
+不声称任何历史基线失败消失）。§69.5 为已知非阻塞残余。

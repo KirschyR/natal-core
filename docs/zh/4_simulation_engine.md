@@ -328,6 +328,29 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 更低层的 `RustLifecycleBackend.enable_gpu` / `gpu_status` / `enable_gpu_ensemble` /
 `run_gpu_ensemble` 提供同一条路径。
 
+### 11.4 GPU particle（每个 particle 独立参数）
+
+`AgeStructuredPopulation.enable_gpu_particles(param_sets)` 让 `B` 个 particle **在设备 batch 轴上一起推进，
+每个 particle 携带自己的参数覆盖**（键为 `Params` 字段名，如 `carrying_capacity`、`eggs_per_female`、
+`survival_rates`、`mating_rates`）。这与 `enable_gpu_ensemble`（同一套参数的多次随机实现）不同：
+particle 支持不同参数 combo（例如参数扫描/推断批）。
+
+```python
+pop.enable_gpu_particles(
+    [
+        {"carrying_capacity": 300.0},
+        {"carrying_capacity": 800.0, "eggs_per_female": 12.0},
+    ]
+)
+tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
+# individual_count: (n_particles, 2, n_ages, n_ztypes)
+```
+
+- **共享**：初始状态与 genetics 在所有 particle 间共享；每个 particle 在设备上保留自己的生态列。
+- **钩子**：声明式钩子按 particle 执行（Python 回调被拒绝）。
+- **适用条件**：panmictic、内置生长模式（0–4）。空列表或模型不合格时 `enable_gpu_particles` 抛 `ValueError`；
+  扩展未带 `gpu` feature 时抛 `RuntimeError`。
+
 ## 12. 小结
 
 可以把 NATAL 的执行机制理解为三层分工：

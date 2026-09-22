@@ -352,6 +352,33 @@ deterministic mutations, `sample`, `stop_if_*`, `set_param`, and `convert`; a
 other demes still complete their lifecycle — matching the CPU scheduler. Python
 callbacks are rejected.
 
+### 11.4 GPU particles (per-particle parameters)
+
+`AgeStructuredPopulation.enable_gpu_particles(param_sets)` advances `B` particles
+**together on the device batch axis, each with its own parameter overrides**
+(keyed by `Params` field names such as `carrying_capacity`, `eggs_per_female`,
+`survival_rates`, `mating_rates`). This differs from `enable_gpu_ensemble`, which
+runs many random realizations of **one** parameter set: particles support
+per-particle parameter combos (e.g. parameter sweeps / inference batches).
+
+```python
+pop.enable_gpu_particles(
+    [
+        {"carrying_capacity": 300.0},
+        {"carrying_capacity": 800.0, "eggs_per_female": 12.0},
+    ]
+)
+tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
+# individual_count: (n_particles, 2, n_ages, n_ztypes)
+```
+
+- **Shared**: the initial state and genetics are shared across particles; each
+  particle keeps its own ecology column on the device.
+- **Hooks**: declarative hooks run per particle (Python callbacks are rejected).
+- **Eligibility**: panmictic, built-in growth modes (0–4). `enable_gpu_particles`
+  raises `ValueError` for an empty list or an ineligible model, and
+  `RuntimeError` when the extension lacks GPU support.
+
 ## 12. Chapter Summary
 
 The execution mechanism of NATAL can be understood as a three-layer division of labor:

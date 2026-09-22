@@ -135,6 +135,8 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         self._rust_backend_seed: int | None = None
         # Replicate count of the last successful ``enable_gpu_ensemble`` call.
         self._gpu_ensemble_replicates: int = 0
+        # Particle count of the last successful ``enable_gpu_particles`` call.
+        self._gpu_particle_count: int = 0
         # Structural changes (blueprint flags, modifier maps) rebuild the
         # session before the next run; value changes go straight to the
         # session through the writers and the run-boundary ecology flush.
@@ -1141,6 +1143,85 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
             [observation.apply(array[index]) for index in range(array.shape[0])],
             axis=0,
         )
+
+    def enable_gpu_particles(
+        self,
+        param_sets: Sequence[Mapping[str, object]],
+    ) -> AgeStructuredPopulation:
+        """Enable the GPU particle path: one parameter combo per particle.
+
+        Unlike :meth:`enable_gpu_ensemble` (many random realizations of one
+        parameter set), every particle here carries its own parameter overrides
+        and is advanced together on the device batch axis. The Initial state and
+        genetics are shared across particles.
+
+        Args:
+            param_sets: One mapping per particle, keyed by ``Params`` field
+                names (e.g. ``carrying_capacity``, ``eggs_per_female``,
+                ``survival_rates``, ``mating_rates``); values replace the base
+                population's values.
+
+        Returns:
+            AgeStructuredPopulation: Self for chaining.
+
+        Raises:
+            ValueError: If ``param_sets`` is empty.
+            RuntimeError: If the extension was built without GPU support, or
+                the model is ineligible.
+        """
+        overrides = [dict(item) for item in param_sets]
+        if not overrides:
+            raise ValueError("enable_gpu_particles needs at least one particle")
+        if self._rust_lifecycle_backend is None:
+            self._initialize_session(seed=int(self._rust_backend_seed or 0))
+        else:
+            self._run_startup_sync()
+        from dataclasses import replace as _dataclass_replace
+
+        from natal.contracts.materialize import materialize_params
+
+        base = materialize_params(self.config)
+        params_objects = [_dataclass_replace(base, **item) for item in overrides]
+        backend = self._rust_lifecycle_backend
+        assert backend is not None
+        backend.enable_gpu_particles(params_objects)
+        self._gpu_particle_count = len(params_objects)
+        return self
+
+    def run_gpu_particles(
+        self, n_ticks: int
+    ) -> Tuple[int, NDArray[np.float64], NDArray[np.float64]]:
+        """Advance every GPU particle and return the stacked final state.
+
+        Args:
+            n_ticks: Number of ticks to advance every particle.
+
+        Returns:
+            ``(tick, individual_count, sperm_storage)`` where
+            ``individual_count`` has shape ``(n_particles, 2, n_ages,
+            n_ztypes)`` and ``sperm_storage`` has shape ``(n_particles,
+            n_ages, n_ztypes, n_ztypes)``.
+
+        Raises:
+            RuntimeError: If :meth:`enable_gpu_particles` was not called first.
+        """
+        backend = self._rust_lifecycle_backend
+        particles = int(getattr(self, "_gpu_particle_count", 0))
+        if backend is None or particles < 1:
+            raise RuntimeError(
+                "run_gpu_particles requires enable_gpu_particles first"
+            )
+        tick, ind, sperm = backend.run_gpu_particles(int(n_ticks))
+        state = self._live_state().individual_count
+        n_ages = int(state.shape[1])
+        n_ztypes = int(state.shape[2])
+        ind_array = np.asarray(ind, dtype=np.float64).reshape(
+            particles, 2, n_ages, n_ztypes
+        )
+        sperm_array = np.asarray(sperm, dtype=np.float64).reshape(
+            particles, n_ages, n_ztypes, n_ztypes
+        )
+        return int(tick), ind_array, sperm_array
 
     def get_age_distribution(self, sex: str = "both") -> np.ndarray:
         """Return the age distribution for the requested sex.

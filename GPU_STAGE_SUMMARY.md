@@ -217,8 +217,8 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **217**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
-  （跳过硬件）、`ruff`、`pyright`、`pytest`（3620）、`phase0_baseline.py --check`。
+  `cargo test --features gpu`（当前 **222**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  （跳过硬件）、`ruff`、`pyright`、`pytest`（3623）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
   `src/gpu/../../tests/...`），当前聚合 **96.65%**（executor 95.9%、kernels 97.3%、probe 96.1%）；新模块需 ≥95%。
@@ -274,7 +274,8 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P7.1-fix | §59.4 两条 medium：启用后设备 tick 对齐 + 设钩子重传设备 CSR（§60） | APPROVED（§61） |
 | P7.2 | 设备侧 `STOP_IF_*` 门控 + 按 opcode 放开（§62） | APPROVED（§63） |
 | P7.3 | `SET_PARAM` 同 tick 可见性 + `SAMPLE`/随机模型钩子 + 设备 RNG（§64） | APPROVED（§67；§65 阻塞项已修复） |
-| P7.4a | 空间钩子（per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过）（§68） | **已实现，待 §69 复核** |
+| P7.4a | 空间钩子（per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过）（§68） | APPROVED（§69） |
+| P9 | GPU particle：per-particle 参数（`enable_gpu_particles`/`run_gpu_particles`）（§70） | **已实现，待 §71 复核** |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -292,7 +293,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | **C9** | 一致性 | `male_adult_mating_rate`/`eggs_per_female` clamp 差异 | 契约范围内无差异 | 可选对齐或注释说明 | 低 | 已记录，可不做 |
 | **B7** | 完整性 | Wright-Fisher 融合模式未设备化 | 空间离散 CPU 不用它；非空间离散无 GPU 入口 | 按需实现 | 中 | 低优先 |
 | **D6** | 设计 | ~~hooks/停止门控设备侧未做~~ | ~~含 `stop_if_*` 的模型不可用 GPU~~ | **由 P7 承接**（用户选定声明式钩子）：设备侧解释器 + 停止门控 | 高 | **APPROVED（§63）** |
-| **P7** | 完整性 | ~~GPU 不支持声明式钩子插入点（`first/early/late/finish`）~~ | ~~含声明式钩子的模型无法上 GPU~~ | 设备侧声明式解释器，分 P7.1–P7.4（见 §11.5）；Python 回调仍显式拒绝 | 高 | **P7.1–P7.3 APPROVED**；**P7.4a 待复核（§68）**；P7.4b（ensemble）未开始 |
+| **P7** | 完整性 | ~~GPU 不支持声明式钩子插入点（`first/early/late/finish`）~~ | ~~含声明式钩子的模型无法上 GPU~~ | 设备侧声明式解释器，分 P7.1–P7.4（见 §11.5）；Python 回调仍显式拒绝 | 高 | **P7.1–P7.4a APPROVED（§59/§61/§63/§67/§69）**；P7.4b（ensemble）待用户决定 |
 | **E12** | 性能 | 深层性能优化未做（debug 基准受宿主机重建/上传主导） | 大 B 计算侧瓶颈 | release + 空闲卡剖析 → 缓存恒定张量 / 复用 scratch / 内核重构 | 高（内核重构） | 待空闲卡 |
 | **E13** | 验收 | P6 相对 16 核 `ProcessPool` 仅 2.4–3.3×，阈值未定 | “显著优于”是否达标无口径 | 用户定阈值或换更大模型/更少核重测 | 低 | **待用户口径** |
 
@@ -326,7 +327,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | **P7.1** | 设备侧 opcode 解释器：上传 CSR 数据并执行 SCALE/SET/ADD/SUBTRACT/KILL/CONVERT（含 RPN 条件与 selector/wire bounds）；**同时按 opcode 放开资格**（仅无 Python 回调且只用已支持 opcode 的确定性模型；其余显式拒绝）。**APPROVED（§59）；§59.4 两条 medium 修复 APPROVED（§61）** | 确定性 L2/L3 与 CPU 一致（相对误差档）；事件顺序/优先级一致；未支持 opcode/回调解仍 `Err` |
 | **P7.2** | 设备侧 `STOP_IF_*` 门控（D6）：设备侧归约出 stop 标志，host 按需读取；停止点与 CPU 一致；放开 STOP_IF_* 资格。**APPROVED（§63）** | 含 `stop_if_*` 模型的停止 tick 与 CPU 一致；零逐 tick 同步 |
 | **P7.3** | `OP_SET_PARAM` 同 tick 可见性 + `SAMPLE` 的设备 RNG site 对齐；放开二者资格。**APPROVED（§67）** | later-stage 读取已更新参数；随机 op 可复现/统计等价 |
-| **P7.4a** | 空间 per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过。**已实现（§68）待复核** | 空间声明式钩子与 CPU 一致（含停止语义） |
+| **P7.4a** | 空间 per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过。**APPROVED（§69）** | 空间声明式钩子与 CPU 一致（含停止语义） |
 | **P7.4b** | ensemble 钩子集成（语义待定） | 多 B 的声明式钩子与 CPU/N 个独立单群体一致 |
 
 > **不可先放开资格再补解释器**：若允许 `n_hooks>0` 而不执行钩子，会**静默丢钩子**。因此资格必须在
@@ -342,11 +343,16 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 - **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.3 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67）。
 - **最近回执**：§67（P7.3）**APPROVED**。
-- **待回执**：无（P7.4 待启动）。
-- **后续未开始**：**P7.4b**（ensemble 钩子，语义待定）；**B7** 低优先；
+- **待回执**：**§71**（P9：GPU particle per-particle 参数）——已实现并自测，**未批准**。
+- **后续未开始**：**P7.4b**（ensemble 钩子，语义待定；用户已澄清其大 B 场景为 per-particle 参数，由 P9 承接）；**B7** 低优先；
   **E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
-- **门禁基线（P7.4a 自测）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **217**、
+- **门禁基线（§69 时）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **221**、
   `ruff`/`pyright` 通过、`pytest` **3620**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **96.62%**。
+- **P9 要点（GPU particle）**：`AgeStructuredPopulation.enable_gpu_particles(param_sets)` /
+  `run_gpu_particles` → `RustLifecycleBackend` 透传 → `AgeStructuredSession::enable_gpu_particles`
+  （对每个 particle `EcologyParams::from_python(_,1)` 后 `stack_ecologies` 成 `n_demes=B`）+ `run_gpu_particles`；
+  初始状态/genetics 共享；声明式钩子按 particle 执行。Rust 对照测试 `session_gpu_particles_match_independent_cpu_runs`；
+  Python 测试 `tests/test_gpu_particles_frontend.py`。
 - **P7.3 要点**：`HOOK_SOURCE` 增设备端 `hook_sample_survivors`/`hook_apply_target_*`/`hook_convert_count`、
   `hook_eval_rpn`（set_param）；内核接收 `eco`/RNG 参数；`DeviceHooks` 增 `has_set_param` 与 sp/RPN/eco 缓冲；
   `GpuExecutor` 增 `sync_eco_scratch`/`take_eco_scratch`/`apply_eco_values`/`take_pending_eco` 与 `EcoView`

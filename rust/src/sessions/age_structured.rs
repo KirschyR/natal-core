@@ -80,6 +80,69 @@ fn tile_ecology(one: &EcologyParams, n: usize) -> EcologyParams {
     }
 }
 
+/// Stack `n` single-deme ecologies into one batch-major `n_demes == n` object.
+///
+/// Used by ``enable_gpu_particles``: each particle's `EcologyParams` (built
+/// from its own `Params`, `n_demes == 1`) becomes one device batch column.
+#[cfg(feature = "gpu")]
+fn stack_ecologies(parts: &[EcologyParams]) -> Result<EcologyParams, String> {
+    if parts.is_empty() {
+        return Err("enable_gpu_particles needs at least one particle".to_owned());
+    }
+    let mut out = EcologyParams {
+        n_demes: parts.len(),
+        carrying_capacity: Vec::new(),
+        eggs_per_female: Vec::new(),
+        sex_ratio: Vec::new(),
+        sperm_displacement_rate: Vec::new(),
+        low_density_growth_rate: Vec::new(),
+        growth_mode: Vec::new(),
+        external_expected_eggs: Vec::new(),
+        survival_rates: Vec::new(),
+        mating_rates: Vec::new(),
+        reproduction_rates: Vec::new(),
+        fertility: Vec::new(),
+        competition_weights: Vec::new(),
+        equilibrium_distribution: Vec::new(),
+        equilibrium_declared: Vec::new(),
+        migration_rate: Vec::new(),
+        custom_slots: Vec::new(),
+    };
+    for part in parts {
+        if part.n_demes != 1 {
+            return Err(format!(
+                "enable_gpu_particles expects one-deme particle ecologies, got n_demes={}",
+                part.n_demes
+            ));
+        }
+        out.carrying_capacity
+            .extend_from_slice(&part.carrying_capacity);
+        out.eggs_per_female.extend_from_slice(&part.eggs_per_female);
+        out.sex_ratio.extend_from_slice(&part.sex_ratio);
+        out.sperm_displacement_rate
+            .extend_from_slice(&part.sperm_displacement_rate);
+        out.low_density_growth_rate
+            .extend_from_slice(&part.low_density_growth_rate);
+        out.growth_mode.extend_from_slice(&part.growth_mode);
+        out.external_expected_eggs
+            .extend_from_slice(&part.external_expected_eggs);
+        out.survival_rates.extend_from_slice(&part.survival_rates);
+        out.mating_rates.extend_from_slice(&part.mating_rates);
+        out.reproduction_rates
+            .extend_from_slice(&part.reproduction_rates);
+        out.fertility.extend_from_slice(&part.fertility);
+        out.competition_weights
+            .extend_from_slice(&part.competition_weights);
+        out.equilibrium_distribution
+            .extend_from_slice(&part.equilibrium_distribution);
+        out.equilibrium_declared
+            .extend_from_slice(&part.equilibrium_declared);
+        out.migration_rate.extend_from_slice(&part.migration_rate);
+        out.custom_slots.extend(part.custom_slots.iter().cloned());
+    }
+    Ok(out)
+}
+
 /// Snapshot tuple: ``(tick, ind_flat, sperm_flat, rng_words, ecology)``.
 pub type AgeSnapshot<'py> = (
     i64,
@@ -133,6 +196,9 @@ pub struct AgeStructuredSession {
     /// whenever it is `None`.
     #[cfg(feature = "gpu")]
     gpu: Option<crate::gpu::executor::GpuExecutor>,
+    /// Stacked per-particle ecology for ``enable_gpu_particles`` (`n_demes=B`).
+    #[cfg(feature = "gpu")]
+    particle_ecology: Option<EcologyParams>,
 }
 
 #[pymethods]
@@ -328,6 +394,7 @@ impl AgeStructuredSession {
         if self.hooks.n_hooks != 0 {
             executor.set_tick(self.state_tick.max(0) as u64);
         }
+        self.particle_ecology = None;
         self.gpu = Some(executor);
         Ok(())
     }
@@ -407,6 +474,7 @@ impl AgeStructuredSession {
         executor
             .ensure_migration_budget(&self.blueprint)
             .map_err(map_lifecycle_error)?;
+        self.particle_ecology = None;
         self.gpu = Some(executor);
         Ok(())
     }
@@ -444,6 +512,87 @@ impl AgeStructuredSession {
             gpu.tick(&self.blueprint, &ecology, &variants, &deme_variants)
                 .map_err(map_lifecycle_error)?;
         }
+        let ind: Vec<f64> = gpu
+            .download_ind()
+            .map_err(map_lifecycle_error)?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        let sperm: Vec<f64> = gpu
+            .download_sperm()
+            .map_err(map_lifecycle_error)?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        Ok((
+            n_ticks.max(0),
+            PyArray1::from_vec(py, ind),
+            PyArray1::from_vec(py, sperm),
+        ))
+    }
+
+    /// Enable the GPU **particle** path: `B` particles, each with its own
+    /// parameter set, advanced together on the device batch axis.
+    ///
+    /// The initial state and genetics are shared; particles may carry
+    /// declarative hooks (Python callbacks are rejected).
+    ///
+    /// ## Parameters
+    /// - `params_list`: One Python `Params` object per particle.
+    ///
+    /// ## Errors
+    /// Returns ``PyValueError`` for ineligible models, or a runtime error when
+    /// the device is unavailable.
+    #[cfg(feature = "gpu")]
+    #[pyo3(signature = (params_list,))]
+    fn enable_gpu_particles(&mut self, params_list: Vec<Bound<'_, PyAny>>) -> PyResult<()> {
+        let mut parts = Vec::with_capacity(params_list.len());
+        for object in &params_list {
+            parts.push(EcologyParams::from_python(object, 1)?);
+        }
+        self.enable_gpu_particles_ecologies(parts)
+    }
+
+    /// Advance every particle by `n_ticks` and return the stacked final state.
+    ///
+    /// ## Parameters
+    /// - `n_ticks`: Number of ticks (negative treated as zero).
+    ///
+    /// ## Returns
+    /// ``(n_ticks, ind_flat, sperm_flat)`` with one `(2, A, Z)` / `(A, Z, Z)`
+    /// block per particle.
+    ///
+    /// ## Errors
+    /// Returns a runtime error when ``enable_gpu_particles`` was not called.
+    #[cfg(feature = "gpu")]
+    #[pyo3(signature = (n_ticks))]
+    fn run_gpu_particles<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_ticks: i64,
+    ) -> PyResult<EnsembleReadout<'py>> {
+        let Some(mut ecology) = self.particle_ecology.clone() else {
+            return Err(map_lifecycle_error(
+                "run_gpu_particles requires enable_gpu_particles first".to_owned(),
+            ));
+        };
+        let n = ecology.n_demes;
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Err(map_lifecycle_error(
+                "run_gpu_particles requires enable_gpu_particles first".to_owned(),
+            ));
+        };
+        let variants = [self.genetics.clone()];
+        let deme_variants = vec![0usize; n];
+        for _ in 0..n_ticks.max(0) {
+            gpu.tick(&self.blueprint, &ecology, &variants, &deme_variants)
+                .map_err(map_lifecycle_error)?;
+            if let Some(values) = gpu.take_pending_eco() {
+                crate::gpu::executor::GpuExecutor::apply_eco_values(&mut ecology, &values, n)
+                    .map_err(map_lifecycle_error)?;
+            }
+        }
+        self.particle_ecology = Some(ecology);
         let ind: Vec<f64> = gpu
             .download_ind()
             .map_err(map_lifecycle_error)?
@@ -1163,6 +1312,70 @@ fn install_hook_program(session: &mut AgeStructuredSession, next: HookProgram) -
 }
 
 impl AgeStructuredSession {
+    /// Rust-level core of [`Self::enable_gpu_particles`].
+    ///
+    /// ## Parameters
+    /// - `parts`: One single-deme `EcologyParams` per particle.
+    ///
+    /// ## Errors
+    /// Returns ``PyValueError`` for ineligible models, or a runtime error when
+    /// the device is unavailable.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn enable_gpu_particles_ecologies(
+        &mut self,
+        parts: Vec<EcologyParams>,
+    ) -> PyResult<()> {
+        let n = parts.len();
+        if n == 0 {
+            return Err(PyValueError::new_err(
+                "enable_gpu_particles needs at least one particle",
+            ));
+        }
+        if self.blueprint.n_demes != 1 || self.params.n_demes != 1 {
+            return Err(PyValueError::new_err(
+                "GPU particles support a single panmictic model",
+            ));
+        }
+        validate_device_hooks(&self.hooks)?;
+        let ecology = stack_ecologies(&parts).map_err(map_lifecycle_error)?;
+        if ecology
+            .growth_mode
+            .iter()
+            .any(|mode| !(0..=4).contains(mode))
+        {
+            return Err(PyValueError::new_err(
+                "GPU particles do not support custom growth curves",
+            ));
+        }
+        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
+        let ind_one: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
+        let sperm_one: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
+        let ind_all: Vec<f32> = (0..n).flat_map(|_| ind_one.iter().copied()).collect();
+        let sperm_all: Vec<f32> = (0..n).flat_map(|_| sperm_one.iter().copied()).collect();
+        let mut executor = crate::gpu::executor::GpuExecutor::new(
+            context,
+            n,
+            self.blueprint.n_ages,
+            self.blueprint.n_ztypes,
+            &ind_all,
+            &sperm_all,
+        )
+        .map_err(map_lifecycle_error)?;
+        executor.set_seed(self.seed);
+        executor
+            .ensure_migration_budget(&self.blueprint)
+            .map_err(map_lifecycle_error)?;
+        executor
+            .configure_hooks(&self.hooks)
+            .map_err(map_lifecycle_error)?;
+        if self.hooks.n_hooks != 0 {
+            executor.set_tick(self.state_tick.max(0) as u64);
+        }
+        self.particle_ecology = Some(ecology);
+        self.gpu = Some(executor);
+        Ok(())
+    }
+
     /// Snapshot the canonical ECO param values for one deme column.
     ///
     /// ## Parameters
@@ -1433,6 +1646,8 @@ impl AgeStructuredSession {
             seed,
             #[cfg(feature = "gpu")]
             gpu: None,
+            #[cfg(feature = "gpu")]
+            particle_ecology: None,
         }
     }
 

@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 32 轮：**APPROVED**（§73；§71.5 selector 语义修复——panmictic 路径 deme=0，空间仍 deme=b） |
-| 待回执 | §75（第 33 轮 P9b：粒子 replicate 轴，`P×R` 拍平，`enable_gpu_particles(param_sets, n_replicates=R)`） |
-| 主 agent 处理 | 第 33 轮：P9b 已实现并自测；待复核 |
-| 待 evaluator 动作 | 按 §74 复核，把第 33 轮结论写入 §75 |
+| 最近回执 | 第 33 轮：**APPROVED**（§75；P9b 粒子 replicate 轴 P×R——顺序/统计等价/钩子/形状/错误路径） |
+| 待回执 | §77（第 34 轮 P9c：粒子 `state_tick` 语义 + ABC 迭代间复用执行器） |
+| 主 agent 处理 | 第 34 轮：P9c 已实现并自测；P9 增强第 2 项（灭绝跳阶段）待做 |
+| 待 evaluator 动作 | 按 §76 复核，把第 34 轮结论写入 §77 |
 
 ## 0. 一句话目标
 
@@ -1926,6 +1926,56 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 初始状态/genetics 整个 `P·R` 共享。
 
 结论请追加为 **§75**。
+
+---
+
+## 76. 第 34 轮交接 — P9c：粒子 `state_tick` 语义 + ABC 迭代间复用执行器
+
+- 日期：2026-09-22
+- 背景：§75 APPROVED。按用户确认，P9 增强中「初始状态/genetics」不需要；本轮先做 **(3) `state_tick` 语义** 与 **(4) ABC 迭代间复用执行器**；(2) 灭绝 particle 跳阶段另轮。
+- 风险分类：**高风险**（设备执行器复用/状态重置语义、公开返回 tick 变化）。
+
+### 76.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增 `GpuExecutor::current_tick()`（设备 tick 读数）。 |
+| `rust/src/sessions/age_structured.rs` | `enable_gpu_particles_ecologies_replicated`：当已有执行器且 `n_batch` 不变时**复用**（`restore_state` 重置状态与 tick、`configure_hooks` 刷新钩子），否则重建；`run_gpu_particles` 返回**累计设备 tick**（`current_tick`），并注明「粒子运行是独立实验，不推进会话本体 state/tick」。 |
+| `src/natal/frontend/population/age_structured.py` | `run_gpu_particles` 文档说明累计 tick 与独立实验语义；`enable_gpu_particles` 说明同 batch 复用会重置状态。 |
+| 测试 | Rust `session_gpu_particles_reuse_and_cumulative_tick`（首次 tick=2、二次 tick=5；换参数重启用后 tick 重置为 2 且与独立 CPU 对照）；Python `test_gpu_particles_cumulative_tick_and_reuse`（累计 tick + 复用重置 + 形状）。 |
+
+### 76.2 行为
+
+- **tick 语义**：`run_gpu_particles` 返回**累计设备 tick**（多次调用累加）；粒子运行不改变本体 `Population.tick`/state（与 ensemble 一样是独立实验），文档已明确。
+- **执行器复用**：同一 batch 大小（`P·R`）连续启用时，复用已编译的 CUDA context/kernels，仅重置设备状态与 tick、刷新钩子；batch 变化时重建。对 ABC-SMC 逐迭代调用可省去 NVRTC 重编译。
+- 种子/随机流：复用不改变 seed，重置 tick 后 counter-based RNG 与全新构建一致（可复现）。
+- 既有路径不变。
+
+### 76.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **232 passed, 0 failed**（含新增复用/tick 用例） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3628 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **3012/3116 = 96.66%** |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 76.4 请 evaluator 独立核对
+
+- **复用正确性**：连续启用（同 batch、换参数）后，设备状态确实重置为初始状态、tick 重置、钩子刷新；结果与「全新构建」及独立 CPU session 一致。
+- **累计 tick**：多次 `run_gpu_particles` 的返回值累加；与设备内部 tick 一致；本体 `Population.tick`/state 不被推进。
+- **随机可复现**：复用路径与重建路径在同 seed 下逐位一致（设备 RNG 由 seed/tick 决定）。
+- **无回归**：既有 P9/P9b/P7/空间/phase0。
+- CPU 不变性 / 门禁 / 覆盖率同既往口径。
+
+### 76.5 残余风险（非阻塞）
+
+- **P9 增强第 2 项（灭绝 particle/replicate 跳阶段）尚未实现**（本轮范围外，下一轮）。
+- 复用仅在 batch 大小不变时生效；P 或 R 改变会重建。
+- 初始状态/genetics 仍整个 `P·R` 共享（用户已确认不需要 per-particle）。
+
+结论请追加为 **§77**。
 
 ---
 
@@ -3962,3 +4012,69 @@ P9 per-particle 参数公开入口在受支持路径上与独立 CPU session 逐
 
 §71.5 selector 语义修复正确且完整，panmictic（含 particle）与空间路径的 selector 语义分别与各自 CPU 参考一致，
 无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `b9a19df` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 75. 第 33 轮结论（evaluator 独立执行，2026-09-22，HEAD=`140e273`）
+
+### 75.1 裁定：**APPROVED**
+
+P9b 粒子 replicate 轴（`P×R` 拍平，batch 索引 `p·R+r`，生态列按 particle 重复 R 份）经独立复核：顺序、确定性
+tiling、随机 replicate 流独立性/统计等价、钩子（含 per-particle `SET_PARAM`）、公开 API 形状与错误路径均正确；
+既有 P9/P7/空间/phase0 无回归；CPU golden reference 未改。
+
+### 75.2 独立核对
+
+- **顺序/tiling（确定性）**：读码确认 `expanded[p*R + r] = parts[p]`、`n_batch=P*R`，返回 `(P,R,…)`。
+  独立 Python E2E `/tmp/l3_particles_reps.py`（P=2,R=3）验证每个 `(p,r)` 块与「particle p 的独立 CPU run」一致，
+  且同一 particle 的 R 个确定性块**逐位相同**、不同 particle 互异。作者 Rust 用例（P=2,R=3）亦通过。
+- **随机 replicate 独立性/统计等价（重点）**：新增 `evaluator_gpu_particles_replicates_are_independent_and_statistically_match_cpu`：
+  P=1、R=60、随机模型 3 tick，断言 R 条轨迹**不全相同**（证明每条流独立、未被 b 别名化），并与 60 个独立 seed 的
+  CPU session 比较——`t=-0.98`、方差比 **0.997**、KS **0.167**（< n=60 的 5% 临界 ~0.248）。Python 侧随机 6 replicate
+  的总和为 [865,908,842,872,889,870]（明显不同）。
+- **钩子 × R**：新增 `evaluator_gpu_particles_replicates_with_hooks_match_cpu`：P=2、R=2、程序 `SET_PARAM+SCALE`，
+  每个 `(p,r)` 与独立 CPU session 逐 cell 一致（同 particle 的 R 个确定性块相同，per-particle 参数生效）。
+- **错误路径**：`evaluator_gpu_particles_reject_zero_replicates`（R=0 → `Err`）；Python `n_replicates=0` → `ValueError`；
+  空列表/未启用仍报错。Rust 用 `checked_mul` 防 `P·R` 溢出。
+- **API 形状**：Python E2E 确认 `ind (P,R,2,A,Z)`、`sperm (P,R,A,Z,Z)`（R=1 仍带 replicate 轴）。
+
+### 75.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **231 passed**（作者 228 + evaluator 3） |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3627 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| Rust `src/gpu/**` 覆盖率 | 本轮 `rust/src/gpu/**` 零改动；沿用 §73 实测 **3009/3113 = 96.66%** |
+| Python 新增可执行行 | **41/41 = 100%**（backend 6/6、frontend 35/35） |
+| 受保护用例 | `executor.rs`/`kernels.rs`/`spatial_session.rs` 本轮 0 改动 |
+
+### 75.4 逐条发现（非阻塞）
+
+1. **low / 每个 ABC 迭代重建执行器**（§74.5 已知）：每次 `enable_gpu_particles` 重建 context 并重传参数；
+   跨迭代复用可后续优化。
+2. **low / `run_gpu_particles` 不更新会话 `state_tick`**（P9 已知边界）。
+3. **low / P9 v1 边界**：已灭绝 particle/replicate 不跳阶段；初始状态/genetics 整个 `P·R` 共享。
+4. **low / 测试专用 wrapper**：1 参 `enable_gpu_particles_ecologies` 现为 `#[cfg(all(feature="gpu", test))]`；
+   非测试构建不可用（无产品调用者，正确）。
+
+### 75.5 阻塞项
+
+无。
+
+### 75.6 证据来源
+
+- **独立运行**：上表门禁、3 个 Rust P9b 用例、`/tmp/l3_particles_reps.py`、扩展重编、Python 新增行覆盖统计、`src/gpu` 差异确认。
+- **仅代码阅读**：`enable_gpu_particles_ecologies_replicated`（P×R 展开/`n_batch`/tile/`checked_mul`）、pyo3 签名与 1 参 wrapper、
+  backend/frontend 透传与 reshape、`GpuExecutor` 以 batch 索引作为 RNG cell。
+
+### 75.7 结论
+
+P9b `P×R` replicate 轴顺序正确、随机流独立且与独立 CPU session 统计等价、钩子与 API 形状/错误路径正确，
+无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `140e273` 与被审测试集；不声称任何历史基线失败消失）。
+§75.4 为已知非阻塞边界。

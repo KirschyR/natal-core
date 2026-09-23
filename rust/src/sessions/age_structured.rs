@@ -560,12 +560,16 @@ impl AgeStructuredSession {
 
     /// Advance every particle by `n_ticks` and return the stacked final state.
     ///
+    /// The particle run is a separate experiment: the owning session's own
+    /// state and `state_tick` are not advanced. The returned tick is the
+    /// **cumulative device tick** (so repeated calls report the true tick).
+    ///
     /// ## Parameters
     /// - `n_ticks`: Number of ticks (negative treated as zero).
     ///
     /// ## Returns
-    /// ``(n_ticks, ind_flat, sperm_flat)`` with one `(2, A, Z)` / `(A, Z, Z)`
-    /// block per particle.
+    /// ``(device_tick, ind_flat, sperm_flat)`` with one `(2, A, Z)` /
+    /// `(A, Z, Z)` block per `(particle, replicate)`.
     ///
     /// ## Errors
     /// Returns a runtime error when ``enable_gpu_particles`` was not called.
@@ -598,6 +602,7 @@ impl AgeStructuredSession {
             }
         }
         self.particle_ecology = Some(ecology);
+        let tick = gpu.current_tick() as i64;
         let ind: Vec<f64> = gpu
             .download_ind()
             .map_err(map_lifecycle_error)?
@@ -611,7 +616,7 @@ impl AgeStructuredSession {
             .map(f64::from)
             .collect();
         Ok((
-            n_ticks.max(0),
+            tick,
             PyArray1::from_vec(py, ind),
             PyArray1::from_vec(py, sperm),
         ))
@@ -1388,13 +1393,29 @@ impl AgeStructuredSession {
                 "GPU particles do not support custom growth curves",
             ));
         }
-        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let ind_one: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
         let sperm_one: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
         let ind_all: Vec<f32> = (0..n_batch).flat_map(|_| ind_one.iter().copied()).collect();
         let sperm_all: Vec<f32> = (0..n_batch)
             .flat_map(|_| sperm_one.iter().copied())
             .collect();
+
+        // Reuse the resident executor/context/kernels when the batch size is
+        // unchanged (successive ABC-SMC iterations): reset the state, refresh
+        // the hooks, and keep the compiled kernels instead of recompiling.
+        if let Some(gpu) = self.gpu.as_mut() {
+            if gpu.n_batch() == n_batch {
+                let tick = self.state_tick.max(0) as u64;
+                gpu.restore_state(&ind_all, &sperm_all, tick)
+                    .map_err(map_lifecycle_error)?;
+                gpu.configure_hooks(&self.hooks, true)
+                    .map_err(map_lifecycle_error)?;
+                self.particle_ecology = Some(ecology);
+                return Ok(());
+            }
+        }
+
+        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let mut executor = crate::gpu::executor::GpuExecutor::new(
             context,
             n_batch,

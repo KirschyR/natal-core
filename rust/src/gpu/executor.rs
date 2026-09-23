@@ -2436,6 +2436,14 @@ impl GpuExecutor {
     pub fn n_batch(&self) -> usize {
         self.n_batch
     }
+
+    /// Number of device ticks completed since the executor was built.
+    ///
+    /// ## Returns
+    /// The device tick counter (advanced once per completed `tick`).
+    pub fn current_tick(&self) -> u64 {
+        self.tick
+    }
 }
 
 /// Hash the frozen migration CSR so the device cache can detect a change.

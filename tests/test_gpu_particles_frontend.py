@@ -106,6 +106,28 @@ def test_enable_gpu_particles_rejects_zero_replicates() -> None:
         pop.enable_gpu_particles([{"carrying_capacity": 300.0}], n_replicates=0)
 
 
+def test_gpu_particles_cumulative_tick_and_reuse() -> None:
+    """The returned tick is cumulative and re-enabling resets the state."""
+    pop = _build_pop("__gpu_particles_reuse__")
+    try:
+        pop.enable_gpu_particles(
+            [{"carrying_capacity": 300.0}, {"carrying_capacity": 800.0}]
+        )
+        first, _, _ = pop.run_gpu_particles(2)
+        second, _, _ = pop.run_gpu_particles(3)
+        # Re-enabling with the same batch size reuses the executor and resets.
+        pop.enable_gpu_particles(
+            [{"carrying_capacity": 100.0}, {"carrying_capacity": 900.0}]
+        )
+        reset, ind, _ = pop.run_gpu_particles(2)
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    assert first == 2
+    assert second == 5, "tick must be cumulative across calls"
+    assert reset == 2, "re-enable resets the device tick"
+    assert ind.shape == (2, 1, 2, 4, 3)
+
+
 def test_particles_backend_requires_gpu_build() -> None:
     """A CPU-only extension build gives an actionable particle error."""
     from natal.backends.rust.rust_backend import RustLifecycleBackend

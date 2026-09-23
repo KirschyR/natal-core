@@ -1160,6 +1160,10 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         device batch is the flattened ``(particle, replicate)`` pair). The
         initial state and genetics are shared across the whole batch.
 
+        Re-calling with the same batch size (typical for successive ABC-SMC
+        iterations) reuses the resident device executor and resets the state,
+        avoiding a kernel rebuild.
+
         Args:
             param_sets: One mapping per particle, keyed by ``Params`` field
                 names (e.g. ``carrying_capacity``, ``eggs_per_female``,
@@ -1204,6 +1208,10 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         self, n_ticks: int
     ) -> Tuple[int, NDArray[np.float64], NDArray[np.float64]]:
         """Advance every GPU particle and return the stacked final state.
+
+        The particle run is a separate experiment: this population's own state
+        and ``tick`` are **not** advanced. The returned tick is the cumulative
+        device tick, so repeated calls report the true tick.
 
         Args:
             n_ticks: Number of ticks to advance every particle.

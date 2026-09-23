@@ -217,8 +217,8 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **228**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
-  （跳过硬件）、`ruff`、`pyright`、`pytest`（3627）、`phase0_baseline.py --check`。
+  `cargo test --features gpu`（当前 **232**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  （跳过硬件）、`ruff`、`pyright`、`pytest`（3628）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
   `src/gpu/../../tests/...`），当前聚合 **96.66%**（executor 95.9%、kernels 97.3%、probe 96.1%）；新模块需 ≥95%。
@@ -277,7 +277,8 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P7.4a | 空间钩子（per-deme selector + per-batch stop 掩码/恢复 + 迁移跳过）（§68） | APPROVED（§69） |
 | P9 | GPU particle：per-particle 参数（`enable_gpu_particles`/`run_gpu_particles`）（§70） | APPROVED（§71） |
 | P9-fix | 粒子批次钩子 selector 语义统一为 deme=0（空间仍 deme=b）（§72） | APPROVED（§73） |
-| P9b | 粒子内 replicate 轴（`P×R` 拍平，面向 ABC-SMC/参数 combo 批）（§74） | **已实现，待 §75 复核** |
+| P9b | 粒子内 replicate 轴（`P×R` 拍平，面向 ABC-SMC/参数 combo 批）（§74） | APPROVED（§75） |
+| P9c | 粒子 `state_tick` 语义 + ABC 迭代间复用执行器（§76） | **已实现，待 §77 复核** |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -344,8 +345,8 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 ### 11.6 接手状态快照（2026-09-21，上下文切换）
 
 - **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.3 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67）。
-- **最近回执**：§73（P9 selector 修复）**APPROVED**。
-- **待回执**：**§75**（P9b：粒子 replicate 轴）——已实现并自测，**未批准**。
+- **最近回执**：§75（P9b）**APPROVED**。
+- **待回执**：**§77**（P9c：state_tick + 迭代复用）——已实现并自测；**P9 增强第 2 项（灭绝跳阶段）尚未开始**。
 - **后续未开始**：**P7.4b**（ensemble 钩子，语义待定；用户已澄清其大 B 场景为 per-particle 参数，由 P9 承接）；**B7** 低优先；
   **E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
 - **门禁基线（§69 时）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **221**、

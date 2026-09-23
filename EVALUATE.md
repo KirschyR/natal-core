@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 33 轮：**APPROVED**（§75；P9b 粒子 replicate 轴 P×R——顺序/统计等价/钩子/形状/错误路径） |
-| 待回执 | §77（第 34 轮 P9c：粒子 `state_tick` 语义 + ABC 迭代间复用执行器） |
-| 主 agent 处理 | 第 34 轮：P9c 已实现并自测；P9 增强第 2 项（灭绝跳阶段）待做 |
-| 待 evaluator 动作 | 按 §76 复核，把第 34 轮结论写入 §77 |
+| 最近回执 | 第 34 轮：**APPROVED**（§77；P9c 粒子累计 tick + ABC 迭代间执行器复用/重置） |
+| 待回执 | §79（第 35 轮 P9d：灭绝 particle/replicate 跳过后续 stage，per-batch 活跃掩码） |
+| 主 agent 处理 | 第 35 轮：P9d 已实现并自测；待复核 |
+| 待 evaluator 动作 | 按 §78 复核，把第 35 轮结论写入 §79 |
 
 ## 0. 一句话目标
 
@@ -1976,6 +1976,60 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 初始状态/genetics 仍整个 `P·R` 共享（用户已确认不需要 per-particle）。
 
 结论请追加为 **§77**。
+
+---
+
+## 78. 第 35 轮交接 — P9d：灭绝 particle/replicate 跳过后续 stage（per-batch 活跃掩码）
+
+- 日期：2026-09-23
+- 背景：§77 APPROVED。按用户确认，P9 增强剩最后一项：让已灭绝的 particle/replicate 不再消耗 stage 算力。
+- 风险分类：**高风险**（修改多个 stage 内核签名与执行路径、共享所有 GPU 路径）。
+
+### 78.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/kernels.rs` | 新增 `mark_active` 内核（按 batch 求和 `2·A·Z` 的 `ind`，`active[b] = total>0`）。给 `age_shift`（对 inactive 做 copy-through 以在 swap 后保持全 0）、`density_scaling`、`recruit_factor`、`survival_scale_ind`、`survival_scale_sperm`、`survival_stochastic`、`discrete_survival` 增 `const int* active_mask, int use_active` 参数：`use_active` 为真且该 batch inactive 时跳过（`age_shift` 例外，写 `dst=src`）。所有启动器增参；`Kernels` 增 `mark_active` 字段/加载/启动。 |
+| `rust/src/gpu/executor.rs` | 增字段 `active_mask`（`n_batch`，初值全 1）与 `stage_masking`（默认 false）；新增 `set_stage_masking(bool)`；`run_tick_sequence` 在 `stage_masking` 时先跑 `mark_active`；`age_tick`/`density_scaling_device`/`survival_tick`/`discrete_survival_tick` 传 `&active_mask` 与 `stage_masking`。 |
+| `rust/src/sessions/age_structured.rs` | `enable_gpu_particles_ecologies_replicated`（含复用分支）在 `self.hooks.n_hooks == 0` 时启用 `set_stage_masking(true)`。 |
+| 测试 | 更新内核单元测试的启动器调用（传 `use_active=false`）；新增 `session_gpu_particles_extinct_batches_match_cpu`（P=3，其中一个 `survival_rates=0` 于首 tick 后灭绝，4 tick 逐 particle 与独立 CPU session 对照）。 |
+
+### 78.2 行为与安全边界
+
+- **仅无钩子程序启用**：钩子可能让全 0 状态复活，故 `n_hooks==0` 才开启跳阶段；带钩子的粒子路径保持原样。
+- **灭绝判定**：每 tick 开始时按 `ind` 总和为 0 判定（设备归约，无 D2H）；灭绝后状态恒为 0，后续 tick 被跳过。
+- **`age_shift` copy-through**：因 aging 是 out-of-place + 整体 swap，inactive batch 必须把 `src` 复制到 `dst` 以在 swap 后仍为 0（不是纯跳过）。
+- **正确性**：灭绝 batch 的后续状态恒为 0，CPU（独立 session）在 0 上运算结果亦为 0；counter-based RNG 按 (cell,tick,stage) 独立，跳过不影响其他 batch。`reproduction` 对全 0 本就提前返回，故只对 density/survival/aging 生效。
+- **对既有路径零影响**：`use_active=false` 时内核行为与之前逐位一致（单群体/ensemble/空间均未开启），内核签名新增参数不改变数值。
+- 不省算力的部分：`age_shift` 仍需 copy-through（O(state)）；`reproduction` 对 0 本就廉价。
+
+### 78.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **236 passed, 0 failed**（含新增灭绝对照用例） |
+| `cargo test` / `check_rust.py` / `cargo clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3628 passed** / bit-identical |
+| 覆盖率（严格过滤 `rust/src/gpu/**`，排除 `/tests/`） | 聚合 **3109/3215 = 96.70%**；executor 95.9%、kernels 97.3%、probe 96.1%，其余 100% |
+| CPU 不变性 | `kernels/model/contracts` 工作树零改动 |
+
+### 78.4 请 evaluator 独立核对
+
+- **正确性（重点）**：自造多个/部分灭绝的 particle 批次（含随机与确定性、含连续采样），与独立 CPU session 逐 tick 对照；确认跳阶段不改变结果；确认灭绝后多 tick 仍保持一致。
+- **边界**：`age_shift` copy-through 正确（swap 后 inactive 仍为 0）；`use_active=false` 时既有路径逐位不变。
+- **钩子路径不使用掩码**：带钩子的粒子/单群体/空间路径 `stage_masking=false`，行为与 §77 一致。
+- **量化收益（可选）**：构造大量灭绝粒子，比较开/关掩码的墙面时间（共享 GPU，先记录 nvidia-smi）。
+- **无回归**：P7/P9/P9b/P9c/空间/phase0。
+- CPU 不变性 / 门禁 / 覆盖率同既往口径。
+
+### 78.5 残余风险（非阻塞）
+
+- 掩码仅覆盖 density/survival/aging 与 discrete survival；`reproduction` 对 0 已提前返回，未加掩码。
+- `age_shift` 对 inactive 仍做 copy-through（不省该部分带宽）。
+- 灭绝判定按 tick 粒度：本 tick 中途灭绝的 batch 仍会算完本 tick。
+- 仅 `enable_gpu_particles` 开启；单群体/ensemble/空间未开启（可按需扩展）。
+
+结论请追加为 **§79**。
 
 ---
 
@@ -4078,3 +4132,68 @@ tiling、随机 replicate 流独立性/统计等价、钩子（含 per-particle 
 P9b `P×R` replicate 轴顺序正确、随机流独立且与独立 CPU session 统计等价、钩子与 API 形状/错误路径正确，
 无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `140e273` 与被审测试集；不声称任何历史基线失败消失）。
 §75.4 为已知非阻塞边界。
+
+---
+
+## 77. 第 34 轮结论（evaluator 独立执行，2026-09-23，HEAD=`15ca35a`）
+
+### 77.1 裁定：**APPROVED**
+
+P9c 的「粒子运行返回累计设备 tick」与「同 batch 复用时重置状态/tick 并刷新钩子」经独立复核：复用结果与全新构建
+**逐位一致**（含随机模型，证明 RNG 因 tick 重置而复位），累计 tick 正确且不推进会话 `state_tick`，batch 变化走重建。
+既有 P9/P9b/P7/空间/phase0 无回归；CPU golden reference 未改。
+
+### 77.2 独立核对
+
+- **复用 = 全新构建（确定性 + 钩子刷新）**：新增 `evaluator_gpu_particles_reuse_refreshes_state_and_hooks`：
+  全新 session（SCALE 0.5，run 2）与复用 session（先 SCALE 0.9 run 1，再以同 batch/同参数重新 enable 为 SCALE 0.5，run 2）
+  的 ind/sperm **逐位一致**，且复用后 tick 重置为 2、会话 `state_tick` 保持 0。既覆盖状态重置，也覆盖 `configure_hooks` 的钩子刷新（若未刷新会残留 0.9）。
+- **随机 RNG 复位**：新增 `evaluator_gpu_particles_reuse_resets_rng_for_stochastic`：随机模型、P=2、R=2，
+  预热后再复用 reset 的 ind 与全新构建**逐位一致**——验证 `restore_state` 重置 tick 使 counter-based RNG 复位。
+- **batch 变化重建**：新增 `evaluator_gpu_particles_batch_change_rebuilds_executor`：先 P=2 再 P=3，重建后结果与全新 P=3 构建逐位一致、tick 重置。
+- **累计 tick / 会话 tick 独立**：读码 + 独立 Python E2E `/tmp/l3_particles_reuse.py`：`run(2)=2`、`run(3)=5`（累加），
+  `pop.tick==0`（粒子运行是独立实验）；re-enable 新参数后 `run(2)=2` 且与独立 CPU 一致；随机复用与全新构建 `np.array_equal`。
+- **残余状态核对**：`restore_state` 重置 `ind/sperm/tick`；`saved_mask` 每 tick 由 `reset_stop_mask` 清空；`pending_eco`
+  每 tick 被 `take_pending_eco` 消费；`stopped` 不被粒子路径读取。复用条件 `n_batch` 相同即可（同会话 blueprint 固定）。
+- **seed 核对**：`reseed` 仅重置 CPU `rng`，不修改 `self.seed`；GPU 路径始终用不可变的 `self.seed`，复用不引入 seed 漂移。
+
+### 77.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **235 passed**（作者 232 + evaluator 3） |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3628 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3012/3116 = 96.66%**；executor 95.90%、kernels 97.27%、probe 96.13%、其余 100% |
+| Python 新增可执行行 | 本轮仅 frontend 文档字符串新增（无新可执行源码行） |
+| 受保护用例 | `executor.rs`/`kernels.rs`/`spatial_session.rs` 本轮 0 改动 |
+
+### 77.4 逐条发现（非阻塞）
+
+1. **low / 复用不重置 `stopped`/`pending_eco`/`saved_ind`**：静态核对表明这些字段要么每 tick 被消费/清空，要么不被
+   粒子路径读取，故无影响；建议后续在 `restore_state` 内显式清零以增强健壮性。
+2. **low / 复用仅按 `n_batch` 判定**：若现有执行器来自 `enable_gpu`/`enable_gpu_ensemble` 且 batch 恰好相同，也会被复用
+   （功能等价，因 blueprint 相同）；语义上略宽。建议按入口标记或加注释。
+3. **low / P9 增强第 2 项（灭绝 particle/replicate 跳阶段）未实现**（§76.5 已声明，下一轮）。
+4. **low / 粒子路径的 STOP_IF**：`run_gpu_particles` 不消费 `take_stopped`，含 stop 钩子的粒子运行 tick 可能因冻结而不累加；
+   非本轮范围，建议文档/后续处理。
+
+### 77.5 阻塞项
+
+无。
+
+### 77.6 证据来源
+
+- **独立运行**：上表门禁、3 个 Rust P9c 用例、`/tmp/l3_particles_reuse.py`、扩展重编、覆盖率采集。
+- **仅代码阅读**：`current_tick`、`restore_state`、`enable_gpu_particles_ecologies_replicated` 复用分支、
+  `run_gpu_particles` 累计 tick、`reseed`/`self.seed`、`preset_stop_mask`/`pending_eco` 生命周期。
+
+### 77.7 结论
+
+P9c 累计 tick 与执行器复用/重置语义正确、可复现、无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD
+`15ca35a` 与被审测试集；不声称任何历史基线失败消失）。§77.4 为已知非阻塞边界。

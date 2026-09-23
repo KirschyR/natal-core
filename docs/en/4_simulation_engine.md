@@ -382,6 +382,10 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
   Particles are panmictic, so a hook's deme selector is evaluated against
   **deme 0** for every particle (matching `B` independent single-population CPU
   runs).
+- **Extinct particles**: for hook-free programs, a particle whose state has
+  gone extinct (all zeros) is skipped by the stage kernels, so dead particles
+  stop consuming compute (a hook could revive a zero state, so this is only
+  applied when no hooks are installed).
 - **Eligibility**: panmictic, built-in growth modes (0–4). `enable_gpu_particles`
   raises `ValueError` for an empty list or an ineligible model, and
   `RuntimeError` when the extension lacks GPU support.

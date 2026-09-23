@@ -2809,3 +2809,308 @@ fn session_gpu_particles_reuse_and_cumulative_tick() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for P9c (executor reuse + cumulative tick).
+// ---------------------------------------------------------------------------
+
+/// A global SCALE program with the given factor (one op at `first`).
+fn particle_scale_program(factor: f64) -> HookProgram {
+    let mut q = HookProgram::default();
+    q.n_events = 4;
+    q.n_hooks = 1;
+    q.hook_offsets = vec![0, 1, 1, 1, 1];
+    q.op_offsets = vec![0, 1];
+    q.op_types = vec![0];
+    q.zidx_offsets = vec![0, 2];
+    q.zidx_data = vec![0, 1];
+    q.age_offsets = vec![0, 4];
+    q.age_data = vec![0, 1, 2, 3];
+    q.sex_masks = vec![true, true];
+    q.params = vec![factor];
+    q.condition_offsets = vec![0, 0];
+    q.deme_selector_types = vec![0];
+    q.deme_selector_offsets = vec![0, 0];
+    q.convert_source_z = vec![-1];
+    q.convert_target_z = vec![-1];
+    q
+}
+
+fn particle_ind_bits(arr: &pyo3::Bound<'_, numpy::PyArray1<f64>>) -> Vec<u64> {
+    arr.readonly()
+        .as_slice()
+        .expect("ind slice")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
+#[test]
+fn evaluator_gpu_particles_reuse_refreshes_state_and_hooks() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let particles = vec![particle_ecology(&base, 0), particle_ecology(&base, 1)];
+
+        // Reference: a fresh executor with SCALE 0.5, run 2 ticks.
+        let mut fresh = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        fresh.hooks = particle_scale_program(0.5);
+        fresh
+            .enable_gpu_particles_ecologies_replicated(particles.clone(), 1)
+            .expect("fresh enable");
+        let (fresh_tick, fresh_ind, fresh_sperm) =
+            fresh.run_gpu_particles(py, 2).expect("fresh run");
+        assert_eq!(fresh_tick, 2);
+        assert_eq!(
+            fresh.state_tick, 0,
+            "particle run must not advance session tick"
+        );
+
+        // Reuse: start with SCALE 0.9, advance one tick, then re-enable with
+        // SCALE 0.5 and the same batch size. The executor must reset state/tick
+        // and refresh the hook program to match the fresh build.
+        let mut reuse = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        reuse.hooks = particle_scale_program(0.9);
+        reuse
+            .enable_gpu_particles_ecologies_replicated(particles.clone(), 1)
+            .expect("enable");
+        let (warm_tick, _, _) = reuse.run_gpu_particles(py, 1).expect("warm");
+        assert_eq!(warm_tick, 1);
+        reuse.hooks = particle_scale_program(0.5);
+        reuse
+            .enable_gpu_particles_ecologies_replicated(particles.clone(), 1)
+            .expect("reuse enable");
+        let (reuse_tick, reuse_ind, reuse_sperm) =
+            reuse.run_gpu_particles(py, 2).expect("reuse run");
+        assert_eq!(reuse_tick, 2, "reuse must reset the device tick");
+        assert_eq!(reuse.state_tick, 0, "reuse must not advance session tick");
+
+        assert_eq!(
+            particle_ind_bits(&fresh_ind),
+            particle_ind_bits(&reuse_ind),
+            "reuse must reproduce the fresh build bit-for-bit"
+        );
+        let fs: Vec<u64> = fresh_sperm
+            .readonly()
+            .as_slice()
+            .expect("sperm")
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        let rs: Vec<u64> = reuse_sperm
+            .readonly()
+            .as_slice()
+            .expect("sperm")
+            .iter()
+            .map(|v| v.to_bits())
+            .collect();
+        assert_eq!(fs, rs, "reuse sperm must match the fresh build");
+    });
+}
+
+#[test]
+fn evaluator_gpu_particles_reuse_resets_rng_for_stochastic() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (mut blueprint, base, genetics) = fixture();
+        blueprint.stochastic = true;
+        let (ind, sperm) = initial_state();
+        let particles = vec![particle_ecology(&base, 0), particle_ecology(&base, 1)];
+
+        let mut fresh = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        fresh
+            .enable_gpu_particles_ecologies_replicated(particles.clone(), 2)
+            .expect("fresh enable");
+        let (ftick, find, _) = fresh.run_gpu_particles(py, 3).expect("fresh run");
+        assert_eq!(ftick, 3);
+
+        // Same experiment but with a warm-up run and a reuse reset in between.
+        let mut reuse = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        reuse
+            .enable_gpu_particles_ecologies_replicated(particles.clone(), 2)
+            .expect("enable");
+        reuse.run_gpu_particles(py, 2).expect("warm");
+        reuse
+            .enable_gpu_particles_ecologies_replicated(particles.clone(), 2)
+            .expect("reuse enable");
+        let (rtick, rind, _) = reuse.run_gpu_particles(py, 3).expect("reuse run");
+        assert_eq!(rtick, 3, "reuse must reset the tick");
+        assert_eq!(
+            particle_ind_bits(&find),
+            particle_ind_bits(&rind),
+            "stochastic reuse must reset RNG/state to reproduce the fresh build"
+        );
+    });
+}
+
+#[test]
+fn evaluator_gpu_particles_batch_change_rebuilds_executor() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let two = vec![particle_ecology(&base, 0), particle_ecology(&base, 1)];
+        let three = vec![
+            particle_ecology(&base, 0),
+            particle_ecology(&base, 1),
+            particle_ecology(&base, 2),
+        ];
+
+        // Fresh P=3 reference.
+        let mut fresh = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        fresh
+            .enable_gpu_particles_ecologies_replicated(three.clone(), 1)
+            .expect("fresh enable");
+        let (ftick, find, _) = fresh.run_gpu_particles(py, 2).expect("fresh run");
+        assert_eq!(ftick, 2);
+
+        // Change the batch size (2 -> 3): the executor must be rebuilt.
+        let mut changed = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        changed
+            .enable_gpu_particles_ecologies_replicated(two, 1)
+            .expect("enable P=2");
+        changed.run_gpu_particles(py, 2).expect("run P=2");
+        changed
+            .enable_gpu_particles_ecologies_replicated(three, 1)
+            .expect("re-enable P=3");
+        let (ctick, cind, _) = changed.run_gpu_particles(py, 2).expect("run P=3");
+        assert_eq!(ctick, 2, "rebuild resets the tick");
+        assert_eq!(
+            particle_ind_bits(&find),
+            particle_ind_bits(&cind),
+            "batch-change rebuild must match a fresh build"
+        );
+    });
+}
+
+#[test]
+fn session_gpu_particles_extinct_batches_match_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let base = make_session(
+            blueprint.clone(),
+            params,
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        )
+        .params
+        .clone();
+        let viable = base.clone();
+        // Zero survival drives this particle extinct after the first tick, so
+        // the device skips its later stages via the active mask.
+        let mut extinct = base.clone();
+        extinct.survival_rates = vec![0.0; extinct.survival_rates.len()];
+        let particles = vec![viable.clone(), extinct.clone(), viable.clone()];
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.enable_gpu_particles_ecologies(particles.clone())
+            .expect("enable particles");
+        let (_, ind_flat, sperm_flat) = gpu.run_gpu_particles(py, 4).expect("run particles");
+        let ind_values: Vec<f64> = ind_flat.readonly().as_slice().expect("ind slice").to_vec();
+        let sperm_values: Vec<f64> = sperm_flat
+            .readonly()
+            .as_slice()
+            .expect("sperm slice")
+            .to_vec();
+        let ind_block = 2 * 4 * 2;
+        let sperm_block = 4 * 2 * 2;
+
+        for (p_index, part) in particles.iter().enumerate() {
+            let mut cpu = make_session(
+                blueprint.clone(),
+                part.clone(),
+                genetics.clone(),
+                ind.clone(),
+                sperm.clone(),
+            );
+            cpu.run_inner(py, 4, 0, None, 0).expect("cpu run");
+            for (cell, (got, want)) in ind_values[p_index * ind_block..(p_index + 1) * ind_block]
+                .iter()
+                .zip(cpu.state_ind.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "particle {p_index} ind[{cell}]: device {got} vs host {want}"
+                );
+            }
+            for (cell, (got, want)) in sperm_values
+                [p_index * sperm_block..(p_index + 1) * sperm_block]
+                .iter()
+                .zip(cpu.state_sperm.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                let tolerance = 1.2e-5f32 * want.abs().max(1.0);
+                assert!(
+                    (got - want).abs() <= tolerance,
+                    "particle {p_index} sperm[{cell}]: device {got} vs host {want}"
+                );
+            }
+        }
+    });
+}

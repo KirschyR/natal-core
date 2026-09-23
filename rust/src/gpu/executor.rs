@@ -72,6 +72,11 @@ pub struct GpuExecutor {
     history: Option<DeviceHistory>,
     /// Device-uploaded declarative hook program, if any (P7.1).
     hooks: Option<DeviceHooks>,
+    /// Per-batch activity mask; stage kernels skip zero (extinct) batches when
+    /// `stage_masking` is on.
+    active_mask: DeviceBuffer<i32>,
+    /// Whether the current run skips extinct batches in the stage kernels.
+    stage_masking: bool,
 }
 
 /// Device-resident static buffers for one migration CSR.
@@ -380,6 +385,8 @@ impl GpuExecutor {
             migration_cache: None,
             history: None,
             hooks: None,
+            active_mask: DeviceBuffer::from_host(&stream, &vec![1i32; n_batch])?,
+            stage_masking: false,
         })
     }
 
@@ -401,6 +408,16 @@ impl GpuExecutor {
     /// - `tick`: Session tick to resume from.
     pub fn set_tick(&mut self, tick: u64) {
         self.tick = tick;
+    }
+
+    /// Enable or disable skipping extinct batches in the stage kernels.
+    ///
+    /// Only safe for hook-free programs (a hook could revive a zero state).
+    ///
+    /// ## Parameters
+    /// - `enabled`: Whether to recompute and honour the per-batch active mask.
+    pub fn set_stage_masking(&mut self, enabled: bool) {
+        self.stage_masking = enabled;
     }
 
     /// Upload a declarative hook program for device-side event execution.
@@ -788,6 +805,8 @@ impl GpuExecutor {
     pub fn age_tick(&mut self) -> Result<(), String> {
         let stream = self.context.stream();
         let ind_stride = self.n_ztypes * self.n_batch;
+        let n_batch = self.n_batch;
+        let use_active = self.stage_masking;
         self.kernels.age_shift(
             &stream,
             self.ind.slice(),
@@ -795,6 +814,9 @@ impl GpuExecutor {
             self.ind.len(),
             self.n_ages,
             ind_stride,
+            n_batch,
+            self.active_mask.slice(),
+            use_active,
         )?;
         std::mem::swap(&mut self.ind, &mut self.ind_scratch);
         let sperm_stride = self.n_ztypes * self.n_ztypes * self.n_batch;
@@ -805,6 +827,9 @@ impl GpuExecutor {
             self.sperm.len(),
             self.n_ages,
             sperm_stride,
+            n_batch,
+            self.active_mask.slice(),
+            use_active,
         )?;
         std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
         Ok(())
@@ -984,6 +1009,8 @@ impl GpuExecutor {
             n_ztypes,
             blueprint.new_adult_age,
             discrete_actual,
+            self.active_mask.slice(),
+            self.stage_masking,
         )?;
         Ok(scaling)
     }
@@ -1096,6 +1123,8 @@ impl GpuExecutor {
                 key0,
                 key1,
                 survival_site,
+                self.active_mask.slice(),
+                self.stage_masking,
             )?;
             // Surface a meaningfully negative virgin count instead of
             // silently clamping it, matching the host's explicit error.
@@ -1113,6 +1142,8 @@ impl GpuExecutor {
             n_batch,
             n_ages,
             n_ztypes,
+            self.active_mask.slice(),
+            self.stage_masking,
         )?;
         self.kernels.survival_scale_ind(
             &stream,
@@ -1124,6 +1155,8 @@ impl GpuExecutor {
             n_ages,
             n_ztypes,
             blueprint.new_adult_age,
+            self.active_mask.slice(),
+            self.stage_masking,
         )?;
         self.kernels.survival_scale_sperm(
             &stream,
@@ -1134,6 +1167,8 @@ impl GpuExecutor {
             n_ages,
             n_ztypes,
             blueprint.new_adult_age,
+            self.active_mask.slice(),
+            self.stage_masking,
         )?;
         Ok(())
     }
@@ -1486,6 +1521,17 @@ impl GpuExecutor {
         continuous: bool,
     ) -> Result<(), String> {
         self.reset_stop_mask()?;
+        if self.stage_masking {
+            let stream = self.context.stream();
+            let plane = 2 * self.n_ages * self.n_ztypes;
+            self.kernels.mark_active(
+                &stream,
+                self.ind.slice(),
+                self.active_mask.slice_mut(),
+                self.n_batch,
+                plane,
+            )?;
+        }
         self.run_hook_event(0, stochastic, continuous)?;
         self.capture_stopped()?;
         self.commit_eco(ecology)?;
@@ -1720,6 +1766,8 @@ impl GpuExecutor {
             key0,
             key1,
             site,
+            self.active_mask.slice(),
+            self.stage_masking,
         )
     }
 

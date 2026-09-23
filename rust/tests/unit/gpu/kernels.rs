@@ -33,19 +33,20 @@ fn kernel_launchers_reject_invalid_shapes() {
     let four = stream.alloc_zeros::<f32>(4).expect("alloc");
     let zero_f = stream.alloc_zeros::<f32>(0).expect("alloc");
     let zero_i = stream.alloc_zeros::<i32>(0).expect("alloc");
+    let mask = stream.alloc_zeros::<i32>(4).expect("alloc");
 
     // age_shift: length mismatch, empty plane, and zero stride.
     let mut three = stream.alloc_zeros::<f32>(3).expect("alloc");
     assert!(kernels
-        .age_shift(&stream, &four, &mut three, 4, 4, 1)
+        .age_shift(&stream, &four, &mut three, 4, 4, 1, 1, &mask, false)
         .is_err());
     let mut empty_dst = stream.alloc_zeros::<f32>(0).expect("alloc");
     assert!(kernels
-        .age_shift(&stream, &zero_f, &mut empty_dst, 0, 4, 1)
+        .age_shift(&stream, &zero_f, &mut empty_dst, 0, 4, 1, 1, &mask, false)
         .is_ok());
     let mut four_dst = stream.alloc_zeros::<f32>(4).expect("alloc");
     assert!(kernels
-        .age_shift(&stream, &four, &mut four_dst, 4, 4, 0)
+        .age_shift(&stream, &four, &mut four_dst, 4, 4, 0, 1, &mask, false)
         .is_err());
 
     // density_scaling: zero batch and zero new_adult_age are rejected.
@@ -67,24 +68,24 @@ fn kernel_launchers_reject_invalid_shapes() {
         scaling_out: &mut out,
     };
     assert!(kernels
-        .density_scaling(&stream, &mut buffers, 0, 4, 2, 1, false)
+        .density_scaling(&stream, &mut buffers, 0, 4, 2, 1, false, &mask, false)
         .is_err());
     assert!(kernels
-        .density_scaling(&stream, &mut buffers, 1, 4, 2, 0, false)
+        .density_scaling(&stream, &mut buffers, 1, 4, 2, 0, false, &mask, false)
         .is_err());
 
     // Zero-batch / empty-plane short circuits.
     let mut factor = stream.alloc_zeros::<f32>(1).expect("alloc");
     assert!(kernels
-        .recruit_factor(&stream, &four, &four, &mut factor, 0, 4, 2)
+        .recruit_factor(&stream, &four, &four, &mut factor, 0, 4, 2, &mask, false)
         .is_ok());
     let mut ind0 = stream.alloc_zeros::<f32>(0).expect("alloc");
     let mut sperm0 = stream.alloc_zeros::<f32>(0).expect("alloc");
     assert!(kernels
-        .survival_scale_ind(&stream, &mut ind0, &four, &four, &four, 1, 4, 2, 1)
+        .survival_scale_ind(&stream, &mut ind0, &four, &four, &four, 1, 4, 2, 1, &mask, false)
         .is_ok());
     assert!(kernels
-        .survival_scale_sperm(&stream, &mut sperm0, &four, &four, 1, 4, 2, 1)
+        .survival_scale_sperm(&stream, &mut sperm0, &four, &four, 1, 4, 2, 1, &mask, false)
         .is_ok());
     let mut ind1 = stream.alloc_zeros::<f32>(0).expect("alloc");
     let mut sperm1 = stream.alloc_zeros::<f32>(0).expect("alloc");
@@ -407,6 +408,7 @@ fn stochastic_launchers_short_circuit_or_reject() {
     let stream = context.stream();
     let zero_f = stream.alloc_zeros::<f32>(0).expect("alloc");
     let zero_i = stream.alloc_zeros::<i32>(0).expect("alloc");
+    let mask = stream.alloc_zeros::<i32>(4).expect("alloc");
     let mut scratch_ind = stream.alloc_zeros::<f32>(0).expect("alloc");
     let mut scratch_sperm = stream.alloc_zeros::<f32>(0).expect("alloc");
     let mut violation = stream.alloc_zeros::<i32>(1).expect("alloc");
@@ -430,6 +432,8 @@ fn stochastic_launchers_short_circuit_or_reject() {
             1,
             2,
             3,
+            &mask,
+            false,
         )
         .is_ok());
     assert!(kernels

@@ -1410,6 +1410,7 @@ impl AgeStructuredSession {
                     .map_err(map_lifecycle_error)?;
                 gpu.configure_hooks(&self.hooks, true)
                     .map_err(map_lifecycle_error)?;
+                gpu.set_stage_masking(self.hooks.n_hooks == 0);
                 self.particle_ecology = Some(ecology);
                 return Ok(());
             }
@@ -1432,6 +1433,7 @@ impl AgeStructuredSession {
         executor
             .configure_hooks(&self.hooks, true)
             .map_err(map_lifecycle_error)?;
+        executor.set_stage_masking(self.hooks.n_hooks == 0);
         if self.hooks.n_hooks != 0 {
             executor.set_tick(self.state_tick.max(0) as u64);
         }

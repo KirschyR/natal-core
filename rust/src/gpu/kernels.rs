@@ -32,10 +32,19 @@ extern "C" __global__ void age_shift(
     float* dst,
     unsigned long long total,
     int n_ages,
-    unsigned long long age_stride)
+    unsigned long long age_stride,
+    int n_batch,
+    const int* active_mask,
+    int use_active)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) {
+        return;
+    }
+    int b = (int)(i % (unsigned long long)n_batch);
+    if (use_active && active_mask[b] == 0) {
+        // An inactive (extinct) batch keeps its all-zero state across the swap.
+        dst[i] = src[i];
         return;
     }
     unsigned long long age = (i / age_stride) % (unsigned long long)n_ages;
@@ -96,10 +105,15 @@ extern "C" __global__ void density_scaling(
     const int* growth_mode,
     const float* low_density_growth_rate,
     int discrete_actual,
-    float* scaling_out)
+    float* scaling_out,
+    const int* active_mask,
+    int use_active)
 {
     int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_batch) {
+        return;
+    }
+    if (use_active && active_mask[b] == 0) {
         return;
     }
     int A = n_ages;
@@ -231,10 +245,15 @@ extern "C" __global__ void recruit_factor(
     int n_ages,
     int n_ztypes,
     const float* scaling,
-    float* factor)
+    float* factor,
+    const int* active_mask,
+    int use_active)
 {
     int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_batch) {
+        return;
+    }
+    if (use_active && active_mask[b] == 0) {
         return;
     }
     int A = n_ages;
@@ -259,13 +278,18 @@ extern "C" __global__ void survival_scale_ind(
     int n_batch,
     int n_ages,
     int n_ztypes,
-    int new_adult_age)
+    int new_adult_age,
+    const int* active_mask,
+    int use_active)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) {
         return;
     }
     int b = (int)(i % (unsigned long long)n_batch);
+    if (use_active && active_mask[b] == 0) {
+        return;
+    }
     unsigned long long t = i / (unsigned long long)n_batch;
     int z = (int)(t % (unsigned long long)n_ztypes);
     t /= (unsigned long long)n_ztypes;
@@ -291,13 +315,18 @@ extern "C" __global__ void survival_scale_sperm(
     int n_batch,
     int n_ages,
     int n_ztypes,
-    int new_adult_age)
+    int new_adult_age,
+    const int* active_mask,
+    int use_active)
 {
     unsigned long long i = (unsigned long long)blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) {
         return;
     }
     int b = (int)(i % (unsigned long long)n_batch);
+    if (use_active && active_mask[b] == 0) {
+        return;
+    }
     unsigned long long t = i / (unsigned long long)n_batch;
     int zm = (int)(t % (unsigned long long)n_ztypes);
     t /= (unsigned long long)n_ztypes;
@@ -1240,7 +1269,9 @@ extern "C" __global__ void survival_stochastic(
     int* violation,
     unsigned int key0,
     unsigned int key1,
-    unsigned int site)
+    unsigned int site,
+    const int* active_mask,
+    int use_active)
 {
     int cells = n_batch * n_ages * n_ztypes;
     int i = blockIdx.x * blockDim.x + threadIdx.x;
@@ -1253,6 +1284,9 @@ extern "C" __global__ void survival_stochastic(
     int t = i / Z;
     int age = t % A;
     int b = t / A;
+    if (use_active && active_mask[b] == 0) {
+        return;
+    }
     int target = new_adult_age - 1;
     float age_f = survival_rates[b * 2 * A + age];
     float age_m = survival_rates[b * 2 * A + A + age];
@@ -2164,10 +2198,15 @@ extern "C" __global__ void discrete_survival(
     const float* viability,
     unsigned int key0,
     unsigned int key1,
-    unsigned int site)
+    unsigned int site,
+    const int* active_mask,
+    int use_active)
 {
     int b = blockIdx.x * blockDim.x + threadIdx.x;
     if (b >= n_batch) {
+        return;
+    }
+    if (use_active && active_mask[b] == 0) {
         return;
     }
     int A = n_ages;
@@ -2779,6 +2818,25 @@ extern "C" __global__ void hook_copy_batch(
     }
     dst[i] = src[i];
 }
+
+// Per-batch activity mask: `active[b] = 1` when batch `b`'s individual plane is
+// non-zero. Extinct batches are skipped by the stage kernels when masking is on.
+extern "C" __global__ void mark_active(
+    const float* ind,
+    int* active,
+    int n_batch,
+    int plane)
+{
+    int b = blockIdx.x * blockDim.x + threadIdx.x;
+    if (b >= n_batch) {
+        return;
+    }
+    float total = 0.0f;
+    for (int cell = 0; cell < plane; ++cell) {
+        total += ind[(long long)cell * n_batch + b];
+    }
+    active[b] = (total > 0.0f) ? 1 : 0;
+}
 "#;
 
 /// Device arguments for [`Kernels::density_scaling`].
@@ -2902,6 +2960,8 @@ pub struct Kernels {
     apply_hook_event: CudaFunction,
     /// `hook_copy_batch(...)`.
     hook_copy_batch: CudaFunction,
+    /// `mark_active(...)`.
+    mark_active: CudaFunction,
 }
 
 impl Kernels {
@@ -3012,6 +3072,9 @@ impl Kernels {
         let hook_copy_batch = module
             .load_function("hook_copy_batch")
             .map_err(|err| format!("loading kernel `hook_copy_batch` failed: {err}"))?;
+        let mark_active = module
+            .load_function("mark_active")
+            .map_err(|err| format!("loading kernel `mark_active` failed: {err}"))?;
         Ok(Self {
             age_shift,
             density_scaling,
@@ -3037,6 +3100,7 @@ impl Kernels {
             discrete_survival,
             apply_hook_event,
             hook_copy_batch,
+            mark_active,
         })
     }
 
@@ -3058,6 +3122,7 @@ impl Kernels {
     /// ## Errors
     /// Returns a description when the launch parameters are inconsistent or
     /// the driver rejects the launch.
+    #[allow(clippy::too_many_arguments)] // Flat kernel arguments mirror the CUDA signature.
     pub fn age_shift(
         &self,
         stream: &Arc<CudaStream>,
@@ -3066,6 +3131,9 @@ impl Kernels {
         total: usize,
         n_ages: usize,
         age_stride: usize,
+        n_batch: usize,
+        active_mask: &CudaSlice<i32>,
+        use_active: bool,
     ) -> Result<(), String> {
         if src.len() != total || dst.len() != total {
             return Err(format!(
@@ -3083,6 +3151,8 @@ impl Kernels {
         let total = total as u64;
         let n_ages = n_ages as i32;
         let age_stride = age_stride as u64;
+        let n_batch_i = n_batch as i32;
+        let use_active_i = i32::from(use_active);
         let config = LaunchConfig::for_num_elems(total as u32);
         let mut launch = stream.launch_builder(&self.age_shift);
         launch.arg(src);
@@ -3090,6 +3160,9 @@ impl Kernels {
         launch.arg(&total);
         launch.arg(&n_ages);
         launch.arg(&age_stride);
+        launch.arg(&n_batch_i);
+        launch.arg(active_mask);
+        launch.arg(&use_active_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("age_shift launch failed: {err}"))
@@ -3123,6 +3196,8 @@ impl Kernels {
         n_ztypes: usize,
         new_adult_age: usize,
         discrete_actual: bool,
+        active_mask: &CudaSlice<i32>,
+        use_active: bool,
     ) -> Result<(), String> {
         if n_batch == 0 || n_ages == 0 || n_ztypes == 0 {
             return Err("density_scaling requires non-zero dimensions".to_owned());
@@ -3142,6 +3217,7 @@ impl Kernels {
         let n_ztypes_i = n_ztypes as i32;
         let new_adult_i = new_adult_age as i32;
         let discrete_i = i32::from(discrete_actual);
+        let use_active_i = i32::from(use_active);
         let config = LaunchConfig {
             grid_dim: ((n_batch as u32).div_ceil(128), 1, 1),
             block_dim: (128, 1, 1),
@@ -3167,6 +3243,8 @@ impl Kernels {
         launch.arg(buffers.low_density_growth_rate);
         launch.arg(&discrete_i);
         launch.arg(&mut *buffers.scaling_out);
+        launch.arg(active_mask);
+        launch.arg(&use_active_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("density_scaling launch failed: {err}"))
@@ -3199,6 +3277,8 @@ impl Kernels {
         n_batch: usize,
         n_ages: usize,
         n_ztypes: usize,
+        active_mask: &CudaSlice<i32>,
+        use_active: bool,
     ) -> Result<(), String> {
         if n_batch == 0 {
             return Ok(());
@@ -3206,6 +3286,7 @@ impl Kernels {
         let n_batch_i = n_batch as i32;
         let n_ages_i = n_ages as i32;
         let n_ztypes_i = n_ztypes as i32;
+        let use_active_i = i32::from(use_active);
         let config = LaunchConfig {
             grid_dim: ((n_batch as u32).div_ceil(128), 1, 1),
             block_dim: (128, 1, 1),
@@ -3218,6 +3299,8 @@ impl Kernels {
         launch.arg(&n_ztypes_i);
         launch.arg(scaling);
         launch.arg(&mut *factor);
+        launch.arg(active_mask);
+        launch.arg(&use_active_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("recruit_factor launch failed: {err}"))
@@ -3247,6 +3330,8 @@ impl Kernels {
         n_ages: usize,
         n_ztypes: usize,
         new_adult_age: usize,
+        active_mask: &CudaSlice<i32>,
+        use_active: bool,
     ) -> Result<(), String> {
         let total = ind.len() as u64;
         if total == 0 {
@@ -3256,6 +3341,7 @@ impl Kernels {
         let n_ages_i = n_ages as i32;
         let n_ztypes_i = n_ztypes as i32;
         let new_adult_i = new_adult_age as i32;
+        let use_active_i = i32::from(use_active);
         let config = LaunchConfig::for_num_elems(total as u32);
         let mut launch = stream.launch_builder(&self.survival_scale_ind);
         launch.arg(&mut *ind);
@@ -3267,6 +3353,8 @@ impl Kernels {
         launch.arg(&n_ages_i);
         launch.arg(&n_ztypes_i);
         launch.arg(&new_adult_i);
+        launch.arg(active_mask);
+        launch.arg(&use_active_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("survival_scale_ind launch failed: {err}"))
@@ -3294,6 +3382,8 @@ impl Kernels {
         n_ages: usize,
         n_ztypes: usize,
         new_adult_age: usize,
+        active_mask: &CudaSlice<i32>,
+        use_active: bool,
     ) -> Result<(), String> {
         let total = sperm.len() as u64;
         if total == 0 {
@@ -3303,6 +3393,7 @@ impl Kernels {
         let n_ages_i = n_ages as i32;
         let n_ztypes_i = n_ztypes as i32;
         let new_adult_i = new_adult_age as i32;
+        let use_active_i = i32::from(use_active);
         let config = LaunchConfig::for_num_elems(total as u32);
         let mut launch = stream.launch_builder(&self.survival_scale_sperm);
         launch.arg(&mut *sperm);
@@ -3313,6 +3404,8 @@ impl Kernels {
         launch.arg(&n_ages_i);
         launch.arg(&n_ztypes_i);
         launch.arg(&new_adult_i);
+        launch.arg(active_mask);
+        launch.arg(&use_active_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("survival_scale_sperm launch failed: {err}"))
@@ -3680,6 +3773,8 @@ impl Kernels {
         key0: u32,
         key1: u32,
         site: u32,
+        active_mask: &CudaSlice<i32>,
+        use_active: bool,
     ) -> Result<(), String> {
         let cells = n_batch * n_ages * n_ztypes;
         if cells == 0 {
@@ -3690,6 +3785,7 @@ impl Kernels {
         let n_ztypes_i = n_ztypes as i32;
         let new_adult_i = new_adult_age as i32;
         let continuous_i = i32::from(continuous);
+        let use_active_i = i32::from(use_active);
         let config = stochastic_grid(cells);
         let mut launch = stream.launch_builder(&self.survival_stochastic);
         launch.arg(&mut *ind);
@@ -3705,6 +3801,8 @@ impl Kernels {
         launch.arg(&key0);
         launch.arg(&key1);
         launch.arg(&site);
+        launch.arg(active_mask);
+        launch.arg(&use_active_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("survival_stochastic launch failed: {err}"))
@@ -4072,6 +4170,8 @@ impl Kernels {
         key0: u32,
         key1: u32,
         site: u32,
+        active_mask: &CudaSlice<i32>,
+        use_active: bool,
     ) -> Result<(), String> {
         if n_batch == 0 {
             return Ok(());
@@ -4086,6 +4186,7 @@ impl Kernels {
         let n_ztypes_i = n_ztypes as i32;
         let stochastic_i = i32::from(stochastic);
         let continuous_i = i32::from(continuous);
+        let use_active_i = i32::from(use_active);
         let config = stochastic_grid(n_batch);
         let mut launch = stream.launch_builder(&self.discrete_survival);
         launch.arg(&mut *ind);
@@ -4100,6 +4201,8 @@ impl Kernels {
         launch.arg(&key0);
         launch.arg(&key1);
         launch.arg(&site);
+        launch.arg(active_mask);
+        launch.arg(&use_active_i);
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("discrete_survival launch failed: {err}"))
@@ -4251,6 +4354,48 @@ impl Kernels {
         unsafe { launch.launch(config) }
             .map(|_| ())
             .map_err(|err| format!("hook_copy_batch launch failed: {err}"))
+    }
+
+    /// Recompute the per-batch activity mask from the individual plane.
+    ///
+    /// `active[b] = 1` when batch `b`'s `2·A·Z` individual cells sum above
+    /// zero; extinct batches are then skipped by the stage kernels when masking
+    /// is enabled.
+    ///
+    /// ## Parameters
+    /// - `stream`: Stream the launch is ordered on.
+    /// - `ind`: Batch-minor individual counts, `(2, A, Z, B)`.
+    /// - `active`: Per-batch output mask.
+    /// - `n_batch`, `plane`: Batch count and `2 · A · Z`.
+    ///
+    /// ## Errors
+    /// Returns a description when the launch fails.
+    pub fn mark_active(
+        &self,
+        stream: &Arc<CudaStream>,
+        ind: &CudaSlice<f32>,
+        active: &mut CudaSlice<i32>,
+        n_batch: usize,
+        plane: usize,
+    ) -> Result<(), String> {
+        if n_batch == 0 {
+            return Ok(());
+        }
+        let n_batch_i = n_batch as i32;
+        let plane_i = plane as i32;
+        let config = LaunchConfig {
+            grid_dim: ((n_batch as u32).div_ceil(128), 1, 1),
+            block_dim: (128, 1, 1),
+            shared_mem_bytes: 0,
+        };
+        let mut launch = stream.launch_builder(&self.mark_active);
+        launch.arg(ind);
+        launch.arg(&mut *active);
+        launch.arg(&n_batch_i);
+        launch.arg(&plane_i);
+        unsafe { launch.launch(config) }
+            .map(|_| ())
+            .map_err(|err| format!("mark_active launch failed: {err}"))
     }
 }
 

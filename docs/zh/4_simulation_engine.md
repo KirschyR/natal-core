@@ -351,6 +351,8 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
 - **共享**：初始状态与 genetics 在整个 `(particle, replicate)` 批次间共享；每个 particle 在设备上保留自己的生态列。
 - **钩子**：声明式钩子按 particle 执行（Python 回调被拒绝）。particle 是 panmictic，钩子的 deme selector 对每个
   particle 都按 **deme 0** 解释（与 `B` 个独立单群体 CPU 运行一致）。
+- **灭绝 particle**：对**无钩子**程序，状态已灭绝（全 0）的 particle 会被各 stage 内核跳过，不再消耗算力
+  （钩子可能让全 0 状态复活，故仅在同一程序无钩子时启用）。
 - **适用条件**：panmictic、内置生长模式（0–4）。空列表或模型不合格时 `enable_gpu_particles` 抛 `ValueError`；
   扩展未带 `gpu` feature 时抛 `RuntimeError`。
 

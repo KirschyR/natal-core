@@ -3330,3 +3330,92 @@ fn evaluator_gpu_particle_mask_keys_on_zero_individual_state() {
         );
     });
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for E12 (per-tick parameter caching).
+// ---------------------------------------------------------------------------
+
+/// `SET_PARAM(eggs_per_female, eco[1] + 1)` every tick (param id 1).
+fn eggs_growth_program() -> HookProgram {
+    let mut q = HookProgram::default();
+    q.n_events = 4;
+    q.n_hooks = 1;
+    q.hook_offsets = vec![0, 1, 1, 1, 1];
+    q.op_offsets = vec![0, 1];
+    q.op_types = vec![10];
+    q.zidx_offsets = vec![0, 2];
+    q.zidx_data = vec![0, 1];
+    q.age_offsets = vec![0, 4];
+    q.age_data = vec![0, 1, 2, 3];
+    q.sex_masks = vec![true, true];
+    q.params = vec![0.0];
+    q.condition_offsets = vec![0, 0];
+    q.deme_selector_types = vec![0];
+    q.deme_selector_offsets = vec![0, 0];
+    q.convert_source_z = vec![-1];
+    q.convert_target_z = vec![-1];
+    q.sp_param_ids = vec![1];
+    q.sp_every = vec![1];
+    q.sp_start = vec![0];
+    q.rpn_offsets = vec![0, 3];
+    q.rpn_kinds = vec![1, 0, 2];
+    q.rpn_payload = vec![1, 0, 0];
+    q.sp_literals = vec![1.0];
+    q.has_set_param = true;
+    q
+}
+
+#[test]
+fn evaluator_param_cache_tracks_midrun_eggs_change() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            params.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.hooks = eggs_growth_program();
+        gpu.enable_gpu().expect("enable gpu");
+        gpu.run_inner(py, 5, 0, None, 0).expect("gpu run");
+
+        let mut cpu = make_session(blueprint, params, genetics, ind, sperm);
+        cpu.hooks = eggs_growth_program();
+        cpu.run_inner(py, 5, 0, None, 0).expect("cpu run");
+
+        let committed_gpu = gpu.params.eco_value(1, 0);
+        let committed_cpu = cpu.params.eco_value(1, 0);
+        assert!(
+            (committed_gpu - committed_cpu).abs() <= 1e-9 * committed_cpu.abs().max(1.0),
+            "committed eggs_per_female diverged: device {committed_gpu} vs host {committed_cpu}"
+        );
+        for (index, (got, want)) in gpu.state_ind.iter().zip(cpu.state_ind.iter()).enumerate() {
+            let (got, want) = (*got as f32, *want as f32);
+            assert!(
+                (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                "ind[{index}]: device {got} vs host {want}"
+            );
+        }
+    });
+}
+
+#[test]
+fn evaluator_param_cache_bytes_formula() {
+    for (b, a, z) in [(1usize, 1usize, 1usize), (3, 4, 2), (7, 8, 9), (2, 16, 5)] {
+        let f32_elems = 8 * a + 8 + 2 * a * z + 6 * z + z * z + z * z * z;
+        let i32_elems = 2 * b + 2 * z;
+        assert_eq!(
+            crate::gpu::executor::GpuExecutor::cache_bytes(b, a, z),
+            (f32_elems * b + i32_elems) * 4,
+            "cache_bytes mismatch for b={b} a={a} z={z}"
+        );
+    }
+}

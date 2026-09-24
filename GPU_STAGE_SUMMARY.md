@@ -298,7 +298,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | **B7** | 完整性 | Wright-Fisher 融合模式未设备化 | 空间离散 CPU 不用它；非空间离散无 GPU 入口 | 按需实现 | 中 | 低优先 |
 | **D6** | 设计 | ~~hooks/停止门控设备侧未做~~ | ~~含 `stop_if_*` 的模型不可用 GPU~~ | **由 P7 承接**（用户选定声明式钩子）：设备侧解释器 + 停止门控 | 高 | **APPROVED（§63）** |
 | **P7** | 完整性 | ~~GPU 不支持声明式钩子插入点（`first/early/late/finish`）~~ | ~~含声明式钩子的模型无法上 GPU~~ | 设备侧声明式解释器，分 P7.1–P7.4（见 §11.5）；Python 回调仍显式拒绝 | 高 | **P7.1–P7.4a APPROVED（§59/§61/§63/§67/§69）**；P7.4b（ensemble）待用户决定 |
-| **E12** | 性能 | ~~debug 基准受宿主机重建/上传主导~~ | ~~大 B 计算侧瓶颈~~ | 已实现：executor 侧 `ParamCache` 缓存生态列与分块遗传表（内容不变即不重传），并复用 scaling/factor scratch；release 实测 B=5000/50tick 0.055→0.021s、B=100k 112→55ms/tick、B=500k 626→283ms/tick | 高（核心路径） | **已实现并自测，待 §81 复核** |
+| **E12** | 性能 | ~~debug 基准受宿主机重建/上传主导~~ | ~~大 B 计算侧瓶颈~~ | 已实现：executor 侧 `ParamCache` 缓存生态列与分块遗传表（内容不变即不重传），并复用 scaling/factor scratch；release 实测 B=5000/50tick 0.055→0.021s、B=100k 112→55ms/tick、B=500k 626→283ms/tick | 高（核心路径） | **APPROVED（§81）** |
 | **E13** | 验收 | P6 相对 16 核 `ProcessPool` 仅 2.4–3.3×，阈值未定 | “显著优于”是否达标无口径 | 用户定阈值或换更大模型/更少核重测 | 低 | **待用户口径** |
 
 ### 11.3 建议推进顺序
@@ -347,7 +347,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 - **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.4a 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67/§69）。
 - **最近回执**：§79（P9d）**APPROVED**；P9 增强项（P9a–P9d）已全部完成。
-- **待回执**：**§81**（E12：executor 侧每 tick 参数缓存，高风险核心路径）——已实现并自测。
+- **待回执**：无；E12 已复核通过（§81）。
 - **后续未开始**：**E13** 待用户口径；**P7.4b**（ensemble 钩子）、**B7**、**C9** 已决定不做（除非用户改口）。
 - **门禁基线（§69 时）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **221**、
   `ruff`/`pyright` 通过、`pytest` **3620**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **96.62%**。

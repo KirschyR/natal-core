@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 35 轮：**APPROVED**（§79；P9d 灭绝 particle 跳 stage——per-batch 活跃掩码 masked==unmasked、钩子门控、CPU 对照） |
-| 待回执 | §81（第 36 轮 E12：executor 侧每 tick 参数缓存——恒定张量/scratch 复用，高风险核心路径） |
-| 主 agent 处理 | 第 36 轮 E12 已实现并自测（§80）；P9 增强项已全部完成 |
-| 待 evaluator 动作 | 按 §80 复核，把第 36 轮结论写入 §81 |
+| 最近回执 | 第 36 轮：**APPROVED**（§81；E12 每 tick 参数缓存/scratch 复用——内容失效透明、CPU 对照、无回归） |
+| 待回执 | — |
+| 主 agent 处理 | 第 36 轮 E12 已复核通过；P9 增强项与 E12 均完成 |
+| 待 evaluator 动作 | —（若有实质改动，重跑受影响门禁并追加回执） |
 
 ## 0. 一句话目标
 
@@ -4318,3 +4318,68 @@ P9d 灭绝 particle/replicate 跳 stage（per-batch 活跃掩码）经独立复�
 
 P9d 灭绝 particle/replicate 跳 stage 的 per-batch 掩码对结果透明、与 CPU 一致、钩子门控正确、无回归，测试/门禁/覆盖率达标。
 **APPROVED**（范围：当前 HEAD `004694b` 与被审测试集；不声称任何历史基线失败消失）。§79.4 为已知非阻塞边界。
+
+---
+
+## 81. 第 36 轮结论（evaluator 独立执行，2026-09-24，HEAD=`272f06a`）
+
+### 81.1 裁定：**APPROVED**
+
+E12（executor 侧每 tick 参数缓存 + scratch 复用）经独立复核：对结果**透明**（缓存仅按 host f64/bool/i64 内容
+跳过相同的 `f64→f32` 窄化与 H2D；命中时设备值逐位相同），失效覆盖生态列/声明分布 empty↔非空/growth/遗传表等，
+`cache_bytes` 与真实布局一致，无回归。CPU golden reference 未改。
+
+### 81.2 独立核对
+
+- **缓存透明性（读码 + 测试）**：`CachedF32`/`CachedI32` 以 `host == src` 判定命中，`CachedGenetics` 以
+  `variants`/`deme_variants` 判定；所有缓存设备缓冲仅作为**只读内核输入**（`slice()`），唯一的可写 scratch
+  `scaling`/`factor` 为独立 `DeviceBuffer`，不存在设备内容被改动而 host 未变的路径 → 缓存不可能返回陈旧值。
+  NaN 走 `!=` → 每次重建（安全）。
+- **全链路失效**：新增 `evaluator_param_cache_tracks_midrun_eggs_change`：`SET_PARAM(eggs_per_female, eco[1]+1)`
+  每 tick 改变 `eggs`（reproduction 缓存源），5 tick 后 GPU 状态与 CPU 逐 cell 一致、提交参数一致——验证 reproduction
+  缓存失效。既有 `set_param`（carrying_capacity）用例、作者 `cached_parameters_rebuild_when_sources_change`
+  （同时改 survival/eggs 与 equilibrium empty↔非空）共同覆盖。
+- **`cache_bytes` 独立核验**：新增 `evaluator_param_cache_bytes_formula`，对 (B,A,Z)=(1,1,1)/(3,4,2)/(7,8,9)/(2,16,5)
+  与按布局手推的 `(8A+8+2AZ+6Z+Z²+Z³)·B + (2B+2Z)` × 4 字节比对一致；逐项核对 `ParamCache::new` 的实际分配与公式吻合。
+- **无回归**：`rust/src/kernels`/`model`/`contracts`/`lib.rs` 零改动；`kernels.rs`/`spatial_session.rs` 受保护用例本轮 0 改动；
+  空间/离散/随机/ensemble/粒子路径数值不变（全量 GPU-vs-CPU 用例与 phase0 通过）。
+- **端到端**：重编扩展后 11 个自写 L3 脚本全部通过（含 spatial/stochastic/hooks/stop/particles/reps/reuse/extinct）。
+
+### 81.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **243 passed**（作者 241 + evaluator 2） |
+| `cargo test --features gpu evaluator_` | **65 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3628 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3314/3417 = 96.99%**；executor 96.51%、kernels 97.35%、probe 96.13%、其余 100% |
+| Python 新增可执行行 | 本轮无 Python 源码改动 |
+
+### 81.4 逐条发现（非阻塞）
+
+1. **low / 每次命中仍做 O(列长) host 比较**：`CachedF32::sync` 在命中时比较整个 `host` 切片；这是「省 H2D/分配」与
+   「host 比较」的折衷（benchmark 显示净收益）。超大 B 时可考虑哈希/版本号，但正确性无关。
+2. **low / `CachedGenetics` 常驻 host 克隆 `variants`**：变体极多时 host 内存与比较成本上升（§80.6 已述）；设备侧由 `cache_bytes` 计入。
+3. **low / `cache_bytes` 未含 `active_mask` 等零头**（n_batch·4 字节），与改动前一致；不影响预算判定。
+4. **low / 缓存常驻抬高稳态显存**（原为逐 tick 瞬时峰值）：已由 §D5 守卫计入，超额在 `new` 显式失败（不静默）。
+
+### 81.5 阻塞项
+
+无。
+
+### 81.6 证据来源
+
+- **独立运行**：上表门禁、2 个 Rust E12 用例、11 个 L3 脚本、扩展重编、覆盖率采集。
+- **仅代码阅读**：`CachedF32`/`CachedI32`/`CachedGenetics`/`ParamCache`、`density_scaling_cached`、`survival_tick`/`reproduction_impl`/
+  `discrete_survival_tick` 的缓存接线、`cache_bytes` 与实际分配逐项比对、只读设备输入论证。
+
+### 81.7 结论
+
+E12 参数缓存/scratch 复用对结果透明、失效覆盖充分、预算核算一致、无回归，测试/门禁/覆盖率达标。**APPROVED**
+（范围：当前 HEAD `272f06a` 与被审测试集；不声称任何历史基线失败消失）。§81.4 为已知非阻塞边界。

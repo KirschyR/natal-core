@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 34 轮：**APPROVED**（§77；P9c 粒子累计 tick + ABC 迭代间执行器复用/重置） |
-| 待回执 | §79（第 35 轮 P9d：灭绝 particle/replicate 跳过后续 stage，per-batch 活跃掩码） |
-| 主 agent 处理 | 第 35 轮：P9d 已实现并自测；待复核 |
-| 待 evaluator 动作 | 按 §78 复核，把第 35 轮结论写入 §79 |
+| 最近回执 | 第 35 轮：**APPROVED**（§79；P9d 灭绝 particle 跳 stage——per-batch 活跃掩码 masked==unmasked、钩子门控、CPU 对照） |
+| 待回执 | §81（第 36 轮 E12：executor 侧每 tick 参数缓存——恒定张量/scratch 复用，高风险核心路径） |
+| 主 agent 处理 | 第 36 轮 E12 已实现并自测（§80）；P9 增强项已全部完成 |
+| 待 evaluator 动作 | 按 §80 复核，把第 36 轮结论写入 §81 |
 
 ## 0. 一句话目标
 
@@ -2030,6 +2030,61 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 仅 `enable_gpu_particles` 开启；单群体/ensemble/空间未开启（可按需扩展）。
 
 结论请追加为 **§79**。
+
+---
+
+## 80. 第 36 轮交接 — E12：executor 侧每 tick 参数缓存（恒定张量/scratch 复用）
+
+- 日期：2026-09-24
+- 背景：§79 APPROVED（P9d，P9 增强全部完成）；用户批准启动唯一的可选/待条件项 **E12**（深层性能优化）。
+- 风险分类：**高风险**（改动共享所有 GPU 路径的核心每 tick 数值路径与 §D5 预算）。
+
+### 80.1 剖析（release，空闲卡；非独立）
+
+- release 已使 P6 debug 基准大幅改善：B=5000/A=8/Z=3/50 tick，`enable_gpu_ensemble` 0.67→0.40 s，运行 0.278 s（debug）→ **0.055 s**（release）。
+- 瓶颈定位（读码 + 计时）：无钩子路径每 tick 无 D2H，但 `density_scaling_device`/`survival_tick`/`reproduction_impl` 每 tick 在宿主机重建 B 规模的生态列与分块遗传表（viability/fecundity/offspring/... 合计约 6×10⁷ 次 f64→f32 写入 @B=5×10⁵）并逐列 `clone_htod` 新建缓冲 + 同步；确定性 ≈ 随机（RNG 非瓶颈），成本随 B 超线性、随 A 强依赖。
+
+### 80.2 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增 `CachedF32`/`CachedI32<S>`/`CachedGenetics`/`ParamCache`：生态列与分块遗传表的 device 缓冲**按内容**惰性重建（源不变则整 tick 不重传、不重分配）；`ParamCache.scaling/factor` 复用 scratch。`survival_tick`/`reproduction_impl`/`discrete_survival_tick` 改用缓存；`density_scaling_device` 与新增 `density_scaling_cached` 共享抽取的 `validate_density_ecology`（校验语义不变）。`GpuExecutor::new` 的 §D5 预算改为 `2·state + cache_bytes`，新增 `cache_bytes` 覆盖缓存足迹。公开 `density_scaling`（host 返回值）保留原路径。 |
+| `rust/tests/unit/gpu/executor.rs` | 新增 `cached_parameters_rebuild_when_sources_change`（同一 executor 连续 survival：缓存命中 + 生态列变化 + 声明分布 empty↔非空 时重建，逐步与「每步全新 executor」逐位一致）；新增 `cache_bytes_matches_the_param_cache_layout`。 |
+
+### 80.3 行为与安全边界
+
+- **仅缓存输入，不改内核算术**：缓存命中时跳过的只是「同样的 f64→f32 转换 + H2D」，f32 值逐位相同；内核启动与参数与从前一致。
+- **失效靠精确内容比较**：`CachedF32` 比对 `host == src`（NaN 视为变化→重建，安全但略慢）；`CachedGenetics` 比对 `variants`（`PartialEq`）与 `deme_variants`，键不变才复用。`set_param` 使 `params` 在 tick 间改变→对应列重建（既有 set_param/reuse 测试通过）。
+- **empty 分布**：`sync_or_zeros` 在 `equilibrium_distribution` 为空时保持 B·2A 零缓冲，不缩小内核读取范围。
+- **预算**：`cache_bytes` 计入 `new` 的显存守卫；大模型超额时在 `new` 显式报错，不静默回退。
+- **对既有路径**：未启用缓存的公开 `density_scaling` 与空间/离散/随机路径数值不变（内核与校验未改）。
+
+### 80.4 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **241 passed, 0 failed** |
+| `cargo test` / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3628 passed** / bit-identical |
+| 覆盖率（lcov，严格过滤 `rust/src/gpu/**` 排除 `/tests/`） | 聚合 **3314/3417 = 96.99%**；executor 96.51%、kernels 97.35%、probe 96.13%、其余 100% |
+| release 基准（空闲卡 0%；pre 为 release 改动前） | B=5000/50tick 0.055→**0.021 s**；1k 0.338→0.184、20k 13.4→9.6、100k 103.7→54.5、500k 625.6→282.7 ms/tick；A=64 28.4→18.4 ms/tick |
+| CPU 不变性 | `rust/src/kernels`、`rust/src/model`、`src/natal/contracts`、`rust/src/lib.rs` 工作树零改动 |
+
+### 80.5 请 evaluator 独立核对
+
+- **正确性（重点）**：证明缓存对结果**透明**——构造「同一 executor 跨多 tick 复用（源不变）」「tick 间改变生态/遗传表」「`set_param` 中途改参数」三类，与独立 CPU 参考或每步全新 executor 逐位对照；覆盖确定性、随机、连续采样、空间、离散。
+- **失效边界**：`equilibrium_distribution` empty↔非空；`declared`/`growth`/`male_only`/`female_only` 变化；`variants`/`deme_variants` 变化；`enable_gpu_particles` 复用（P9c）后参数变化。
+- **预算**：`cache_bytes` 与真实分配一致；超额在 `new` 显式失败。
+- **无回归**：P7/P9/P9b/P9c/P9d/空间/phase0；公开 `density_scaling` 未变。
+- **量化收益（可选）**：独立复现 release 基准（共享卡，先记 nvidia-smi）。
+
+### 80.6 残余风险（非阻塞）
+
+- 缓存常驻使稳态显存高于此前「逐 tick 分配后释放」的瞬时峰值（已由 `cache_bytes` 计入守卫）；大 Z 的 offspring 表 O(B·Z³) 仍可能成为内存瓶颈。
+- `CachedGenetics::ensure` 的键比较对空间路径为 O(变体表规模 + `n_demes`)；变体极多时与重分块同量级（避免上传，正确性不受影响）。
+- 剩余热点的进一步下降需内核级优化（更大 B 的 kernel 效率、`age_shift` copy-through 等），超出「缓存恒定张量」范围，本轮未做。
+
+结论请追加为 **§81**。
 
 ---
 
@@ -4197,3 +4252,69 @@ P9c 的「粒子运行返回累计设备 tick」与「同 batch 复用时重置�
 
 P9c 累计 tick 与执行器复用/重置语义正确、可复现、无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD
 `15ca35a` 与被审测试集；不声称任何历史基线失败消失）。§77.4 为已知非阻塞边界。
+
+---
+
+## 79. 第 35 轮结论（evaluator 独立执行，2026-09-24，HEAD=`004694b`）
+
+### 79.1 裁定：**APPROVED**
+
+P9d 灭绝 particle/replicate 跳 stage（per-batch 活跃掩码）经独立复核：掩码在确定性、随机、连续采样下均**对结果透明**
+（masked == unmasked 逐位）；灭绝 batch 恒为全 0 与独立 CPU session 一致；带钩子时正确关闭掩码（可复活全 0 状态）；
+既有 P7/P9/空间/phase0 零回归；CPU golden reference 未改。
+
+### 79.2 独立核对
+
+- **掩码透明性（核心不变式）**：新增 `evaluator_gpu_particle_stage_masking_is_transparent`：
+  P=3（含一个 `survival_rates=0` 灭绝 particle），在 (deterministic)、(stochastic)、(stochastic+continuous) 三档下，
+  对同一会话用 `set_stage_masking(true/false)` 各跑 4 tick，ind/sperm **逐位相同**；灭绝 particle 末态全 0、viable particle 非零；
+  确定性档逐 particle 与独立 CPU session 一致。
+- **灭绝行为**：新增 `evaluator_gpu_particle_mask_keys_on_zero_individual_state`：`survival_rates=0` 的 particle 3 tick 后
+  ind 与 sperm 均全 0。独立 Python E2E `/tmp/l3_particles_extinct.py`：公开 API 下灭绝 particle 末态全 0 且与 CPU（survival 0）一致，viable 存活（sum≈1083）。
+- **钩子门控**：新增 `evaluator_gpu_particle_reviving_hook_disables_masking`：带 `SET(5)` 钩子的灭绝 particle（每 tick 被复活再被 0 生存杀死），
+  GPU 与 CPU 逐 cell 一致——验证「有钩子则 `stage_masking=false`」这一安全边界（否则 `mark_active` 在钩子前测到 0 会跳过 survival/aging）。
+- **读码**：`mark_active` 按 `ind`（`2·A·Z`）求和 >0 判定；`age_shift` 对 inactive 做 `dst=src` copy-through（swap 后仍 0）；
+  density/recruit/survival/discrete_survival 均以 `use_active` 门控；`use_active=false` 时内核返回与旧路径同序；`stage_masking` 默认 false，
+  仅 `enable_gpu_particles_ecologies_replicated`（含复用分支）在 `n_hooks==0` 时置 true；`mark_active` 于每 tick 起始调用。
+- **受保护用例**：`kernels.rs` 本轮仅更新 launcher 调用签名（新增 `&mask, false`），受保护的 4 个 evaluator 内核用例 0 行改动；
+  `executor.rs`/`spatial_session.rs` 受保护用例 0 改动。
+
+### 79.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **239 passed**（作者 236 + evaluator 3） |
+| `cargo test --features gpu evaluator_` | **63 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3628 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3109/3215 = 96.70%**；executor 95.91%、kernels 97.35%、probe 96.13%、其余 100% |
+| Python 新增可执行行 | 本轮无 Python 源码改动 |
+
+### 79.4 逐条发现（非阻塞）
+
+1. **low / 灭绝判定仅看 `ind`**：正常动力学下 `ind` 全 0 蕴含 sperm 亦为 0（sperm 存于雌性体内），故掩码安全；
+   理论上「ind=0 且 sperm≠0」的退化状态不在正常路径（由 `evaluator_gpu_particle_mask_keys_on_zero_individual_state` 记录正常情形的全 0 行为）。
+   建议文档一句话说明掩码以 `ind` 为准。
+2. **low / `density_scaling`/`recruit_factor` 对 inactive 跳过，其输出对灭绝 batch 保留旧值**：因 0 雌性 → 0 卵，不影响结果（掩码透明性用例已证）。
+3. **low / 掩码仅覆盖 density/survival/aging 与 discrete survival**；`reproduction` 对 0 已提前返回，`age_shift` 仍需 copy-through（带宽不省）。
+4. **low / 仅粒子入口开启**：单群体/ensemble/空间未开（可按需扩展，§78.5 已声明）。
+
+### 79.5 阻塞项
+
+无。
+
+### 79.6 证据来源
+
+- **独立运行**：上表门禁、3 个 Rust P9d 用例、`/tmp/l3_particles_extinct.py`、扩展重编、覆盖率采集、受保护用例复核。
+- **仅代码阅读**：`mark_active`/`age_shift` copy-through、各 stage 的 `use_active` 门控、`set_stage_masking` 的启用点与 `n_hooks==0` 门控、
+  `run_tick_sequence` 中的 `mark_active` 调用时机。
+
+### 79.7 结论
+
+P9d 灭绝 particle/replicate 跳 stage 的 per-batch 掩码对结果透明、与 CPU 一致、钩子门控正确、无回归，测试/门禁/覆盖率达标。
+**APPROVED**（范围：当前 HEAD `004694b` 与被审测试集；不声称任何历史基线失败消失）。§79.4 为已知非阻塞边界。

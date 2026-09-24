@@ -77,6 +77,8 @@ pub struct GpuExecutor {
     active_mask: DeviceBuffer<i32>,
     /// Whether the current run skips extinct batches in the stage kernels.
     stage_masking: bool,
+    /// Cached per-tick device parameters (ecology columns + genetics tables).
+    params: ParamCache,
 }
 
 /// Device-resident static buffers for one migration CSR.
@@ -303,6 +305,483 @@ impl EcoView<'_> {
     }
 }
 
+/// A device `f32` tensor kept in sync with a host `f64` source.
+///
+/// The upload is skipped while the source is unchanged, so a parameter that is
+/// constant over a run is narrowed and transferred once instead of once per
+/// tick. That removes the per-tick `f64`→`f32` narrowing, the fresh device
+/// allocation and the synchronous copy that dominate large-batch runs.
+struct CachedF32 {
+    /// Last source narrowed into `dev`.
+    host: Vec<f64>,
+    /// Device copy of `host`, or a run of zeros before the first upload.
+    dev: DeviceBuffer<f32>,
+}
+
+impl CachedF32 {
+    /// Allocate a zero-filled device buffer of `len` elements.
+    fn new(stream: &Arc<CudaStream>, len: usize) -> Result<Self, String> {
+        Ok(Self {
+            host: Vec::new(),
+            dev: DeviceBuffer::from_host(stream, &vec![0.0f32; len])?,
+        })
+    }
+
+    /// Upload `src` when it differs from the cached source.
+    ///
+    /// ## Errors
+    /// Returns a description when the device transfer fails.
+    fn sync(&mut self, stream: &Arc<CudaStream>, src: &[f64]) -> Result<(), String> {
+        if self.host.as_slice() == src {
+            return Ok(());
+        }
+        let narrowed: Vec<f32> = src.iter().map(|value| *value as f32).collect();
+        self.dev = DeviceBuffer::from_host(stream, &narrowed)?;
+        self.host = src.to_vec();
+        Ok(())
+    }
+
+    /// Upload `src`, or keep `fill_len` zeros while `src` is empty.
+    ///
+    /// Used for the declared equilibrium distribution, whose "empty" sentinel
+    /// means "zeros" and must not shrink the device buffer the kernel reads.
+    ///
+    /// ## Errors
+    /// Returns a description when the device transfer fails.
+    fn sync_or_zeros(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        src: &[f64],
+        fill_len: usize,
+    ) -> Result<(), String> {
+        if src.is_empty() {
+            if self.host.is_empty() && self.dev.len() == fill_len {
+                return Ok(());
+            }
+            self.dev = DeviceBuffer::from_host(stream, &vec![0.0f32; fill_len])?;
+            self.host.clear();
+            return Ok(());
+        }
+        self.sync(stream, src)
+    }
+}
+
+/// A device `i32` tensor kept in sync with a host source (`bool` or `i64`).
+struct CachedI32<S: PartialEq + Clone> {
+    /// Last source mapped into `dev`.
+    host: Vec<S>,
+    /// Device copy of the mapped `host`.
+    dev: DeviceBuffer<i32>,
+}
+
+impl<S: PartialEq + Clone> CachedI32<S> {
+    /// Allocate a zero-filled device buffer of `len` elements.
+    fn new(stream: &Arc<CudaStream>, len: usize) -> Result<Self, String> {
+        Ok(Self {
+            host: Vec::new(),
+            dev: DeviceBuffer::from_host(stream, &vec![0i32; len])?,
+        })
+    }
+
+    /// Upload `src` (mapped through `to_i32`) when it differs from the cache.
+    ///
+    /// ## Errors
+    /// Returns a description when the device transfer fails.
+    fn sync(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        src: &[S],
+        to_i32: impl Fn(&S) -> i32,
+    ) -> Result<(), String> {
+        if self.host.as_slice() == src {
+            return Ok(());
+        }
+        let mapped: Vec<i32> = src.iter().map(&to_i32).collect();
+        self.dev = DeviceBuffer::from_host(stream, &mapped)?;
+        self.host = src.to_vec();
+        Ok(())
+    }
+}
+
+/// Device copies of the per-batch genetics tables.
+///
+/// The tables are a pure function of the variant bank and the per-deme variant
+/// ids. The host rebuild and upload are skipped while both are unchanged, which
+/// is the common case for ensemble and particle batches (one shared variant).
+struct CachedGenetics {
+    /// Variant bank the cached tables were built from.
+    variants: Vec<GeneticsTensors>,
+    /// Per-batch variant ids the cached tables were built from.
+    deme_variants: Vec<usize>,
+    /// Whether the tables hold data for the stored keys.
+    ready: bool,
+    /// `(B, 2, A, Z)` per-batch viability fitness.
+    viability: DeviceBuffer<f32>,
+    /// `(B, 2, Z)` fecundity fitness.
+    fecundity: DeviceBuffer<f32>,
+    /// `(B, Z, Z)` sexual selection fitness.
+    sexual_selection: DeviceBuffer<f32>,
+    /// `(B, Z, Z, Z)` offspring tensor.
+    offspring: DeviceBuffer<f32>,
+    /// `(B, 2, Z)` zygote viability.
+    zygote: DeviceBuffer<f32>,
+    /// `(B, Z)` female compatibility.
+    female_compat: DeviceBuffer<f32>,
+    /// `(B, Z)` male compatibility.
+    male_compat: DeviceBuffer<f32>,
+}
+
+impl CachedGenetics {
+    /// Allocate the zero-filled table buffers for the executor dimensions.
+    fn new(
+        stream: &Arc<CudaStream>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+    ) -> Result<Self, String> {
+        let z2 = n_ztypes * n_ztypes;
+        Ok(Self {
+            variants: Vec::new(),
+            deme_variants: Vec::new(),
+            ready: false,
+            viability: DeviceBuffer::from_host(
+                stream,
+                &vec![0.0f32; n_batch * 2 * n_ages * n_ztypes],
+            )?,
+            fecundity: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch * 2 * n_ztypes])?,
+            sexual_selection: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch * z2])?,
+            offspring: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch * z2 * n_ztypes])?,
+            zygote: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch * 2 * n_ztypes])?,
+            female_compat: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch * n_ztypes])?,
+            male_compat: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch * n_ztypes])?,
+        })
+    }
+
+    /// Rebuild and upload the tables when the keys changed.
+    ///
+    /// ## Errors
+    /// Returns a description when a deme references a missing variant or a
+    /// table has the wrong length.
+    fn ensure(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        variants: &[GeneticsTensors],
+        deme_variants: &[usize],
+    ) -> Result<(), String> {
+        if self.ready
+            && self.variants.as_slice() == variants
+            && self.deme_variants.as_slice() == deme_variants
+        {
+            return Ok(());
+        }
+        let variant_stride = 2 * n_ages * n_ztypes;
+        let z2 = n_ztypes * n_ztypes;
+        let z3 = z2 * n_ztypes;
+        let mut viability = vec![0.0f32; n_batch * variant_stride];
+        let mut fecundity = vec![0.0f32; n_batch * 2 * n_ztypes];
+        let mut sexual_selection = vec![0.0f32; n_batch * z2];
+        let mut offspring = vec![0.0f32; n_batch * z3];
+        let mut zygote = vec![0.0f32; n_batch * 2 * n_ztypes];
+        let mut female_compat = vec![0.0f32; n_batch * n_ztypes];
+        let mut male_compat = vec![0.0f32; n_batch * n_ztypes];
+        for (batch, &variant_id) in deme_variants.iter().enumerate() {
+            let genetics = variants.get(variant_id).ok_or_else(|| {
+                format!("deme {batch} references missing genetics variant {variant_id}")
+            })?;
+            if genetics.viability_fitness.len() != variant_stride {
+                return Err(format!(
+                    "variant {variant_id} viability_fitness has {} elements, expected {variant_stride}",
+                    genetics.viability_fitness.len()
+                ));
+            }
+            copy_narrow(
+                &mut viability[batch * variant_stride..(batch + 1) * variant_stride],
+                &genetics.viability_fitness,
+                "viability_fitness",
+                variant_id,
+            )?;
+            let base2 = batch * 2 * n_ztypes;
+            copy_narrow(
+                &mut fecundity[base2..base2 + 2 * n_ztypes],
+                &genetics.fecundity_fitness,
+                "fecundity_fitness",
+                variant_id,
+            )?;
+            copy_narrow(
+                &mut zygote[base2..base2 + 2 * n_ztypes],
+                &genetics.zygote_viability_fitness,
+                "zygote_viability_fitness",
+                variant_id,
+            )?;
+            let basez = batch * n_ztypes;
+            copy_narrow(
+                &mut female_compat[basez..basez + n_ztypes],
+                &genetics.female_ztype_compatibility,
+                "female_ztype_compatibility",
+                variant_id,
+            )?;
+            copy_narrow(
+                &mut male_compat[basez..basez + n_ztypes],
+                &genetics.male_ztype_compatibility,
+                "male_ztype_compatibility",
+                variant_id,
+            )?;
+            let basezz = batch * z2;
+            copy_narrow(
+                &mut sexual_selection[basezz..basezz + z2],
+                &genetics.sexual_selection_fitness,
+                "sexual_selection_fitness",
+                variant_id,
+            )?;
+            let basezzz = batch * z3;
+            copy_narrow(
+                &mut offspring[basezzz..basezzz + z3],
+                &genetics.offspring_tensor,
+                "offspring_tensor",
+                variant_id,
+            )?;
+        }
+        self.viability = DeviceBuffer::from_host(stream, &viability)?;
+        self.fecundity = DeviceBuffer::from_host(stream, &fecundity)?;
+        self.sexual_selection = DeviceBuffer::from_host(stream, &sexual_selection)?;
+        self.offspring = DeviceBuffer::from_host(stream, &offspring)?;
+        self.zygote = DeviceBuffer::from_host(stream, &zygote)?;
+        self.female_compat = DeviceBuffer::from_host(stream, &female_compat)?;
+        self.male_compat = DeviceBuffer::from_host(stream, &male_compat)?;
+        self.variants = variants.to_vec();
+        self.deme_variants = deme_variants.to_vec();
+        self.ready = true;
+        Ok(())
+    }
+}
+
+/// Cached device parameters for the per-tick stages.
+///
+/// Every device tensor is a pure function of the session contracts; the stage
+/// code refreshes only the tensors whose source changed. Allocating them once
+/// also lets the executor size the §D5 budget guard against the full per-tick
+/// footprint instead of the state alone.
+struct ParamCache {
+    /// `(B, 2, A)` survival rates.
+    survival: CachedF32,
+    /// `(B, A)` reproduction participation.
+    reproduction: CachedF32,
+    /// `(B, A)` relative fertility.
+    fertility: CachedF32,
+    /// `(B, A)` juvenile competition weights.
+    competition: CachedF32,
+    /// `(B,)` external expected eggs.
+    external: CachedF32,
+    /// `(B,)` carrying capacity.
+    carrying: CachedF32,
+    /// `(B,)` eggs per female.
+    eggs: CachedF32,
+    /// `(B,)` sex ratio.
+    sex_ratio: CachedF32,
+    /// `(B,)` low-density growth rates.
+    low_density: CachedF32,
+    /// `(B, 2, A)` mating rates.
+    mating: CachedF32,
+    /// `(B,)` sperm displacement rates.
+    displacement: CachedF32,
+    /// `(B, 2, A)` declared equilibrium distribution (zeros when empty).
+    distribution: CachedF32,
+    /// `(B,)` equilibrium declaration flags.
+    declared: CachedI32<bool>,
+    /// `(B,)` growth mode ids.
+    growth: CachedI32<i64>,
+    /// `(Z,)` female-only sex-chromosome flags.
+    female_only: CachedI32<bool>,
+    /// `(Z,)` male-only sex-chromosome flags.
+    male_only: CachedI32<bool>,
+    /// Per-batch genetics tables.
+    genetics: CachedGenetics,
+    /// `(B,)` density scaling scratch.
+    scaling: DeviceBuffer<f32>,
+    /// `(B,)` deterministic recruitment factor scratch.
+    factor: DeviceBuffer<f32>,
+}
+
+impl ParamCache {
+    /// Allocate every cache buffer for the executor dimensions.
+    fn new(
+        stream: &Arc<CudaStream>,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            survival: CachedF32::new(stream, n_batch * 2 * n_ages)?,
+            reproduction: CachedF32::new(stream, n_batch * n_ages)?,
+            fertility: CachedF32::new(stream, n_batch * n_ages)?,
+            competition: CachedF32::new(stream, n_batch * n_ages)?,
+            external: CachedF32::new(stream, n_batch)?,
+            carrying: CachedF32::new(stream, n_batch)?,
+            eggs: CachedF32::new(stream, n_batch)?,
+            sex_ratio: CachedF32::new(stream, n_batch)?,
+            low_density: CachedF32::new(stream, n_batch)?,
+            mating: CachedF32::new(stream, n_batch * 2 * n_ages)?,
+            displacement: CachedF32::new(stream, n_batch)?,
+            distribution: CachedF32::new(stream, n_batch * 2 * n_ages)?,
+            declared: CachedI32::new(stream, n_batch)?,
+            growth: CachedI32::new(stream, n_batch)?,
+            female_only: CachedI32::new(stream, n_ztypes)?,
+            male_only: CachedI32::new(stream, n_ztypes)?,
+            genetics: CachedGenetics::new(stream, n_batch, n_ages, n_ztypes)?,
+            scaling: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch])?,
+            factor: DeviceBuffer::from_host(stream, &vec![0.0f32; n_batch])?,
+        })
+    }
+
+    /// Refresh the tensors the density/equilibrium stage reads.
+    ///
+    /// ## Errors
+    /// Returns a description when a device transfer fails.
+    fn sync_density(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        ecology: &EcologyParams,
+        n_batch: usize,
+        n_ages: usize,
+    ) -> Result<(), String> {
+        self.survival.sync(stream, &ecology.survival_rates)?;
+        self.reproduction
+            .sync(stream, &ecology.reproduction_rates)?;
+        self.fertility.sync(stream, &ecology.fertility)?;
+        self.competition
+            .sync(stream, &ecology.competition_weights)?;
+        self.declared
+            .sync(stream, &ecology.equilibrium_declared, |flag| {
+                i32::from(*flag)
+            })?;
+        self.distribution.sync_or_zeros(
+            stream,
+            &ecology.equilibrium_distribution,
+            n_batch * 2 * n_ages,
+        )?;
+        self.external
+            .sync(stream, &ecology.external_expected_eggs)?;
+        self.carrying.sync(stream, &ecology.carrying_capacity)?;
+        self.eggs.sync(stream, &ecology.eggs_per_female)?;
+        self.sex_ratio.sync(stream, &ecology.sex_ratio)?;
+        self.growth
+            .sync(stream, &ecology.growth_mode, |mode| *mode as i32)?;
+        self.low_density
+            .sync(stream, &ecology.low_density_growth_rate)?;
+        Ok(())
+    }
+
+    /// Refresh the tensors the reproduction stage reads.
+    ///
+    /// ## Errors
+    /// Returns a description when a device transfer fails.
+    fn sync_reproduction(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        ecology: &EcologyParams,
+        blueprint: &Blueprint,
+    ) -> Result<(), String> {
+        self.mating.sync(stream, &ecology.mating_rates)?;
+        self.displacement
+            .sync(stream, &ecology.sperm_displacement_rate)?;
+        self.reproduction
+            .sync(stream, &ecology.reproduction_rates)?;
+        self.fertility.sync(stream, &ecology.fertility)?;
+        self.eggs.sync(stream, &ecology.eggs_per_female)?;
+        self.sex_ratio.sync(stream, &ecology.sex_ratio)?;
+        self.female_only
+            .sync(stream, &blueprint.female_only_by_sex_chrom, |flag| {
+                i32::from(*flag)
+            })?;
+        self.male_only
+            .sync(stream, &blueprint.male_only_by_sex_chrom, |flag| {
+                i32::from(*flag)
+            })?;
+        Ok(())
+    }
+}
+
+/// Validate the ecology columns the density/equilibrium stage reads.
+///
+/// Kept identical to the checks the public [`GpuExecutor::density_scaling`]
+/// performs so the cached path fails the same way on malformed input.
+///
+/// ## Errors
+/// Returns a description on a length mismatch or a non-portable growth mode.
+fn validate_density_ecology(
+    ecology: &EcologyParams,
+    n_batch: usize,
+    n_ages: usize,
+) -> Result<(), String> {
+    if ecology.n_demes != n_batch {
+        return Err(format!(
+            "executor batch is {n_batch} but the ecology carries {} deme columns",
+            ecology.n_demes
+        ));
+    }
+    expect_len(
+        "survival_rates",
+        ecology.survival_rates.len(),
+        n_batch * 2 * n_ages,
+    )?;
+    expect_len(
+        "reproduction_rates",
+        ecology.reproduction_rates.len(),
+        n_batch * n_ages,
+    )?;
+    expect_len("fertility", ecology.fertility.len(), n_batch * n_ages)?;
+    expect_len(
+        "competition_weights",
+        ecology.competition_weights.len(),
+        n_batch * n_ages,
+    )?;
+    expect_len(
+        "equilibrium_declared",
+        ecology.equilibrium_declared.len(),
+        n_batch,
+    )?;
+    if !ecology.equilibrium_distribution.is_empty() {
+        expect_len(
+            "equilibrium_distribution",
+            ecology.equilibrium_distribution.len(),
+            n_batch * 2 * n_ages,
+        )?;
+    }
+    expect_len(
+        "external_expected_eggs",
+        ecology.external_expected_eggs.len(),
+        n_batch,
+    )?;
+    expect_len(
+        "carrying_capacity",
+        ecology.carrying_capacity.len(),
+        n_batch,
+    )?;
+    expect_len("eggs_per_female", ecology.eggs_per_female.len(), n_batch)?;
+    expect_len("sex_ratio", ecology.sex_ratio.len(), n_batch)?;
+    expect_len(
+        "low_density_growth_rate",
+        ecology.low_density_growth_rate.len(),
+        n_batch,
+    )?;
+    expect_len("growth_mode", ecology.growth_mode.len(), n_batch)?;
+    if let Some((deme, mode)) = ecology
+        .growth_mode
+        .iter()
+        .enumerate()
+        .find(|(_, mode)| !(0..=4).contains(*mode))
+    {
+        return Err(format!(
+            "growth mode {mode} at deme {deme} is outside the portable range 0..=4 \
+             (custom curves are not supported on the device)"
+        ));
+    }
+    Ok(())
+}
+
 /// Which lifecycle the tick runs between its hook events.
 #[derive(Clone, Copy)]
 enum TickStages {
@@ -350,9 +829,10 @@ impl GpuExecutor {
                 sperm_host.len()
             ));
         }
-        // Double-buffered state: each plane needs a scratch for out-of-place
-        // aging. Check before allocating so an over-budget run fails cleanly.
-        let required = 2 * Self::state_bytes(n_batch, n_ages, n_ztypes);
+        // Double-buffered state plus the resident per-tick parameter cache.
+        // Check before allocating so an over-budget run fails cleanly.
+        let required = 2 * Self::state_bytes(n_batch, n_ages, n_ztypes)
+            + Self::cache_bytes(n_batch, n_ages, n_ztypes);
         let (free, _total) = context.memory_info()?;
         ensure_memory_budget(free, required)?;
         let ind_axes = [2usize, n_ages, n_ztypes];
@@ -387,6 +867,7 @@ impl GpuExecutor {
             hooks: None,
             active_mask: DeviceBuffer::from_host(&stream, &vec![1i32; n_batch])?,
             stage_masking: false,
+            params: ParamCache::new(&stream, n_batch, n_ages, n_ztypes)?,
         })
     }
 
@@ -790,6 +1271,25 @@ impl GpuExecutor {
         (ind + sperm) * n_batch * size_of::<f32>()
     }
 
+    /// Device bytes the resident per-tick parameter cache holds.
+    ///
+    /// Counts every [`ParamCache`] tensor so [`GpuExecutor::new`]'s §D5 guard
+    /// covers the full steady-state footprint, not just the state planes.
+    ///
+    /// ## Parameters
+    /// - `n_batch`, `n_ages`, `n_ztypes`: Model dimensions.
+    ///
+    /// ## Returns
+    /// The cache footprint in bytes.
+    pub fn cache_bytes(n_batch: usize, n_ages: usize, n_ztypes: usize) -> usize {
+        let z2 = n_ztypes * n_ztypes;
+        // f32 tensors: ecology columns plus the tiled genetics tables.
+        let f32_elems = 8 * n_ages + 8 + 2 * n_ages * n_ztypes + 6 * n_ztypes + z2 + z2 * n_ztypes;
+        // i32 tensors: per-batch declaration/growth flags and the sex masks.
+        let i32_elems = 2 * n_batch + 2 * n_ztypes;
+        (f32_elems * n_batch + i32_elems) * size_of::<f32>()
+    }
+
     /// Run one aging stage on the device.
     ///
     /// Every individual and sperm age class shifts down one slot and age 0 is
@@ -892,69 +1392,7 @@ impl GpuExecutor {
                 blueprint.n_ages, blueprint.n_ztypes
             ));
         }
-        if ecology.n_demes != n_batch {
-            return Err(format!(
-                "executor batch is {n_batch} but the ecology carries {} deme columns",
-                ecology.n_demes
-            ));
-        }
-        expect_len(
-            "survival_rates",
-            ecology.survival_rates.len(),
-            n_batch * 2 * n_ages,
-        )?;
-        expect_len(
-            "reproduction_rates",
-            ecology.reproduction_rates.len(),
-            n_batch * n_ages,
-        )?;
-        expect_len("fertility", ecology.fertility.len(), n_batch * n_ages)?;
-        expect_len(
-            "competition_weights",
-            ecology.competition_weights.len(),
-            n_batch * n_ages,
-        )?;
-        expect_len(
-            "equilibrium_declared",
-            ecology.equilibrium_declared.len(),
-            n_batch,
-        )?;
-        if !ecology.equilibrium_distribution.is_empty() {
-            expect_len(
-                "equilibrium_distribution",
-                ecology.equilibrium_distribution.len(),
-                n_batch * 2 * n_ages,
-            )?;
-        }
-        expect_len(
-            "external_expected_eggs",
-            ecology.external_expected_eggs.len(),
-            n_batch,
-        )?;
-        expect_len(
-            "carrying_capacity",
-            ecology.carrying_capacity.len(),
-            n_batch,
-        )?;
-        expect_len("eggs_per_female", ecology.eggs_per_female.len(), n_batch)?;
-        expect_len("sex_ratio", ecology.sex_ratio.len(), n_batch)?;
-        expect_len(
-            "low_density_growth_rate",
-            ecology.low_density_growth_rate.len(),
-            n_batch,
-        )?;
-        expect_len("growth_mode", ecology.growth_mode.len(), n_batch)?;
-        if let Some((deme, mode)) = ecology
-            .growth_mode
-            .iter()
-            .enumerate()
-            .find(|(_, mode)| !(0..=4).contains(*mode))
-        {
-            return Err(format!(
-                "growth mode {mode} at deme {deme} is outside the portable range 0..=4 \
-                 (custom curves are not supported on the device)"
-            ));
-        }
+        validate_density_ecology(ecology, n_batch, n_ages)?;
         let declared: Vec<i32> = ecology
             .equilibrium_declared
             .iter()
@@ -1034,6 +1472,63 @@ impl GpuExecutor {
         scaling.to_host(&stream)
     }
 
+    /// Device-resident density scaling using the cached ecology tensors.
+    ///
+    /// Writes the `B` factors into [`ParamCache::scaling`] without a host
+    /// round-trip and reuses the cached parameter/table uploads, so repeated
+    /// ticks skip the retile and allocation the public path performs.
+    ///
+    /// ## Errors
+    /// As [`GpuExecutor::density_scaling`].
+    fn density_scaling_cached(
+        &mut self,
+        blueprint: &Blueprint,
+        ecology: &EcologyParams,
+        discrete_actual: bool,
+    ) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        let n_ztypes = self.n_ztypes;
+        if blueprint.n_ages != n_ages || blueprint.n_ztypes != n_ztypes {
+            return Err(format!(
+                "executor dimensions (A={n_ages}, Z={n_ztypes}) disagree with the blueprint \
+                 (A={}, Z={})",
+                blueprint.n_ages, blueprint.n_ztypes
+            ));
+        }
+        validate_density_ecology(ecology, n_batch, n_ages)?;
+        let stream = self.context.stream();
+        self.params
+            .sync_density(&stream, ecology, n_batch, n_ages)?;
+        let mut buffers = DensityBuffers {
+            ind: self.ind.slice(),
+            survival_rates: self.params.survival.dev.slice(),
+            reproduction_rates: self.params.reproduction.dev.slice(),
+            fertility: self.params.fertility.dev.slice(),
+            competition_weights: self.params.competition.dev.slice(),
+            equilibrium_declared: self.params.declared.dev.slice(),
+            equilibrium_distribution: self.params.distribution.dev.slice(),
+            external_expected_eggs: self.params.external.dev.slice(),
+            carrying_capacity: self.params.carrying.dev.slice(),
+            eggs_per_female: self.params.eggs.dev.slice(),
+            sex_ratio: self.params.sex_ratio.dev.slice(),
+            growth_mode: self.params.growth.dev.slice(),
+            low_density_growth_rate: self.params.low_density.dev.slice(),
+            scaling_out: self.params.scaling.slice_mut(),
+        };
+        self.kernels.density_scaling(
+            &stream,
+            &mut buffers,
+            n_batch,
+            n_ages,
+            n_ztypes,
+            blueprint.new_adult_age,
+            discrete_actual,
+            self.active_mask.slice(),
+            self.stage_masking,
+        )
+    }
+
     /// Run one deterministic survival stage (density regulation + recruitment
     /// + combined-rate scaling) on the device.
     ///
@@ -1070,27 +1565,11 @@ impl GpuExecutor {
                 deme_variants.len()
             ));
         }
-        let scaling = self.density_scaling_device(blueprint, ecology, false)?;
-        let variant_stride = 2 * n_ages * n_ztypes;
-        let mut viability = vec![0.0f32; n_batch * variant_stride];
-        for (batch, &variant_id) in deme_variants.iter().enumerate() {
-            let genetics = variants.get(variant_id).ok_or_else(|| {
-                format!("deme {batch} references missing genetics variant {variant_id}")
-            })?;
-            if genetics.viability_fitness.len() != variant_stride {
-                return Err(format!(
-                    "variant {variant_id} viability_fitness has {} elements, expected {variant_stride}",
-                    genetics.viability_fitness.len()
-                ));
-            }
-            let dst = &mut viability[batch * variant_stride..(batch + 1) * variant_stride];
-            for (slot, value) in dst.iter_mut().zip(&genetics.viability_fitness) {
-                *slot = *value as f32;
-            }
-        }
+        self.density_scaling_cached(blueprint, ecology, false)?;
         let stream = self.context.stream();
-        let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
-        let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
+        self.params
+            .genetics
+            .ensure(&stream, n_batch, n_ages, n_ztypes, variants, deme_variants)?;
         if blueprint.stochastic {
             let (key0, key1) = self.rng_key();
             let recruit_site = self.rng_site(0);
@@ -1098,7 +1577,7 @@ impl GpuExecutor {
             self.kernels.recruit_stochastic(
                 &stream,
                 self.ind.slice_mut(),
-                scaling.slice(),
+                self.params.scaling.slice(),
                 n_batch,
                 n_ages,
                 n_ztypes,
@@ -1112,8 +1591,8 @@ impl GpuExecutor {
                 &stream,
                 self.ind.slice_mut(),
                 self.sperm.slice_mut(),
-                survival_rates.slice(),
-                viability_buf.slice(),
+                self.params.survival.dev.slice(),
+                self.params.genetics.viability.slice(),
                 n_batch,
                 n_ages,
                 n_ztypes,
@@ -1133,12 +1612,11 @@ impl GpuExecutor {
             }
             return Ok(());
         }
-        let mut factor = DeviceBuffer::from_host(&stream, &vec![0.0f32; n_batch])?;
         self.kernels.recruit_factor(
             &stream,
             self.ind.slice(),
-            scaling.slice(),
-            factor.slice_mut(),
+            self.params.scaling.slice(),
+            self.params.factor.slice_mut(),
             n_batch,
             n_ages,
             n_ztypes,
@@ -1148,9 +1626,9 @@ impl GpuExecutor {
         self.kernels.survival_scale_ind(
             &stream,
             self.ind.slice_mut(),
-            factor.slice(),
-            survival_rates.slice(),
-            viability_buf.slice(),
+            self.params.factor.slice(),
+            self.params.survival.dev.slice(),
+            self.params.genetics.viability.slice(),
             n_batch,
             n_ages,
             n_ztypes,
@@ -1161,8 +1639,8 @@ impl GpuExecutor {
         self.kernels.survival_scale_sperm(
             &stream,
             self.sperm.slice_mut(),
-            survival_rates.slice(),
-            viability_buf.slice(),
+            self.params.survival.dev.slice(),
+            self.params.genetics.viability.slice(),
             n_batch,
             n_ages,
             n_ztypes,
@@ -1264,59 +1742,6 @@ impl GpuExecutor {
         expect_len("fertility", ecology.fertility.len(), n_batch * n_ages)?;
         expect_len("eggs_per_female", ecology.eggs_per_female.len(), n_batch)?;
         expect_len("sex_ratio", ecology.sex_ratio.len(), n_batch)?;
-        let z2 = n_ztypes * n_ztypes;
-        let z3 = z2 * n_ztypes;
-        let mut fecundity = vec![0.0f32; n_batch * 2 * n_ztypes];
-        let mut sexual_selection = vec![0.0f32; n_batch * z2];
-        let mut offspring = vec![0.0f32; n_batch * z3];
-        let mut zygote = vec![0.0f32; n_batch * 2 * n_ztypes];
-        let mut female_compat = vec![0.0f32; n_batch * n_ztypes];
-        let mut male_compat = vec![0.0f32; n_batch * n_ztypes];
-        for (batch, &variant_id) in deme_variants.iter().enumerate() {
-            let genetics = variants.get(variant_id).ok_or_else(|| {
-                format!("deme {batch} references missing genetics variant {variant_id}")
-            })?;
-            let base2 = batch * 2 * n_ztypes;
-            copy_narrow(
-                &mut fecundity[base2..base2 + 2 * n_ztypes],
-                &genetics.fecundity_fitness,
-                "fecundity_fitness",
-                variant_id,
-            )?;
-            copy_narrow(
-                &mut zygote[base2..base2 + 2 * n_ztypes],
-                &genetics.zygote_viability_fitness,
-                "zygote_viability_fitness",
-                variant_id,
-            )?;
-            let basez = batch * n_ztypes;
-            copy_narrow(
-                &mut female_compat[basez..basez + n_ztypes],
-                &genetics.female_ztype_compatibility,
-                "female_ztype_compatibility",
-                variant_id,
-            )?;
-            copy_narrow(
-                &mut male_compat[basez..basez + n_ztypes],
-                &genetics.male_ztype_compatibility,
-                "male_ztype_compatibility",
-                variant_id,
-            )?;
-            let basezz = batch * z2;
-            copy_narrow(
-                &mut sexual_selection[basezz..basezz + z2],
-                &genetics.sexual_selection_fitness,
-                "sexual_selection_fitness",
-                variant_id,
-            )?;
-            let basezzz = batch * z3;
-            copy_narrow(
-                &mut offspring[basezzz..basezzz + z3],
-                &genetics.offspring_tensor,
-                "offspring_tensor",
-                variant_id,
-            )?;
-        }
         if blueprint.female_only_by_sex_chrom.len() != n_ztypes
             || blueprint.male_only_by_sex_chrom.len() != n_ztypes
         {
@@ -1326,46 +1751,26 @@ impl GpuExecutor {
                 blueprint.male_only_by_sex_chrom.len()
             ));
         }
-        let female_only: Vec<i32> = blueprint
-            .female_only_by_sex_chrom
-            .iter()
-            .map(|&flag| i32::from(flag))
-            .collect();
-        let male_only: Vec<i32> = blueprint
-            .male_only_by_sex_chrom
-            .iter()
-            .map(|&flag| i32::from(flag))
-            .collect();
         let stream = self.context.stream();
-        let mating_rates = upload_f64(&stream, &ecology.mating_rates)?;
-        let displacement = upload_f64(&stream, &ecology.sperm_displacement_rate)?;
-        let reproduction_rates = upload_f64(&stream, &ecology.reproduction_rates)?;
-        let fertility = upload_f64(&stream, &ecology.fertility)?;
-        let eggs = upload_f64(&stream, &ecology.eggs_per_female)?;
-        let sex_ratio = upload_f64(&stream, &ecology.sex_ratio)?;
-        let female_only_buf = DeviceBuffer::from_host(&stream, &female_only)?;
-        let male_only_buf = DeviceBuffer::from_host(&stream, &male_only)?;
-        let fecundity_buf = DeviceBuffer::from_host(&stream, &fecundity)?;
-        let sexual_selection_buf = DeviceBuffer::from_host(&stream, &sexual_selection)?;
-        let offspring_buf = DeviceBuffer::from_host(&stream, &offspring)?;
-        let zygote_buf = DeviceBuffer::from_host(&stream, &zygote)?;
-        let female_compat_buf = DeviceBuffer::from_host(&stream, &female_compat)?;
-        let male_compat_buf = DeviceBuffer::from_host(&stream, &male_compat)?;
+        self.params.sync_reproduction(&stream, ecology, blueprint)?;
+        self.params
+            .genetics
+            .ensure(&stream, n_batch, n_ages, n_ztypes, variants, deme_variants)?;
         let reproduction_buffers = ReproductionBuffers {
-            mating_rates: mating_rates.slice(),
-            sperm_displacement_rate: displacement.slice(),
-            reproduction_rates: reproduction_rates.slice(),
-            fertility: fertility.slice(),
-            eggs_per_female: eggs.slice(),
-            sex_ratio: sex_ratio.slice(),
-            female_only: female_only_buf.slice(),
-            male_only: male_only_buf.slice(),
-            fecundity: fecundity_buf.slice(),
-            sexual_selection: sexual_selection_buf.slice(),
-            offspring: offspring_buf.slice(),
-            zygote_viability: zygote_buf.slice(),
-            female_compat: female_compat_buf.slice(),
-            male_compat: male_compat_buf.slice(),
+            mating_rates: self.params.mating.dev.slice(),
+            sperm_displacement_rate: self.params.displacement.dev.slice(),
+            reproduction_rates: self.params.reproduction.dev.slice(),
+            fertility: self.params.fertility.dev.slice(),
+            eggs_per_female: self.params.eggs.dev.slice(),
+            sex_ratio: self.params.sex_ratio.dev.slice(),
+            female_only: self.params.female_only.dev.slice(),
+            male_only: self.params.male_only.dev.slice(),
+            fecundity: self.params.genetics.fecundity.slice(),
+            sexual_selection: self.params.genetics.sexual_selection.slice(),
+            offspring: self.params.genetics.offspring.slice(),
+            zygote_viability: self.params.genetics.zygote.slice(),
+            female_compat: self.params.genetics.female_compat.slice(),
+            male_compat: self.params.genetics.male_compat.slice(),
         };
         if discrete {
             let (key0, key1) = self.rng_key();
@@ -1729,27 +2134,11 @@ impl GpuExecutor {
             ecology.survival_rates.len(),
             n_batch * 2 * n_ages,
         )?;
-        let scaling = self.density_scaling_device(blueprint, ecology, true)?;
-        let variant_stride = 2 * n_ages * n_ztypes;
-        let mut viability = vec![0.0f32; n_batch * variant_stride];
-        for (batch, &variant_id) in deme_variants.iter().enumerate() {
-            let genetics = variants.get(variant_id).ok_or_else(|| {
-                format!("deme {batch} references missing genetics variant {variant_id}")
-            })?;
-            if genetics.viability_fitness.len() != variant_stride {
-                return Err(format!(
-                    "variant {variant_id} viability_fitness has {} elements, expected {variant_stride}",
-                    genetics.viability_fitness.len()
-                ));
-            }
-            let dst = &mut viability[batch * variant_stride..(batch + 1) * variant_stride];
-            for (slot, value) in dst.iter_mut().zip(&genetics.viability_fitness) {
-                *slot = *value as f32;
-            }
-        }
+        self.density_scaling_cached(blueprint, ecology, true)?;
         let stream = self.context.stream();
-        let survival_rates = upload_f64(&stream, &ecology.survival_rates)?;
-        let viability_buf = DeviceBuffer::from_host(&stream, &viability)?;
+        self.params
+            .genetics
+            .ensure(&stream, n_batch, n_ages, n_ztypes, variants, deme_variants)?;
         let (key0, key1) = self.rng_key();
         let site = self.rng_site(1);
         self.kernels.discrete_survival(
@@ -1760,9 +2149,9 @@ impl GpuExecutor {
             n_ztypes,
             blueprint.stochastic,
             blueprint.continuous_sampling,
-            scaling.slice(),
-            survival_rates.slice(),
-            viability_buf.slice(),
+            self.params.scaling.slice(),
+            self.params.survival.dev.slice(),
+            self.params.genetics.viability.slice(),
             key0,
             key1,
             site,

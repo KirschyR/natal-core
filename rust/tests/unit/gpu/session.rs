@@ -3114,3 +3114,219 @@ fn session_gpu_particles_extinct_batches_match_cpu() {
         }
     });
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for P9d (extinct-particle stage masking).
+// ---------------------------------------------------------------------------
+
+/// An ecology whose zero survival drives the particle extinct after one tick.
+fn extinct_particle(base: &EcologyParams) -> EcologyParams {
+    let mut p = base.clone();
+    p.survival_rates = vec![0.0; p.survival_rates.len()];
+    p
+}
+
+/// A global `SET(value)` program (one op at `first`), which revives zero state.
+fn particle_set_program(value: f64) -> HookProgram {
+    let mut q = HookProgram::default();
+    q.n_events = 4;
+    q.n_hooks = 1;
+    q.hook_offsets = vec![0, 1, 1, 1, 1];
+    q.op_offsets = vec![0, 1];
+    q.op_types = vec![1];
+    q.zidx_offsets = vec![0, 2];
+    q.zidx_data = vec![0, 1];
+    q.age_offsets = vec![0, 4];
+    q.age_data = vec![0, 1, 2, 3];
+    q.sex_masks = vec![true, true];
+    q.params = vec![value];
+    q.condition_offsets = vec![0, 0];
+    q.deme_selector_types = vec![0];
+    q.deme_selector_offsets = vec![0, 0];
+    q.convert_source_z = vec![-1];
+    q.convert_target_z = vec![-1];
+    q
+}
+
+#[test]
+fn evaluator_gpu_particle_stage_masking_is_transparent() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        for (stochastic, continuous) in [(false, false), (true, false), (true, true)] {
+            let (mut blueprint, base, genetics) = fixture();
+            blueprint.stochastic = stochastic;
+            blueprint.continuous_sampling = continuous;
+            let (ind, sperm) = initial_state();
+            let particles = vec![
+                particle_ecology(&base, 0),
+                extinct_particle(&base),
+                particle_ecology(&base, 1),
+            ];
+
+            let run = |masking: bool| -> (Vec<f64>, Vec<f64>) {
+                let mut session = make_session(
+                    blueprint.clone(),
+                    base.clone(),
+                    genetics.clone(),
+                    ind.clone(),
+                    sperm.clone(),
+                );
+                session
+                    .enable_gpu_particles_ecologies_replicated(particles.clone(), 1)
+                    .expect("enable particles");
+                if !masking {
+                    session.gpu.as_mut().expect("gpu").set_stage_masking(false);
+                }
+                let (_tick, iarr, sarr) = session.run_gpu_particles(py, 4).expect("run particles");
+                (
+                    iarr.readonly().as_slice().expect("ind").to_vec(),
+                    sarr.readonly().as_slice().expect("sperm").to_vec(),
+                )
+            };
+            let (masked_ind, masked_sperm) = run(true);
+            let (plain_ind, plain_sperm) = run(false);
+            assert_eq!(
+                masked_ind, plain_ind,
+                "masked vs unmasked ind (stochastic={stochastic} continuous={continuous})"
+            );
+            assert_eq!(
+                masked_sperm, plain_sperm,
+                "masked vs unmasked sperm (stochastic={stochastic} continuous={continuous})"
+            );
+
+            // Extinct particle's final state is exactly zero; active ones are not.
+            let ind_block = 2 * 4 * 2;
+            let extinct_block = &masked_ind[ind_block..2 * ind_block];
+            assert!(
+                extinct_block.iter().all(|v| *v == 0.0),
+                "extinct particle must stay all-zero"
+            );
+            assert!(
+                masked_ind[..ind_block].iter().any(|v| *v > 0.0),
+                "viable particle must survive"
+            );
+
+            // Independently agree with per-particle CPU sessions.
+            for (p_index, part) in particles.iter().enumerate() {
+                let mut cpu = make_session(
+                    blueprint.clone(),
+                    part.clone(),
+                    genetics.clone(),
+                    ind.clone(),
+                    sperm.clone(),
+                );
+                cpu.run_inner(py, 4, 0, None, 0).expect("cpu run");
+                if stochastic {
+                    // Only the extinct particle is deterministic across engines.
+                    if p_index != 1 {
+                        continue;
+                    }
+                }
+                for (cell, (got, want)) in masked_ind
+                    [p_index * ind_block..(p_index + 1) * ind_block]
+                    .iter()
+                    .zip(cpu.state_ind.iter())
+                    .enumerate()
+                {
+                    let (got, want) = (*got as f32, *want as f32);
+                    assert!(
+                        (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                        "stochastic={stochastic} particle {p_index} ind[{cell}]: {got} vs {want}"
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn evaluator_gpu_particle_reviving_hook_disables_masking() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        // A hook SET(5) at `first` revives an extinct particle every tick. With
+        // hooks installed the masking must be off so the revived state still
+        // undergoes survival/aging, matching the CPU.
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let particles = vec![extinct_particle(&base)];
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.hooks = particle_set_program(5.0);
+        gpu.enable_gpu_particles_ecologies_replicated(particles.clone(), 1)
+            .expect("enable particles");
+        let (_t, iarr, _) = gpu.run_gpu_particles(py, 3).expect("gpu run");
+        let gpu_ind: Vec<f64> = iarr.readonly().as_slice().expect("ind").to_vec();
+
+        let mut cpu = make_session(
+            blueprint.clone(),
+            particles[0].clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        cpu.hooks = particle_set_program(5.0);
+        cpu.run_inner(py, 3, 0, None, 0).expect("cpu run");
+
+        for (cell, (got, want)) in gpu_ind.iter().zip(cpu.state_ind.iter()).enumerate() {
+            let (got, want) = (*got as f32, *want as f32);
+            assert!(
+                (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                "revived particle ind[{cell}]: device {got} vs host {want}"
+            );
+        }
+    });
+}
+
+#[test]
+fn evaluator_gpu_particle_mask_keys_on_zero_individual_state() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        // Normal extinction: zero individuals also drive stored sperm to zero,
+        // so a genuinely extinct batch is fully zero and masking is transparent.
+        // (The mask keys on `ind`; a degenerate `ind==0, sperm!=0` state is not
+        // reachable through normal dynamics.)
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let particles = vec![extinct_particle(&base)];
+
+        let mut session = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        session
+            .enable_gpu_particles_ecologies_replicated(particles.clone(), 1)
+            .expect("enable particles");
+        let (_tick, iarr, sarr) = session.run_gpu_particles(py, 3).expect("run particles");
+        let ind_out: Vec<f64> = iarr.readonly().as_slice().expect("ind").to_vec();
+        let sperm_out: Vec<f64> = sarr.readonly().as_slice().expect("sperm").to_vec();
+        assert!(
+            ind_out.iter().all(|v| *v == 0.0),
+            "extinct ind must be zero"
+        );
+        assert!(
+            sperm_out.iter().all(|v| *v == 0.0),
+            "extinct stored sperm must be zero"
+        );
+    });
+}

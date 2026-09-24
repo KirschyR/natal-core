@@ -217,11 +217,11 @@ rust/tests/unit/gpu/   probe/cuda/context/buffers/layout/kernels/executor/sessio
 ## 9. 测试与门禁
 
 - 门禁命令：`python scripts/check_rust.py`（fmt+clippy+check+test）、`cargo test`（默认 **67**）、
-  `cargo test --features gpu`（当前 **236**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
+  `cargo test --features gpu`（当前 **241**，含 evaluator 用例）、`NATAL_GPU_REQUIRE=0 cargo test --features gpu`
   （跳过硬件）、`ruff`、`pyright`、`pytest`（3628）、`phase0_baseline.py --check`。
 - GPU 测试默认**硬门禁**：`NATAL_GPU_REQUIRE` 未设=强制；CPU-only 主机需显式 `=0`。
 - 覆盖：严格按绝对路径过滤 `rust/src/gpu/**`（**注意**：`--sources src/gpu` 会误含
-  `src/gpu/../../tests/...`），当前聚合 **96.66%**（executor 95.9%、kernels 97.3%、probe 96.1%）；新模块需 ≥95%。
+  `src/gpu/../../tests/...`），当前聚合 **96.99%**（executor 96.5%、kernels 97.35%、probe 96.13%、其余 100%）；新模块需 ≥95%。
 - 高风险改动必须由独立 evaluator 复核（走 `EVALUATE.md`，用 `adversarial-review` 技能）。
 
 ---
@@ -279,7 +279,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P9-fix | 粒子批次钩子 selector 语义统一为 deme=0（空间仍 deme=b）（§72） | APPROVED（§73） |
 | P9b | 粒子内 replicate 轴（`P×R` 拍平，面向 ABC-SMC/参数 combo 批）（§74） | APPROVED（§75） |
 | P9c | 粒子 `state_tick` 语义 + ABC 迭代间复用执行器（§76） | APPROVED（§77） |
-| P9d | 灭绝 particle/replicate 跳过后续 stage（per-batch 活跃掩码，无钩子程序）（§78） | **已实现，待 §79 复核** |
+| P9d | 灭绝 particle/replicate 跳过后续 stage（per-batch 活跃掩码，无钩子程序）（§78） | APPROVED（§79） |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -298,7 +298,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | **B7** | 完整性 | Wright-Fisher 融合模式未设备化 | 空间离散 CPU 不用它；非空间离散无 GPU 入口 | 按需实现 | 中 | 低优先 |
 | **D6** | 设计 | ~~hooks/停止门控设备侧未做~~ | ~~含 `stop_if_*` 的模型不可用 GPU~~ | **由 P7 承接**（用户选定声明式钩子）：设备侧解释器 + 停止门控 | 高 | **APPROVED（§63）** |
 | **P7** | 完整性 | ~~GPU 不支持声明式钩子插入点（`first/early/late/finish`）~~ | ~~含声明式钩子的模型无法上 GPU~~ | 设备侧声明式解释器，分 P7.1–P7.4（见 §11.5）；Python 回调仍显式拒绝 | 高 | **P7.1–P7.4a APPROVED（§59/§61/§63/§67/§69）**；P7.4b（ensemble）待用户决定 |
-| **E12** | 性能 | 深层性能优化未做（debug 基准受宿主机重建/上传主导） | 大 B 计算侧瓶颈 | release + 空闲卡剖析 → 缓存恒定张量 / 复用 scratch / 内核重构 | 高（内核重构） | 待空闲卡 |
+| **E12** | 性能 | ~~debug 基准受宿主机重建/上传主导~~ | ~~大 B 计算侧瓶颈~~ | 已实现：executor 侧 `ParamCache` 缓存生态列与分块遗传表（内容不变即不重传），并复用 scaling/factor scratch；release 实测 B=5000/50tick 0.055→0.021s、B=100k 112→55ms/tick、B=500k 626→283ms/tick | 高（核心路径） | **已实现并自测，待 §81 复核** |
 | **E13** | 验收 | P6 相对 16 核 `ProcessPool` 仅 2.4–3.3×，阈值未定 | “显著优于”是否达标无口径 | 用户定阈值或换更大模型/更少核重测 | 低 | **待用户口径** |
 
 ### 11.3 建议推进顺序
@@ -343,13 +343,12 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 **风险**：高（钩子会改写状态/参数、影响停止点与随机流）。必须独立 evaluator 复核并补强对照测试。
 **前置**：P7 是大特性，建议在完成 B5/B6/C8/C11/A3 等小项后启动，或由用户指定优先级。
 
-### 11.6 接手状态快照（2026-09-21，上下文切换）
+### 11.6 接手状态快照（2026-09-24，上下文切换）
 
-- **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.3 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67）。
-- **最近回执**：§77（P9c）**APPROVED**。
-- **待回执**：**§79**（P9d：灭绝 particle 跳阶段）——已实现并自测。
-- **后续未开始**：**P7.4b**（ensemble 钩子，语义待定；用户已澄清其大 B 场景为 per-particle 参数，由 P9 承接）；**B7** 低优先；
-  **E12/E13** 需空闲 GPU 与用户口径；**C9** 已记录可不做。
+- **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.4a 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67/§69）。
+- **最近回执**：§79（P9d）**APPROVED**；P9 增强项（P9a–P9d）已全部完成。
+- **待回执**：**§81**（E12：executor 侧每 tick 参数缓存，高风险核心路径）——已实现并自测。
+- **后续未开始**：**E13** 待用户口径；**P7.4b**（ensemble 钩子）、**B7**、**C9** 已决定不做（除非用户改口）。
 - **门禁基线（§69 时）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **221**、
   `ruff`/`pyright` 通过、`pytest` **3620**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **96.62%**。
 - **P9 要点（GPU particle）**：`AgeStructuredPopulation.enable_gpu_particles(param_sets)` /

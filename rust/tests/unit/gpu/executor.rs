@@ -78,6 +78,19 @@ fn state_bytes_matches_the_layout() {
 }
 
 #[test]
+fn cache_bytes_matches_the_param_cache_layout() {
+    // f32: 8A + 8 + 2AZ + 6Z + Z² + Z³ per batch, plus 2 i32 flags per batch
+    // and 2Z i32 sex masks.
+    let (b, a, z) = (7usize, 8usize, 9usize);
+    let f32_elems = 8 * a + 8 + 2 * a * z + 6 * z + z * z + z * z * z;
+    let i32_elems = 2 * b + 2 * z;
+    assert_eq!(
+        GpuExecutor::cache_bytes(b, a, z),
+        (f32_elems * b + i32_elems) * 4
+    );
+}
+
+#[test]
 fn device_aging_matches_the_cpu_reference_bit_for_bit() {
     if !hardware_required() {
         eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
@@ -342,6 +355,66 @@ fn device_survival_matches_the_host_reference() {
             (got - want).abs() <= tolerance,
             "sperm[{index}]: device {got} vs host {want}"
         );
+    }
+}
+
+#[test]
+fn cached_parameters_rebuild_when_sources_change() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (blueprint, ecology) = density_fixture();
+    let n_batch = 4;
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let genetics = identity_genetics(n_ages, n_ztypes);
+    let variants = [genetics];
+    let ids = vec![0usize; n_batch];
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+
+    // Reference: a fresh executor per step, so every step is a cache miss.
+    let step = |start_ind: &[f32], start_sperm: &[f32], eco: &EcologyParams| {
+        let context = GpuContext::new(0).expect("device 0 context");
+        let mut ex = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, start_ind, start_sperm)
+            .expect("executor");
+        ex.survival_tick(&blueprint, eco, &variants, &ids)
+            .expect("survival");
+        (
+            ex.download_ind().expect("download ind"),
+            ex.download_sperm().expect("download sperm"),
+        )
+    };
+
+    // `eco_b` changes the f64 ecology columns and turns the declared
+    // equilibrium distribution on; `eco_c` turns it back off (empty).
+    let mut eco_b = ecology.clone();
+    eco_b.survival_rates.iter_mut().for_each(|v| *v *= 0.5);
+    eco_b.equilibrium_distribution = vec![0.01; n_batch * 2 * n_ages];
+    eco_b.equilibrium_declared = vec![true; n_batch];
+    let mut eco_c = ecology.clone();
+    eco_c.eggs_per_female.iter_mut().for_each(|v| *v += 1.0);
+
+    let (r1_i, r1_s) = step(&ind, &sperm, &ecology);
+    let (r2_i, r2_s) = step(&r1_i, &r1_s, &ecology);
+    let (r3_i, r3_s) = step(&r2_i, &r2_s, &eco_b);
+    let (r4_i, r4_s) = step(&r3_i, &r3_s, &eco_c);
+
+    // One executor reused across the four steps: step 2 hits the cache while
+    // the state keeps evolving, steps 3 and 4 rebuild the changed tensors.
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut ex =
+        GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm).expect("executor");
+    for (eco, want_i, want_s) in [
+        (&ecology, &r1_i, &r1_s),
+        (&ecology, &r2_i, &r2_s),
+        (&eco_b, &r3_i, &r3_s),
+        (&eco_c, &r4_i, &r4_s),
+    ] {
+        ex.survival_tick(&blueprint, eco, &variants, &ids)
+            .expect("survival");
+        assert_eq!(bits(&ex.download_ind().unwrap()), bits(want_i));
+        assert_eq!(bits(&ex.download_sperm().unwrap()), bits(want_s));
     }
 }
 

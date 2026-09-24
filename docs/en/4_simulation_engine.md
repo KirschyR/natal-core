@@ -386,6 +386,15 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
   column and genetics tables on the device. **Identical genetics tables are
   deduplicated** into a variant bank, so only genuinely distinct variants cost
   extra.
+- **Weekly history**: `run_gpu_particles_history(n_ticks, observation_mask,
+  record_every=1)` records one observation-projection row per `(particle,
+  replicate)` on the device (`observation_mask` is a `(n_groups, 2, n_ages,
+  n_ztypes)` weight array with the same semantics as the host observation
+  projection). Each recorded tick is written to device memory only and copied
+  back **once** at the end, so there is no per-tick synchronization. It returns
+  `(tick, individual_count, sperm_storage, history)` with `history` shaped
+  `(records, n_particles, n_replicates, n_groups, 2, n_ages)`, oldest row first;
+  row `r` is device tick `start + r · record_every`.
 - **Hooks**: declarative hooks run per particle (Python callbacks are rejected).
   Particles are panmictic, so a hook's deme selector is evaluated against
   **deme 0** for every particle (matching `B` independent single-population CPU

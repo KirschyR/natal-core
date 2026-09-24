@@ -137,6 +137,46 @@ def test_gpu_particles_chained_ecology_and_genetics_overrides() -> None:
     assert not np.allclose(ind[0, 0], ind[1, 0])
 
 
+def test_gpu_particles_history_records_per_particle_rows() -> None:
+    """Device history records per-particle observation rows with one readback."""
+    pop = _build_pop("__gpu_particles_history__")
+    try:
+        pop.enable_gpu_particles(
+            [{"carrying_capacity": 300.0}, {"carrying_capacity": 800.0}],
+            n_replicates=2,
+        )
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    n_ages = int(pop.state.individual_count.shape[1])
+    n_ztypes = int(pop.state.individual_count.shape[2])
+    mask = np.zeros((2, 2, n_ages, n_ztypes))
+    mask[0, 0, :, :] = 1.0  # all females
+    mask[1, 1, :, :] = 1.0  # all males
+    tick, _ind, _sperm, history = pop.run_gpu_particles_history(
+        4, mask, record_every=1
+    )
+    assert tick == 4
+    assert history.shape == (5, 2, 2, 2, 2, n_ages)
+    # Row 0 is the shared initial state: female/male group totals match.
+    groups = history.sum(axis=(4, 5))
+    init = pop.state.individual_count
+    assert np.allclose(groups[0, 0], init[0].sum())
+    assert np.allclose(groups[0, 1], init[1].sum())
+
+
+def test_gpu_particles_history_rejects_bad_mask_and_missing_enable() -> None:
+    """History needs an enabled particle batch and a size-correct mask."""
+    pop = _build_pop("__gpu_particles_history_err__")
+    with pytest.raises(RuntimeError):
+        pop.run_gpu_particles_history(1, np.ones((1, 2, 4, 3)))
+    try:
+        pop.enable_gpu_particles([{"carrying_capacity": 300.0}])
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    with pytest.raises(ValueError):
+        pop.run_gpu_particles_history(1, np.ones(7))
+
+
 def test_enable_gpu_particles_rejects_zero_replicates() -> None:
     """``n_replicates`` must be positive even before any device work."""
     pop = _build_pop("__gpu_particles_zero_reps__")

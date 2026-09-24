@@ -354,6 +354,12 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
 
 - **初始状态共享**：初始个体/储精状态在整个 `(particle, replicate)` 批次间共享；每个 particle 保留自己的生态列
   与遗传表。**内容相同的遗传表会被去重**成一个变体库，只有真正不同的 variant 才占额外开销。
+- **逐周历史**：`run_gpu_particles_history(n_ticks, observation_mask, record_every=1)` 在设备上为每个
+  `(particle, replicate)` 记录观测投影行（`observation_mask` 是形如 `(n_groups, 2, n_ages, n_ztypes)` 的权重，语义与
+  主机观测投影一致）。**运行期每记录 tick 只写显存、不回传**，结束时一次下载，因此没有逐 tick 同步。返回
+  `(tick, individual_count, sperm_storage, history)`，`history` 形状为
+  `(records, n_particles, n_replicates, n_groups, 2, n_ages)`，最早的行在前；第 `r` 行对应设备 tick
+  `start + r · record_every`。
 - **钩子**：声明式钩子按 particle 执行（Python 回调被拒绝）。particle 是 panmictic，钩子的 deme selector 对每个
   particle 都按 **deme 0** 解释（与 `B` 个独立单群体 CPU 运行一致）。
 - **灭绝 particle**：对**无钩子**程序，状态已灭绝（全 0）的 particle 会被各 stage 内核跳过，不再消耗算力

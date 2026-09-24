@@ -345,6 +345,35 @@ class RustLifecycleBackend:
         tick, ind, sperm = _session_call(lambda: run(int(n_ticks)))
         return int(tick), ind, sperm
 
+    def run_gpu_particles_history(
+        self,
+        n_ticks: int,
+        mask: list[float],
+        n_groups: int,
+        record_interval: int = 1,
+    ) -> tuple[int, NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """Run GPU particles, recording per-batch observation history on device.
+
+        Args:
+            n_ticks: Number of ticks to run.
+            mask: Observation weights flattened as ``n_groups · 2 · A · Z``.
+            n_groups: Number of observation groups.
+            record_interval: Ticks between recorded rows (>= 1).
+
+        Returns:
+            ``(tick, ind_flat, sperm_flat, history_flat)``; the caller reshapes.
+        """
+        run = getattr(self._session, "run_gpu_particles_history", None)
+        if run is None:
+            raise RuntimeError(
+                "this _engine_rs build has no GPU particle history support; rebuild "
+                "with `maturin develop --features gpu`"
+            )
+        tick, ind, sperm, history = _session_call(
+            lambda: run(int(n_ticks), list(mask), int(n_groups), int(record_interval))
+        )
+        return int(tick), ind, sperm, history
+
     def refresh_params(self, fields: list[str], params_obj: Params) -> None:
         """Pull exactly *fields* from the contract params into the session.
 

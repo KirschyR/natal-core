@@ -178,6 +178,18 @@ pub type AgeSnapshot<'py> = (
 #[cfg(feature = "gpu")]
 pub type EnsembleReadout<'py> = (i64, Bound<'py, PyArray1<f64>>, Bound<'py, PyArray1<f64>>);
 
+/// Particle history readout: ``(tick, ind_flat, sperm_flat, history_flat)``.
+///
+/// ``history_flat`` is row-major ``(records, n_groups, n_batch, 2, n_ages)``,
+/// oldest row first; row ``r`` is the device tick ``start + r * interval``.
+#[cfg(feature = "gpu")]
+pub type ParticleHistoryReadout<'py> = (
+    i64,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+    Bound<'py, PyArray1<f64>>,
+);
+
 /// PyO3-exported stateful session for the age-structured Rust backend.
 ///
 /// Owns the frozen blueprint, the mutable params, the RNG, and a CSR hook
@@ -666,6 +678,130 @@ impl AgeStructuredSession {
             tick,
             PyArray1::from_vec(py, ind),
             PyArray1::from_vec(py, sperm),
+        ))
+    }
+
+    /// Advance every particle while recording per-batch observation history on
+    /// the device.
+    ///
+    /// A row is recorded before the first tick and after every
+    /// `record_interval` ticks; the whole window is copied back once, so the
+    /// run performs **no per-tick host synchronization**. `mask` holds the
+    /// observation weights `(n_groups, 2, n_ages, n_ztypes)` flattened, applied
+    /// per batch element exactly like the host observation projection.
+    ///
+    /// ## Parameters
+    /// - `n_ticks`: Ticks to advance every particle.
+    /// - `mask`: Observation weights, `n_groups · 2 · A · Z` values.
+    /// - `n_groups`: Number of observation groups.
+    /// - `record_interval`: Ticks between recorded rows (>= 1; default 1).
+    ///
+    /// ## Returns
+    /// `(tick, ind_flat, sperm_flat, history_flat)` where `history_flat` is
+    /// row-major `(records, n_groups, n_batch, 2, n_ages)`, oldest row first;
+    /// row `r` is device tick `start + r · record_interval`.
+    ///
+    /// ## Errors
+    /// Returns a runtime error when particles were not enabled or the window
+    /// does not fit, and a value error for a bad mask length.
+    #[cfg(feature = "gpu")]
+    #[pyo3(signature = (n_ticks, mask, n_groups, record_interval=1))]
+    fn run_gpu_particles_history<'py>(
+        &mut self,
+        py: Python<'py>,
+        n_ticks: i64,
+        mask: Vec<f64>,
+        n_groups: usize,
+        record_interval: i64,
+    ) -> PyResult<ParticleHistoryReadout<'py>> {
+        let Some(mut ecology) = self.particle_ecology.clone() else {
+            return Err(map_lifecycle_error(
+                "run_gpu_particles_history requires enable_gpu_particles first".to_owned(),
+            ));
+        };
+        let n = ecology.n_demes;
+        let n_ages = self.blueprint.n_ages;
+        let n_ztypes = self.blueprint.n_ztypes;
+        let plane = 2 * n_ages * n_ztypes;
+        if n_groups == 0 || mask.len() != n_groups * plane {
+            return Err(PyValueError::new_err(
+                "observation mask must hold n_groups * 2 * n_ages * n_ztypes values",
+            ));
+        }
+        let ticks = n_ticks.max(0) as usize;
+        let interval = record_interval.max(1) as usize;
+        let n_records = ticks / interval + 1;
+        let width = n_groups * n * 2 * n_ages;
+        // Per-batch variant id: particle-major (batch = particle * R + replicate).
+        let Some((bank, ids)) = self.particle_variants.as_ref() else {
+            return Err(map_lifecycle_error(
+                "run_gpu_particles_history requires enable_gpu_particles first".to_owned(),
+            ));
+        };
+        let r = n / ids.len().max(1);
+        let variants: &[GeneticsTensors] = bank.as_slice();
+        let deme_variants: Vec<usize> = ids
+            .iter()
+            .flat_map(|id| std::iter::repeat_n(*id, r))
+            .collect();
+        let spec = crate::gpu::executor::HistorySpec {
+            capacity: n_records,
+            width,
+            dims: [n, 2, n_ages, n_ztypes],
+            mask: mask.clone(),
+            selected: (0..n).collect(),
+            collapse: false,
+            aggregate: false,
+            raw: false,
+            raw_sperm: false,
+            wrap: false,
+        };
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Err(map_lifecycle_error(
+                "run_gpu_particles_history requires enable_gpu_particles first".to_owned(),
+            ));
+        };
+        gpu.configure_history(&spec).map_err(map_lifecycle_error)?;
+        gpu.record_history_row().map_err(map_lifecycle_error)?;
+        let mut recorded = 1usize;
+        for step in 1..=ticks {
+            gpu.tick(&self.blueprint, &ecology, variants, &deme_variants)
+                .map_err(map_lifecycle_error)?;
+            if let Some(values) = gpu.take_pending_eco() {
+                crate::gpu::executor::GpuExecutor::apply_eco_values(&mut ecology, &values, n)
+                    .map_err(map_lifecycle_error)?;
+            }
+            if step % interval == 0 && recorded < n_records {
+                gpu.record_history_row().map_err(map_lifecycle_error)?;
+                recorded += 1;
+            }
+        }
+        self.particle_ecology = Some(ecology);
+        let tick = gpu.current_tick() as i64;
+        let history: Vec<f64> = gpu
+            .download_history_rows()
+            .map_err(map_lifecycle_error)?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        gpu.clear_history();
+        let ind: Vec<f64> = gpu
+            .download_ind()
+            .map_err(map_lifecycle_error)?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        let sperm: Vec<f64> = gpu
+            .download_sperm()
+            .map_err(map_lifecycle_error)?
+            .into_iter()
+            .map(f64::from)
+            .collect();
+        Ok((
+            tick,
+            PyArray1::from_vec(py, ind),
+            PyArray1::from_vec(py, sperm),
+            PyArray1::from_vec(py, history),
         ))
     }
 

@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 36 轮：**APPROVED**（§81；E12 每 tick 参数缓存/scratch 复用——内容失效透明、CPU 对照、无回归） |
-| 待回执 | §83（第 37 轮 P9e：GPU particle 逐粒子 genetics——生态+遗传表、去重变体库，高风险公开 API/数值边界） |
-| 主 agent 处理 | 第 37 轮 P9e 已实现并自测（§82） |
-| 待 evaluator 动作 | 按 §82 复核，把第 37 轮结论写入 §83 |
+| 最近回执 | 第 37 轮：**APPROVED**（§83；P9e 逐粒子 genetics——去重变体库、逐粒子/跨 replicate 映射、CPU 对照、缓存刷新） |
+| 待回执 | §85（第 38 轮 P9f：GPU particle 逐周观测历史——设备投影、单次回传、无逐 tick 同步，高风险公开 API） |
+| 主 agent 处理 | 第 38 轮 P9f 已实现并自测（§84）；ABC-SMC 性能基准 Step 1/2 完成 |
+| 待 evaluator 动作 | 按 §84 复核，把第 38 轮结论写入 §85 |
 
 ## 0. 一句话目标
 
@@ -2146,6 +2146,65 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 初始状态/生殖系统仍整批共享（本轮只解耦 genetics）；如需逐粒子初始状态另立。
 
 结论请追加为 **§83**。
+
+---
+
+## 84. 第 38 轮交接 — P9f：GPU particle 逐周观测历史（设备驻留、单次回传）
+
+- 日期：2026-09-24
+- 背景：§83 APPROVED（P9e）。用户选择的性能基准范围为「组件微基准 + 粒子历史对比」，其中 Step 2 需要
+  「带逐周历史一次回传」对比「`run(1)×25` 逐周回传」。此前 panmictic 单群体/ensemble/粒子 GPU 路径**完全不记录历史**
+  （`run_inner` 设备分支忽略 `record_every`，返回空历史）。本轮为粒子路径加入**设备侧逐周观测历史**，验证
+  「无需逐 tick GPU↔CPU 同步」。
+- 风险分类：**高风险**（公开 API、Python→Rust 数据交换、设备显存窗口与投影语义）。
+
+### 84.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/sessions/age_structured.rs` | 新增 `run_gpu_particles_history(n_ticks, mask, n_groups, record_interval=1)` 与返回别名 `ParticleHistoryReadout`。用既有 `GpuExecutor::configure_history`/`record_history_row`/`download_history_rows`（B6 设备历史，空间路径已在用）构造 `HistorySpec { dims:[B,2,A,Z], selected=0..B, collapse=false, aggregate=false, raw=false, wrap=false }`：**每个 batch 元素当作一个投影目标**，复用现成 `observation_project` 内核。tick 0 记录一次，之后每 `record_interval` tick 记录一次，结束一次 D2H。 |
+| `src/natal/backends/rust/rust_backend.py` | 透传 `run_gpu_particles_history`。 |
+| `src/natal/frontend/population/age_structured.py` | 新增 `run_gpu_particles_history(n_ticks, observation_mask, record_every=1)`：接受 `(n_groups,2,A,Z)` 观测权重，返回 `(tick, ind, sperm, history)`，`history` 形状 `(records, n_particles, n_replicates, n_groups, 2, n_ages)`。 |
+| `docs/{zh,en}/4_simulation_engine.md` | §11.4 增加逐周历史说明。 |
+| 测试 | Rust `session.rs`：`evaluator_gpu_particles_history_matches_incremental_projection`（逐行与「主机对逐步状态投影」对照，容差 1.2e-5）、`evaluator_gpu_particles_history_rejects_bad_inputs`（四类错误路径）。Python：形状/初值一致 + 错误路径两个用例。 |
+
+### 84.2 行为与安全边界
+
+- **无逐 tick 同步**：每记录 tick 只由 `observation_project` 写显存行；运行期间零 D2H；结束一次 `download_history_rows`（环形窗口按时间顺序线性化）。同步次数与「一次 run」相同。
+- **投影语义与主机一致**：行内顺序 `(group, batch, sex, age)`，权重 `(groups, 2, A, Z)`，与 `output::observation::project` 的轴顺序/归约一致（设备 f32、主机 f64）。
+- **批次 = 粒子×重复**：`dims[0] = B = P·R`，`selected = 全部 batch`（`out_d = B`），batch 为 particle-major；Python 再 reshape 成 `(records, P, R, groups, 2, A)`。
+- **记录点**：tick 0（启用后的初始共享状态）+ 每个 `record_interval` 倍数 tick；`records = n_ticks/interval + 1`。
+- **显存**：窗口 `records × groups × B × 2A` f32（B=3000、groups=2、A=8、26 行 ≈ 5 MB）；由 `configure_history` 的 §D5 守卫核算，不静默回退。
+- **不变部分**：`enable_gpu_particles`/`run_gpu_particles` 签名与行为不变；共享/逐粒子 genetics、E12 缓存、灭绝掩码均照旧。
+
+### 84.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **253 passed, 0 failed** |
+| `cargo test` / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3632 passed** / bit-identical |
+| 覆盖率（lcov） | `rust/src/gpu/**` **3314/3417 = 96.99%**（本轮未改 gpu/）；`age_structured.rs` 新增可执行行 **90/93 = 96.77%**（未覆盖 2 行为历史循环内 `set_param` 提交、1 行 brace 归属） |
+| 正确性 smoke | 设备历史逐行与 `run(1)×25` 逐步投影**完全一致（max abs diff = 0.0）**；tick-0 女/男合计 = 初始状态 270/200 |
+| **Step 1 组件微基准**（本节点 16 核/32 线程；模型 A=8,Z=6,25 周） | CPU 每次模拟（含 Python 建群）4.3 ms@1核、1.1 ms@16核（32 线程反慢 1.5 ms）；建群 ~3 ms 主导，纯运行仅 0.8 ms。GPU：首用 NVRTC 0.24–4 s，复用 enable 0.3–45 ms，run25 3.5(B=1)→47 ms(B=3000) |
+| **Step 2 历史对比** | B=3000：history **49 ms** vs `run(1)×25` **313 ms**（**6.4×**）vs 无历史 run25 27 ms；B=300：16 vs 44 ms（2.7×）。整帧 vs 16 核 CPU：B=3000 约 49 ms vs ~3.3 s（≈67×） |
+
+### 84.4 请 evaluator 独立核对
+
+- **正确性（重点）**：设备历史每一行与「逐步 `run(1)` 后主机投影」及独立 CPU 状态投影对照；覆盖 collapse/aggregate=false/true、`record_interval>1`、`n_ticks%interval!=0`、P>1×R>1 的 batch 重排、逐粒子不同 genetics 与历史组合。
+- **边界**：tick 0 行、`wrap=false` 满窗（记录数超容量应显式 `Err` 而非静默）、空/错长 mask、未 enable、显存预算超额。
+- **无同步**：确认运行期无 D2H（读码 + 计时：history ≈ plain run + 投影内核）。
+- **无回归**：P9/P9b/P9c/P9d/P9e、空间（B6 历史未受扰）、E12、phase0。
+- **公开 API/文档**：中英文档一致。
+
+### 84.5 残余风险（非阻塞）
+
+- 仅实现「观测投影」历史（非 raw 状态历史）于粒子路径；单群体/ensemble 路径仍未接历史（可按需扩展）。
+- `history` 一次性返回 `records×groups×B×2A` 数组；超长跑/大 B 时有主机内存峰值（可选分块 flush 另立）。
+- 记录点相对设备 tick（enable 复位为会话 tick）；跨多次 `run_gpu_particles_history` 的行 tick 需调用方按 `start + r·interval` 解释。
+- 未覆盖 2 行属历史循环内 `set_param` 分支（粒子上带 SET_PARAM 钩子 + 历史未测）。
+
+结论请追加为 **§85**。
 
 ---
 
@@ -4444,3 +4503,73 @@ E12（executor 侧每 tick 参数缓存 + scratch 复用）经独立复核：对
 
 E12 参数缓存/scratch 复用对结果透明、失效覆盖充分、预算核算一致、无回归，测试/门禁/覆盖率达标。**APPROVED**
 （范围：当前 HEAD `272f06a` 与被审测试集；不声称任何历史基线失败消失）。§81.4 为已知非阻塞边界。
+
+---
+
+## 83. 第 37 轮结论（evaluator 独立执行，2026-09-24，HEAD=`5a98b0e`）
+
+### 83.1 裁定：**APPROVED**
+
+P9e 逐粒子 genetics（生态 + 遗传表、去重变体库）经独立复核：逐粒子 variant 与独立 CPU session 逐 cell 一致（含
+`viability`/`fecundity`/`offspring_tensor`）、跨 replicate 的 `ids[batch / R]` 映射正确、相同表去重后**逐位一致**、
+复用后 genetic 缓存正确重建；错误路径显式；无回归。CPU golden reference 未改。
+
+### 83.2 独立核对
+
+- **逐粒子 genetics + replicate 映射**：新增 `evaluator_per_particle_genetics_with_replicates_match_cpu`：P=2、R=2、
+  bank=[g(1,1), g(0.4,0.6)]、ids=[0,1]；每个 `(p,r)` 块（batch=p·R+r）与「particle p 生态 + bank[ids[p]] 遗传」的独立 CPU
+  session 逐 cell 一致；不同 particle 发散。
+- **相同 variant 逐位共享**：新增 `evaluator_particle_shared_variant_is_bit_identical_across_particles`：同生态、
+  ids=[0,1,0,2]、bank 三项；particle 0 与 2（同 id）**逐位相同**，particle 1/3 各不同，且逐 particle 与 CPU（bank[id]）一致。
+- **异构 `offspring_tensor`（Z³ 逐批次表）**：新增 `evaluator_per_particle_offspring_tensor_matches_cpu`：bank 的 variant B 交换
+  每个 `(gf,gm)` 的 offspring 输出；两 particle 与各自 CPU 一致并互异——覆盖逐批次 `offspring` 表读取。
+- **复用刷新 genetics 缓存（P9c + E12 交叉）**：新增 `evaluator_particle_reuse_refreshes_genetics_bank`：先 bank A 跑 2 tick，
+  再以同 batch 尺寸 re-enable 为 bank B 跑 2 tick，结果与全新 bank B session **逐位一致**——验证 `particle_variants` 刷新 +
+  `CachedGenetics::ensure` 依 `variants`/`deme_variants` 内容重建。
+- **Python 端到端 `/tmp/l3_particles_genetics.py`**：公开 API 接受 `viability_fitness`；P=3、R=2 下 particle 0 与 2（同表）**逐位相等**、
+  particle 1（0.3 表）发散；形状 `(3,2,2,4,3)`/`(3,2,4,3,3)`。
+- **读码**：`dedup_variants` 按 `GeneticsTensors` 全字段 `PartialEq` 去重、首次出现序；`enable_gpu_particles_impl` 校验
+  `ids.len()==P`、bank 非空、`id<bank.len()`、逐 variant `validate(bp)`、`P·R` 溢出用 `checked_mul`；`run_gpu_particles`
+  `deme_variants = ids.iter().flat_map(repeat R)`（长度 P·R）交给既有 `GpuExecutor::tick`；`enable_gpu`/`enable_gpu_ensemble`
+  清空 `particle_variants`；共享路径 `enable_gpu_particles_ecologies_replicated` 委托 impl（bank=[session genetics]、ids 全 0）。
+- **受保护用例**：`executor.rs`/`kernels.rs`/`spatial_session.rs` 本轮 0 改动；`rust/src/gpu/**` 本轮 0 改动。
+
+### 83.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **251 passed**（作者 247 + evaluator 4） |
+| `cargo test --features gpu evaluator_` | **73 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3630 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3314/3417 = 96.99%**（本轮 gpu/ 未改；executor 96.51%、kernels 97.35%、probe 96.13%） |
+| Python 新增可执行行 | 本轮源码改动仅在 `enable_gpu_particles` 文档字符串（无新可执行行） |
+
+### 83.4 逐条发现（非阻塞）
+
+1. **low / `dedup_variants` 最坏 O(P²·表长)**（§82.5）：P≤数千可接受；超大 P 建议哈希化。
+2. **low / `age_structured.rs` 新增行覆盖 52/56 = 92.86%**（§82.3）：4 行未覆盖为 PyO3 `enable_gpu_particles` 方法体（仅 Python 可达，
+   由 2 个 Python 用例功能覆盖）；该文件不在强制覆盖 scope（scope 为 `rust/src/gpu/**`），同 §14.3 先例，非阻塞。
+3. **low / 初始状态仍整批共享**（本轮仅解耦 genetics，用户已确认）；每粒子变体库常驻主机内存。
+4. **low / `run_gpu_particles` 的 `r = n / ids.len()`**：依赖 enable 保证 `n == P·R`；若未来允许不一致会退化为长度不符的显式错误（不会静默）。
+
+### 83.5 阻塞项
+
+无。
+
+### 83.6 证据来源
+
+- **独立运行**：上表门禁、4 个 Rust P9e 用例、`/tmp/l3_particles_genetics.py`、扩展重编、覆盖率采集。
+- **仅代码阅读**：`dedup_variants`、`enable_gpu_particles_impl` 校验、`run_gpu_particles` 的 `ids[batch/R]` 构造、
+  PyO3 `enable_gpu_particles` 的 `EcologyParams`+`GeneticsTensors::from_python`、共享路径委托、`particle_variants` 清空点。
+
+### 83.7 结论
+
+P9e 逐粒子 genetics 与去重变体库正确：逐粒子/跨 replicate 映射与独立 CPU 一致，相同表逐位共享，缓存刷新正确，
+错误路径显式，无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `5a98b0e` 与被审测试集；不声称任何历史基线失败消失）。
+§83.4 为已知非阻塞边界。

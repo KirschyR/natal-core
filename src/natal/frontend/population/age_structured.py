@@ -1248,6 +1248,69 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         )
         return int(tick), ind_array, sperm_array
 
+    def run_gpu_particles_history(
+        self,
+        n_ticks: int,
+        observation_mask: NDArray[np.float64],
+        record_every: int = 1,
+    ) -> Tuple[int, NDArray[np.float64], NDArray[np.float64], NDArray[np.float64]]:
+        """Advance every GPU particle while recording device-side history.
+
+        The observation projection for every particle/replicate is written to
+        device memory at each recorded tick and copied back **once** at the end,
+        so the run performs no per-tick host synchronization.
+
+        Args:
+            n_ticks: Ticks to advance every particle.
+            observation_mask: Observation weights shaped ``(n_groups, 2, n_ages,
+                n_ztypes)`` (any flattenable shape with that many values). Each
+                group is a linear weight over the ``(sex, age, ztype)`` state,
+                matching the host observation projection.
+            record_every: Ticks between recorded rows (>= 1; default ``1``).
+
+        Returns:
+            ``(tick, individual_count, sperm_storage, history)`` where
+            ``history`` has shape ``(records, n_particles, n_replicates,
+            n_groups, 2, n_ages)``, oldest row first; row ``r`` is device tick
+            ``start + r · record_every``.
+
+        Raises:
+            RuntimeError: If :meth:`enable_gpu_particles` was not called first.
+            ValueError: If the observation mask has the wrong size.
+        """
+        backend = self._rust_lifecycle_backend
+        particles = int(getattr(self, "_gpu_particle_count", 0))
+        replicates = int(getattr(self, "_gpu_particle_replicates", 0))
+        if backend is None or particles < 1 or replicates < 1:
+            raise RuntimeError(
+                "run_gpu_particles_history requires enable_gpu_particles first"
+            )
+        state = self._live_state().individual_count
+        n_ages = int(state.shape[1])
+        n_ztypes = int(state.shape[2])
+        plane = 2 * n_ages * n_ztypes
+        mask = np.asarray(observation_mask, dtype=np.float64)
+        if mask.size == 0 or mask.size % plane != 0:
+            raise ValueError(
+                "observation_mask must hold n_groups * 2 * n_ages * n_ztypes values"
+            )
+        n_groups = mask.size // plane
+        interval = max(1, int(record_every))
+        tick, ind, sperm, history = backend.run_gpu_particles_history(
+            int(n_ticks), mask.reshape(-1).tolist(), n_groups, interval
+        )
+        ind_array = np.asarray(ind, dtype=np.float64).reshape(
+            particles, replicates, 2, n_ages, n_ztypes
+        )
+        sperm_array = np.asarray(sperm, dtype=np.float64).reshape(
+            particles, replicates, n_ages, n_ztypes, n_ztypes
+        )
+        records = max(0, int(n_ticks)) // interval + 1
+        history_array = np.asarray(history, dtype=np.float64).reshape(
+            records, n_groups, particles, replicates, 2, n_ages
+        )
+        return int(tick), ind_array, sperm_array, history_array
+
     def get_age_distribution(self, sex: str = "both") -> np.ndarray:
         """Return the age distribution for the requested sex.
 

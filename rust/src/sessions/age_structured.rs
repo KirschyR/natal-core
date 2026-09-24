@@ -80,6 +80,28 @@ fn tile_ecology(one: &EcologyParams, n: usize) -> EcologyParams {
     }
 }
 
+/// Collapse per-particle genetics into a variant bank plus per-particle ids.
+///
+/// Returns `(bank, ids)` where `bank` holds the distinct tables in first-seen
+/// order and `ids[i]` indexes the bank for particle `i`. Particles that share
+/// genetics cost one device variant; distinct ones stay independent. This is
+/// the same variant-bank pattern the device batch axis already uses.
+#[cfg(feature = "gpu")]
+fn dedup_variants(variants: Vec<GeneticsTensors>) -> (Vec<GeneticsTensors>, Vec<usize>) {
+    let mut bank: Vec<GeneticsTensors> = Vec::new();
+    let mut ids: Vec<usize> = Vec::with_capacity(variants.len());
+    for genetics in variants {
+        match bank.iter().position(|existing| *existing == genetics) {
+            Some(index) => ids.push(index),
+            None => {
+                ids.push(bank.len());
+                bank.push(genetics);
+            }
+        }
+    }
+    (bank, ids)
+}
+
 /// Stack `n` single-deme ecologies into one batch-major `n_demes == n` object.
 ///
 /// Used by ``enable_gpu_particles``: each particle's `EcologyParams` (built
@@ -199,6 +221,12 @@ pub struct AgeStructuredSession {
     /// Stacked per-particle ecology for ``enable_gpu_particles`` (`n_demes=B`).
     #[cfg(feature = "gpu")]
     particle_ecology: Option<EcologyParams>,
+    /// Genetics variant bank and per-particle variant ids for the GPU particle
+    /// path, so particles can carry distinct genetics tables (fitness etc.).
+    /// `None` (or a single-entry bank with all-zero ids) means the particles
+    /// share the session genetics.
+    #[cfg(feature = "gpu")]
+    particle_variants: Option<(Vec<GeneticsTensors>, Vec<usize>)>,
 }
 
 #[pymethods]
@@ -395,6 +423,7 @@ impl AgeStructuredSession {
             executor.set_tick(self.state_tick.max(0) as u64);
         }
         self.particle_ecology = None;
+        self.particle_variants = None;
         self.gpu = Some(executor);
         Ok(())
     }
@@ -475,6 +504,7 @@ impl AgeStructuredSession {
             .ensure_migration_budget(&self.blueprint)
             .map_err(map_lifecycle_error)?;
         self.particle_ecology = None;
+        self.particle_variants = None;
         self.gpu = Some(executor);
         Ok(())
     }
@@ -531,11 +561,14 @@ impl AgeStructuredSession {
         ))
     }
 
-    /// Enable the GPU **particle** path: `B` particles, each with its own
+    /// Enable the GPU **particle** path: `P` particles, each with its own
     /// parameter set, advanced together on the device batch axis.
     ///
-    /// The initial state and genetics are shared; particles may carry
-    /// declarative hooks (Python callbacks are rejected).
+    /// Each particle carries its own ecology **and** genetics tables, taken
+    /// from its Python `Params` object; identical tables are deduplicated into
+    /// a shared variant bank. The initial individual/sperm state is shared
+    /// across the whole `P · R` batch; particles may carry declarative hooks
+    /// (Python callbacks are rejected).
     ///
     /// ## Parameters
     /// - `params_list`: One Python `Params` object per particle.
@@ -552,10 +585,13 @@ impl AgeStructuredSession {
         n_replicates: usize,
     ) -> PyResult<()> {
         let mut parts = Vec::with_capacity(params_list.len());
+        let mut variants = Vec::with_capacity(params_list.len());
         for object in &params_list {
             parts.push(EcologyParams::from_python(object, 1)?);
+            variants.push(GeneticsTensors::from_python(object)?);
         }
-        self.enable_gpu_particles_ecologies_replicated(parts, n_replicates)
+        let (bank, ids) = dedup_variants(variants);
+        self.enable_gpu_particles_impl(parts, bank, ids, n_replicates)
     }
 
     /// Advance every particle by `n_ticks` and return the stacked final state.
@@ -586,15 +622,26 @@ impl AgeStructuredSession {
             ));
         };
         let n = ecology.n_demes;
+        // Per-batch variant id: particle-major (batch = particle * R + replicate),
+        // so `ids[batch / R]`. Enable always installs the bank.
+        let Some((bank, ids)) = self.particle_variants.as_ref() else {
+            return Err(map_lifecycle_error(
+                "run_gpu_particles requires enable_gpu_particles first".to_owned(),
+            ));
+        };
+        let r = n / ids.len().max(1);
+        let variants: &[GeneticsTensors] = bank.as_slice();
+        let deme_variants: Vec<usize> = ids
+            .iter()
+            .flat_map(|id| std::iter::repeat_n(*id, r))
+            .collect();
         let Some(gpu) = self.gpu.as_mut() else {
             return Err(map_lifecycle_error(
                 "run_gpu_particles requires enable_gpu_particles first".to_owned(),
             ));
         };
-        let variants = [self.genetics.clone()];
-        let deme_variants = vec![0usize; n];
         for _ in 0..n_ticks.max(0) {
-            gpu.tick(&self.blueprint, &ecology, &variants, &deme_variants)
+            gpu.tick(&self.blueprint, &ecology, variants, &deme_variants)
                 .map_err(map_lifecycle_error)?;
             if let Some(values) = gpu.take_pending_eco() {
                 crate::gpu::executor::GpuExecutor::apply_eco_values(&mut ecology, &values, n)
@@ -1339,11 +1386,12 @@ impl AgeStructuredSession {
         self.enable_gpu_particles_ecologies_replicated(parts, 1)
     }
 
-    /// Particle setup with an inner replicate factor.
+    /// Particle setup with an inner replicate factor and shared genetics.
     ///
     /// The device batch axis is the flattened `(particle, replicate)` pair, so
     /// each particle's ecology columns are repeated `n_replicates` times and
-    /// the initial state is shared across the whole `P · R` batch.
+    /// the initial state is shared across the whole `P · R` batch. All
+    /// particles share the session genetics.
     ///
     /// ## Parameters
     /// - `parts`: One single-deme `EcologyParams` per particle.
@@ -1352,10 +1400,38 @@ impl AgeStructuredSession {
     /// ## Errors
     /// Returns ``PyValueError`` for ineligible models, or a runtime error when
     /// the device is unavailable.
-    #[cfg(feature = "gpu")]
+    #[cfg(all(feature = "gpu", test))]
     pub(crate) fn enable_gpu_particles_ecologies_replicated(
         &mut self,
         parts: Vec<EcologyParams>,
+        n_replicates: usize,
+    ) -> PyResult<()> {
+        let ids = vec![0usize; parts.len()];
+        self.enable_gpu_particles_impl(parts, vec![self.genetics.clone()], ids, n_replicates)
+    }
+
+    /// Shared GPU particle setup for an explicit genetics variant bank.
+    ///
+    /// Particle `i` uses `variant_bank[ids[i]]`; a single-entry bank with
+    /// all-zero ids reproduces the shared-genetics path. The device batch axis
+    /// is the flattened `(particle, replicate)` pair (particle-major), so a
+    /// batch element's variant is `ids[batch / n_replicates]`.
+    ///
+    /// ## Parameters
+    /// - `parts`: One single-deme `EcologyParams` per particle.
+    /// - `variant_bank`: Distinct genetics tables referenced by `ids`.
+    /// - `ids`: Per-particle index into `variant_bank` (length `P`).
+    /// - `n_replicates`: Independent realizations per particle (>= 1).
+    ///
+    /// ## Errors
+    /// Returns ``PyValueError`` for ineligible models, or a runtime error when
+    /// the device is unavailable.
+    #[cfg(feature = "gpu")]
+    pub(crate) fn enable_gpu_particles_impl(
+        &mut self,
+        parts: Vec<EcologyParams>,
+        variant_bank: Vec<GeneticsTensors>,
+        ids: Vec<usize>,
         n_replicates: usize,
     ) -> PyResult<()> {
         let n_particles = parts.len();
@@ -1366,6 +1442,19 @@ impl AgeStructuredSession {
         }
         if n_replicates == 0 {
             return Err(PyValueError::new_err("n_replicates must be >= 1"));
+        }
+        if ids.len() != n_particles || variant_bank.is_empty() {
+            return Err(PyValueError::new_err(
+                "particle genetics bank does not match the particle count",
+            ));
+        }
+        if ids.iter().any(|id| *id >= variant_bank.len()) {
+            return Err(PyValueError::new_err(
+                "particle genetics variant id out of range",
+            ));
+        }
+        for genetics in &variant_bank {
+            genetics.validate(&self.blueprint)?;
         }
         let n_batch = n_particles
             .checked_mul(n_replicates)
@@ -1400,6 +1489,7 @@ impl AgeStructuredSession {
             .flat_map(|_| sperm_one.iter().copied())
             .collect();
 
+        let particle_variants = (variant_bank, ids);
         // Reuse the resident executor/context/kernels when the batch size is
         // unchanged (successive ABC-SMC iterations): reset the state, refresh
         // the hooks, and keep the compiled kernels instead of recompiling.
@@ -1412,6 +1502,7 @@ impl AgeStructuredSession {
                     .map_err(map_lifecycle_error)?;
                 gpu.set_stage_masking(self.hooks.n_hooks == 0);
                 self.particle_ecology = Some(ecology);
+                self.particle_variants = Some(particle_variants);
                 return Ok(());
             }
         }
@@ -1438,6 +1529,7 @@ impl AgeStructuredSession {
             executor.set_tick(self.state_tick.max(0) as u64);
         }
         self.particle_ecology = Some(ecology);
+        self.particle_variants = Some(particle_variants);
         self.gpu = Some(executor);
         Ok(())
     }
@@ -1714,6 +1806,8 @@ impl AgeStructuredSession {
             gpu: None,
             #[cfg(feature = "gpu")]
             particle_ecology: None,
+            #[cfg(feature = "gpu")]
+            particle_variants: None,
         }
     }
 

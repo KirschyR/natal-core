@@ -356,18 +356,24 @@ callbacks are rejected.
 
 `AgeStructuredPopulation.enable_gpu_particles(param_sets, n_replicates=1)`
 advances `B` particles **together on the device batch axis, each with its own
-parameter overrides** (keyed by `Params` field names such as `carrying_capacity`,
-`eggs_per_female`, `survival_rates`, `mating_rates`). Each particle may also run
+parameter overrides** — both **ecology columns and genetics tables** (keyed by
+`Params` field names: ecology such as `carrying_capacity`, `eggs_per_female`,
+`survival_rates`, `mating_rates`; genetics such as `viability_fitness`,
+`fecundity_fitness`, `offspring_tensor`). Each particle may also run
 `n_replicates` independent realizations, so the device batch is the flattened
-`(particle, replicate)` pair — useful for parameter-combo batches (e.g. ABC-SMC
-particles). This differs from `enable_gpu_ensemble`, which runs many random
-realizations of **one** parameter set.
+`(particle, replicate)` pair — useful for parameter-combo batches (e.g. ABC-SMC,
+which needs to try a different fitness combination per particle). This differs
+from `enable_gpu_ensemble`, which runs many random realizations of **one**
+parameter set.
 
 ```python
 pop.enable_gpu_particles(
     [
-        {"carrying_capacity": 300.0},
-        {"carrying_capacity": 800.0, "eggs_per_female": 12.0},
+        {"carrying_capacity": 300.0, "viability_fitness": np.ones(2 * n_ages * n_ztypes)},
+        {
+            "carrying_capacity": 800.0,
+            "viability_fitness": np.full(2 * n_ages * n_ztypes, 0.5),
+        },
     ],
     n_replicates=3,
 )
@@ -375,9 +381,11 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
 # individual_count: (n_particles, n_replicates, 2, n_ages, n_ztypes)
 ```
 
-- **Shared**: the initial state and genetics are shared across the whole
-  `(particle, replicate)` batch; each particle keeps its own ecology column on
-  the device.
+- **Shared initial state**: the initial individual/sperm state is shared across
+  the whole `(particle, replicate)` batch; each particle keeps its own ecology
+  column and genetics tables on the device. **Identical genetics tables are
+  deduplicated** into a variant bank, so only genuinely distinct variants cost
+  extra.
 - **Hooks**: declarative hooks run per particle (Python callbacks are rejected).
   Particles are panmictic, so a hook's deme selector is evaluated against
   **deme 0** for every particle (matching `B` independent single-population CPU

@@ -99,6 +99,44 @@ def test_gpu_particles_with_inner_replicates_shapes() -> None:
     assert np.isfinite(ind).all()
 
 
+def test_gpu_particles_per_particle_genetics_diverge() -> None:
+    """Per-particle genetics overrides are accepted and change the trajectory."""
+    pop = _build_pop("__gpu_particles_genetics__")
+    n_fit = 2 * 4 * 3  # (sex, n_ages, n_ztypes) for the builder above.
+    try:
+        pop.enable_gpu_particles(
+            [
+                {"viability_fitness": np.ones(n_fit)},
+                {"viability_fitness": np.full(n_fit, 0.5)},
+            ]
+        )
+    except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    _, ind, _ = pop.run_gpu_particles(3)
+    assert ind.shape == (2, 1, 2, 4, 3)
+    assert not np.allclose(ind[0, 0], ind[1, 0]), "genetics variants must diverge"
+
+
+def test_gpu_particles_chained_ecology_and_genetics_overrides() -> None:
+    """Ecology and genetics overrides compose in one particle mapping."""
+    pop = _build_pop("__gpu_particles_mixed__")
+    try:
+        pop.enable_gpu_particles(
+            [
+                {"carrying_capacity": 300.0, "viability_fitness": np.ones(2 * 4 * 3)},
+                {
+                    "carrying_capacity": 800.0,
+                    "viability_fitness": np.full(2 * 4 * 3, 0.25),
+                },
+            ]
+        )
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    _, ind, _ = pop.run_gpu_particles(2)
+    assert ind.shape == (2, 1, 2, 4, 3)
+    assert not np.allclose(ind[0, 0], ind[1, 0])
+
+
 def test_enable_gpu_particles_rejects_zero_replicates() -> None:
     """``n_replicates`` must be positive even before any device work."""
     pop = _build_pop("__gpu_particles_zero_reps__")

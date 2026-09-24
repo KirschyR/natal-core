@@ -280,6 +280,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P9b | 粒子内 replicate 轴（`P×R` 拍平，面向 ABC-SMC/参数 combo 批）（§74） | APPROVED（§75） |
 | P9c | 粒子 `state_tick` 语义 + ABC 迭代间复用执行器（§76） | APPROVED（§77） |
 | P9d | 灭绝 particle/replicate 跳过后续 stage（per-batch 活跃掩码，无钩子程序）（§78） | APPROVED（§79） |
+| P9e | GPU particle 逐粒子 genetics（每粒子生态+遗传表；相同表去重为变体库）（§82） | **已实现，待 §83 复核** |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -347,8 +348,9 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 - **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.4a 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67/§69）。
 - **最近回执**：§79（P9d）**APPROVED**；P9 增强项（P9a–P9d）已全部完成。
-- **待回执**：无；E12 已复核通过（§81）。
-- **后续未开始**：**E13** 待用户口径；**P7.4b**（ensemble 钩子）、**B7**、**C9** 已决定不做（除非用户改口）。
+- **待回执**：**§83**（P9e：GPU particle 逐粒子 genetics，高风险公开 API/数值边界）——已实现并自测。
+- **后续未开始**：ABC-SMC 性能基准（组件微基准 + 粒子历史对比，用户已定范围，待 P9e 复核后执行）；
+  **E13** 待用户口径；**P7.4b**（ensemble 钩子）、**B7**、**C9** 已决定不做（除非用户改口）。
 - **门禁基线（§69 时）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **221**、
   `ruff`/`pyright` 通过、`pytest` **3620**、`phase0` bit-identical、`rust/src/gpu/**` 聚合覆盖率 **96.62%**。
 - **P9 要点（GPU particle）**：`AgeStructuredPopulation.enable_gpu_particles(param_sets)` /

@@ -1155,10 +1155,12 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
 
         Unlike :meth:`enable_gpu_ensemble` (many random realizations of one
         parameter set), every particle here carries its own parameter overrides
-        and is advanced together on the device batch axis. Each particle may
-        also carry ``n_replicates`` independent stochastic realizations (the
-        device batch is the flattened ``(particle, replicate)`` pair). The
-        initial state and genetics are shared across the whole batch.
+        — both **ecology** and **genetics** tables — and is advanced together on
+        the device batch axis. Each particle may also carry ``n_replicates``
+        independent stochastic realizations (the device batch is the flattened
+        ``(particle, replicate)`` pair). The initial state is shared across the
+        whole batch; identical genetics tables are deduplicated, so varying the
+        fitness tables per particle costs only the distinct variants.
 
         Re-calling with the same batch size (typical for successive ABC-SMC
         iterations) reuses the resident device executor and resets the state,
@@ -1166,9 +1168,11 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
 
         Args:
             param_sets: One mapping per particle, keyed by ``Params`` field
-                names (e.g. ``carrying_capacity``, ``eggs_per_female``,
-                ``survival_rates``, ``mating_rates``); values replace the base
-                population's values.
+                names. Ecology fields (e.g. ``carrying_capacity``,
+                ``eggs_per_female``, ``survival_rates``, ``mating_rates``) and
+                genetics tables (e.g. ``viability_fitness``,
+                ``fecundity_fitness``, ``offspring_tensor``) are both accepted;
+                values replace the base population's values.
             n_replicates: Independent realizations per particle (>= 1; default
                 ``1``). Parameter-estimation workflows typically use a small
                 number here.

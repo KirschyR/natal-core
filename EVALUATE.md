@@ -15,9 +15,9 @@
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
 | 最近回执 | 第 36 轮：**APPROVED**（§81；E12 每 tick 参数缓存/scratch 复用——内容失效透明、CPU 对照、无回归） |
-| 待回执 | — |
-| 主 agent 处理 | 第 36 轮 E12 已复核通过；P9 增强项与 E12 均完成 |
-| 待 evaluator 动作 | —（若有实质改动，重跑受影响门禁并追加回执） |
+| 待回执 | §83（第 37 轮 P9e：GPU particle 逐粒子 genetics——生态+遗传表、去重变体库，高风险公开 API/数值边界） |
+| 主 agent 处理 | 第 37 轮 P9e 已实现并自测（§82） |
+| 待 evaluator 动作 | 按 §82 复核，把第 37 轮结论写入 §83 |
 
 ## 0. 一句话目标
 
@@ -2085,6 +2085,67 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 剩余热点的进一步下降需内核级优化（更大 B 的 kernel 效率、`age_shift` copy-through 等），超出「缓存恒定张量」范围，本轮未做。
 
 结论请追加为 **§81**。
+
+---
+
+## 82. 第 37 轮交接 — P9e：GPU particle 逐粒子 genetics（参数自由度）
+
+- 日期：2026-09-24
+- 背景：§81 APPROVED（E12）。用户指出「大 B 层面的参数自由度相当重要」：以 ABC-SMC 为例，需要估计
+  `viability_fitness`/`fecundity_fitness` 等 **genetics** 参数，必然要大量尝试参数组合。此前 `enable_gpu_particles`
+  只允许逐粒子覆盖 **生态列**，genetics 全批次共享，无法表达这种参数扫描。本轮把 batch 可变的维度从
+  「仅生态」扩到「生态 + 遗传」，属**通用批量能力**（非 ABC 特化）。
+- 风险分类：**高风险**（公开 API 合同、Python→Rust 数据交换、逐批次数值语义）。
+
+### 82.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/sessions/age_structured.rs` | 新增字段 `particle_variants: Option<(Vec<GeneticsTensors>, Vec<usize>)>`（变体库 + 每粒子变体 id）。新增 `dedup_variants`：把每粒子遗传表按内容去重成变体库（首次出现顺序），相同表只占一个 variant。新增 `enable_gpu_particles_impl(parts, bank, ids, R)`（校验/去重/建执行器/复用分支）；`enable_gpu_particles_ecologies_replicated` 改为以单变体库委托它（保持共享语义）。PyO3 `enable_gpu_particles` 现从每个 `Params` 抽取 `EcologyParams` 与 `GeneticsTensors`，去重后调用 impl。`run_gpu_particles` 用 `ids[batch / R]` 构造 per-batch `deme_variants`，交给已有 `GpuExecutor::tick(..., variants, deme_variants)`。 |
+| `src/natal/frontend/population/age_structured.py` | 文档：说明 `param_sets` 同时接受生态字段与遗传表、相同表去重。 |
+| `docs/{zh,en}/4_simulation_engine.md` | §11.4 同步（生态+遗传、去重、fitness 示例）。 |
+| 测试 | Rust `rust/tests/unit/gpu/session.rs` 新增 4 个：逐粒子 genetics 与独立 CPU session 逐 cell 对照、变体去重、非法遗传库拒绝、缺变体库时显式报错。Python `tests/test_gpu_particles_frontend.py` 新增 2 个：逐粒子 genetics 发散、生态+遗传混合覆盖。 |
+
+### 82.2 行为与安全边界
+
+- **复用既有机制，无新内核**：设备内核本就按 batch 读分块遗传表（空间路径已按 deme 使用多 variant）；本轮只把变体库接到
+  panmictic particle 批次，`deme_variants[batch] = ids[batch / R]`。E12 的 `CachedGenetics` 按 `variants`/`deme_variants`
+  内容缓存，天然支持逐批次遗传。
+- **共享语义不变**：`enable_gpu_particles_ecologies_replicated` 仍生成 `bank=[session genetics]`、`ids` 全 0，设备行为与
+  改动前等价。
+- **去重**：内容相同的表折叠为一个 variant；共享 genetics 的旧用例只产生 1 个 variant（无额外开销）。
+- **校验**：`GeneticsTensors::validate(bp)` 逐 variant 校验尺寸；ids 越界、库为空、ids 长度不符、`n_replicates==0`
+  均显式 `PyValueError`。
+- **初始状态**仍整批次共享；`run_gpu_particles` 返回 `(P,R,2,A,Z)`。
+
+### 82.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **247 passed, 0 failed**（含新增 4 个） |
+| `cargo test` / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3630 passed** / bit-identical |
+| 覆盖率（lcov） | `rust/src/gpu/**` 聚合 **3314/3417 = 96.99%**（本轮未改 gpu/）；`age_structured.rs` 新增可执行行 **52/56 = 92.86%**，4 行未覆盖为 PyO3 `enable_gpu_particles` 方法体（仅 Python 可达；已由 2 个 Python 用例功能覆盖；同 §14.3 先例） |
+| 真实模型 smoke（3 等位 A=8 Z=6，HomingDrive preset） | `enable_gpu_particles` 成功（该模型 GPU 合格）；`run_gpu_particles(5)` 返回 `(2,2,2,8,6)`、有限；vf=0.15 vs 0.02 两个 variant 结果发散（sum 122 vs 56） |
+| CPU 不变性 | `rust/src/kernels`/`model`/`contracts`/`lib.rs` 工作树零改动 |
+
+### 82.4 请 evaluator 独立核对
+
+- **正确性（重点）**：逐粒子不同 genetics（viability/fecundity/offspring 等）与独立 CPU session 逐 cell 对照；混合
+  「部分粒子共享、部分不同」；生态与遗传同时变化；随机模式统计等价；`n_replicates>1` 下 variant id 映射
+  `ids[batch / R]` 正确。
+- **去重语义**：相同表折叠后结果一致；仅 1 个 variant 时与改动前共享路径逐位一致。
+- **边界/错误**：ids 越界、空库、长度不符、`n_replicates==0`、遗传表尺寸错→显式 `Err`；缺变体库时 `run_gpu_particles` 报错。
+- **无回归**：P9/P9b/P9c/P9d、空间/离散/随机/ensemble、E12 缓存、phase0。
+- **公开 API**：`enable_gpu_particles` 现接受遗传字段；中英文档一致。
+
+### 82.5 残余风险（非阻塞）
+
+- 逐粒子遗传去重为 O(P²·表长) 最坏情况（P 大且表各异）；常见 P≤数千可接受，超大 P 可后续加哈希。
+- 每粒子变体库常驻主机内存（表很小，`O(P·Z³)`），设备端分块缓冲仍由 E12 `cache_bytes` 计入。
+- 初始状态/生殖系统仍整批共享（本轮只解耦 genetics）；如需逐粒子初始状态另立。
+
+结论请追加为 **§83**。
 
 ---
 

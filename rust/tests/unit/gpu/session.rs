@@ -2160,6 +2160,148 @@ fn evaluator_gpu_particles_all_fields_match_independent_cpu() {
 }
 
 #[test]
+fn evaluator_gpu_particles_per_particle_genetics_match_independent_cpu() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        // Two distinct genetics variants: g1 halves viability and fecundity.
+        let variant = |viability: f64, fecundity: f64| {
+            let mut g = genetics.clone();
+            for v in g.viability_fitness.iter_mut() {
+                *v *= viability;
+            }
+            for v in g.fecundity_fitness.iter_mut() {
+                *v *= fecundity;
+            }
+            g
+        };
+        let bank = vec![variant(1.0, 1.0), variant(0.5, 0.25)];
+        // 3 particles → variant ids [0, 1, 0]; particle 0 and 2 share g0.
+        let ids = vec![0usize, 1, 0];
+        let particles: Vec<EcologyParams> = (0..3).map(|k| particle_ecology(&base, k)).collect();
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.enable_gpu_particles_impl(particles.clone(), bank.clone(), ids.clone(), 1)
+            .expect("enable particles with per-particle genetics");
+        let (_, ind_arr, sperm_arr) = gpu.run_gpu_particles(py, 3).expect("run particles");
+        let ind_flat: Vec<f64> = ind_arr.readonly().as_slice().expect("ind slice").to_vec();
+        let sperm_flat: Vec<f64> = sperm_arr
+            .readonly()
+            .as_slice()
+            .expect("sperm slice")
+            .to_vec();
+
+        let ind_block = 2 * 4 * 2;
+        let sperm_block = 4 * 2 * 2;
+        let mut blocks: Vec<Vec<f64>> = Vec::new();
+        for (index, part) in particles.iter().enumerate() {
+            let mut cpu = make_session(
+                blueprint.clone(),
+                part.clone(),
+                bank[ids[index]].clone(),
+                ind.clone(),
+                sperm.clone(),
+            );
+            cpu.run_inner(py, 3, 0, None, 0).expect("cpu run");
+
+            let gblock = &ind_flat[index * ind_block..(index + 1) * ind_block];
+            for (cell, (got, want)) in gblock.iter().zip(cpu.state_ind.iter()).enumerate() {
+                let (got, want) = (*got as f32, *want as f32);
+                assert!(
+                    (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                    "particle {index} ind[{cell}]: device {got} vs host {want}"
+                );
+            }
+            for (cell, (got, want)) in sperm_flat[index * sperm_block..(index + 1) * sperm_block]
+                .iter()
+                .zip(cpu.state_sperm.iter())
+                .enumerate()
+            {
+                let (got, want) = (*got as f32, *want as f32);
+                assert!(
+                    (got - want).abs() <= 1.2e-5f32 * want.abs().max(1.0),
+                    "particle {index} sperm[{cell}]: device {got} vs host {want}"
+                );
+            }
+            blocks.push(gblock.to_vec());
+        }
+        assert_ne!(blocks[0], blocks[1], "particle 0 vs 1 must differ");
+    });
+}
+
+#[test]
+fn evaluator_particle_variant_dedup_collapses_identical_genetics() {
+    let (_, _, genetics) = fixture();
+    let mut changed = genetics.clone();
+    changed.fecundity_fitness[0] = 0.25;
+    let (bank, ids) = super::dedup_variants(vec![
+        genetics.clone(),
+        changed.clone(),
+        genetics.clone(),
+        changed.clone(),
+    ]);
+    assert_eq!(bank.len(), 2, "only two distinct tables");
+    assert_eq!(ids, vec![0, 1, 0, 1]);
+    assert!(bank[0] == genetics, "bank[0] must be the first-seen table");
+    assert!(bank[1] == changed, "bank[1] must be the changed table");
+}
+
+#[test]
+fn evaluator_gpu_particles_reject_malformed_genetics_bank() {
+    let (blueprint, base, genetics) = fixture();
+    let (ind, sperm) = initial_state();
+    let parts = vec![base.clone(), base.clone()];
+    let mut session = make_session(blueprint, base.clone(), genetics.clone(), ind, sperm);
+    // ids length mismatch
+    assert!(session
+        .enable_gpu_particles_impl(parts.clone(), vec![genetics.clone()], vec![0], 1)
+        .is_err());
+    // empty bank
+    assert!(session
+        .enable_gpu_particles_impl(parts.clone(), vec![], vec![0, 0], 1)
+        .is_err());
+    // id out of range
+    assert!(session
+        .enable_gpu_particles_impl(parts.clone(), vec![genetics.clone()], vec![0, 2], 1)
+        .is_err());
+    // zero replicates
+    assert!(session
+        .enable_gpu_particles_impl(parts.clone(), vec![genetics.clone()], vec![0, 0], 0)
+        .is_err());
+    // malformed table length
+    let mut bad = genetics.clone();
+    bad.viability_fitness.clear();
+    assert!(session
+        .enable_gpu_particles_impl(vec![base.clone()], vec![bad], vec![0], 1)
+        .is_err());
+}
+
+#[test]
+fn evaluator_run_gpu_particles_without_variant_bank_errors() {
+    let (blueprint, base, genetics) = fixture();
+    let (ind, sperm) = initial_state();
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        // Ecology present but the variant bank missing must be an explicit error.
+        let mut session = make_session(blueprint, base.clone(), genetics, ind, sperm);
+        session.particle_ecology = Some(base);
+        assert!(session.run_gpu_particles(py, 1).is_err());
+    });
+}
+
+#[test]
 fn evaluator_gpu_particles_hooks_and_set_param_match_cpu() {
     if !hardware_required() {
         eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");

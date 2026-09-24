@@ -281,7 +281,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P9c | 粒子 `state_tick` 语义 + ABC 迭代间复用执行器（§76） | APPROVED（§77） |
 | P9d | 灭绝 particle/replicate 跳过后续 stage（per-batch 活跃掩码，无钩子程序）（§78） | APPROVED（§79） |
 | P9e | GPU particle 逐粒子 genetics（每粒子生态+遗传表；相同表去重为变体库）（§82） | APPROVED（§83） |
-| P9f | GPU particle 逐周观测历史（设备投影、环形窗口、单次回传、无逐 tick 同步）（§84） | **已实现，待 §85 复核** |
+| P9f | GPU particle 逐周观测历史（设备投影、环形窗口、单次回传、无逐 tick 同步）（§84；§86 修复返回轴序） | **已实现，待 §87 复核** |
 
 ### 11.2 未完成项计划表（按建议优先级）
 

@@ -156,12 +156,12 @@ def test_gpu_particles_history_records_per_particle_rows() -> None:
         4, mask, record_every=1
     )
     assert tick == 4
+    # Documented order: (records, n_particles, n_replicates, n_groups, 2, A).
     assert history.shape == (5, 2, 2, 2, 2, n_ages)
-    # Row 0 is the shared initial state: female/male group totals match.
-    groups = history.sum(axis=(4, 5))
+    totals = history.sum(axis=(4, 5))  # (records, P, R, groups)
     init = pop.state.individual_count
-    assert np.allclose(groups[0, 0], init[0].sum())
-    assert np.allclose(groups[0, 1], init[1].sum())
+    assert np.allclose(totals[0, :, :, 0], init[0].sum())
+    assert np.allclose(totals[0, :, :, 1], init[1].sum())
 
 
 def test_gpu_particles_history_rejects_bad_mask_and_missing_enable() -> None:
@@ -229,3 +229,27 @@ def test_gpu_particles_lazily_initializes_session() -> None:
     except RuntimeError as exc:  # CPU-only host / extension without gpu feature.
         pytest.skip(f"GPU particles unavailable: {exc}")
     assert pop.gpu_status() == "enabled"
+
+
+def test_gpu_particles_history_axis_order_matches_doc() -> None:
+    """`history` is ordered as documented: (records, P, R, n_groups, 2, A).
+
+    With three particles, two replicates and two groups the documented order is
+    unambiguous, unlike the all-2 shapes in the existing shapes test.
+    """
+    pop = _build_pop("__gpu_particles_hist_axes__")
+    try:
+        pop.enable_gpu_particles(
+            [{"carrying_capacity": k} for k in (300.0, 500.0, 800.0)],
+            n_replicates=2,
+        )
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    state = pop.state.individual_count
+    n_ages = int(state.shape[1])
+    n_ztypes = int(state.shape[2])
+    mask = np.zeros((2, 2, n_ages, n_ztypes))
+    mask[0, 0, :, :] = 1.0
+    mask[1, 1, :, :] = 3.0
+    _, _, _, history = pop.run_gpu_particles_history(2, mask, record_every=1)
+    assert history.shape == (3, 3, 2, 2, 2, n_ages), history.shape

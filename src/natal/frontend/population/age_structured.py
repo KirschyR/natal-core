@@ -1306,8 +1306,13 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
             particles, replicates, n_ages, n_ztypes, n_ztypes
         )
         records = max(0, int(n_ticks)) // interval + 1
-        history_array = np.asarray(history, dtype=np.float64).reshape(
-            records, n_groups, particles, replicates, 2, n_ages
+        # Device rows are laid out (records, n_groups, n_batch, 2, n_ages) with
+        # batch particle-major; expose the documented (records, P, R, groups,
+        # 2, A) order.
+        history_array = (
+            np.asarray(history, dtype=np.float64)
+            .reshape(records, n_groups, particles, replicates, 2, n_ages)
+            .transpose(0, 2, 3, 1, 4, 5)
         )
         return int(tick), ind_array, sperm_array, history_array
 

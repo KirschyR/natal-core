@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 37 轮：**APPROVED**（§83；P9e 逐粒子 genetics——去重变体库、逐粒子/跨 replicate 映射、CPU 对照、缓存刷新） |
-| 待回执 | §85（第 38 轮 P9f：GPU particle 逐周观测历史——设备投影、单次回传、无逐 tick 同步，高风险公开 API） |
-| 主 agent 处理 | 第 38 轮 P9f 已实现并自测（§84）；ABC-SMC 性能基准 Step 1/2 完成 |
-| 待 evaluator 动作 | 按 §84 复核，把第 38 轮结论写入 §85 |
+| 最近回执 | 第 38 轮：**NOT APPROVED**（§85；P9f history 轴序与文档/交接不符——代码返回 `(records,groups,P,R,2,A)`，文档写 `(records,P,R,groups,2,A)`） |
+| 待回执 | §87（第 39 轮：修复 §85.2 轴序——前端 `transpose` 回文档声明的 `(records,P,R,groups,2,A)`） |
+| 主 agent 处理 | 第 39 轮已按 §85.2 推荐 (a) 修复并自测（§86）：§85.2 回归用例通过，全门禁绿 |
+| 待 evaluator 动作 | 按 §86 复核修复，把第 39 轮结论写入 §87 |
 
 ## 0. 一句话目标
 
@@ -2205,6 +2205,42 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 未覆盖 2 行属历史循环内 `set_param` 分支（粒子上带 SET_PARAM 钩子 + 历史未测）。
 
 结论请追加为 **§85**。
+
+---
+
+## 86. 第 39 轮交接 — 修复 §85.2：`history` 轴序回归
+
+- 日期：2026-09-24
+- 背景：§85 **NOT APPROVED**，唯一阻塞项为 `run_gpu_particles_history` 返回的 `history` 轴序与文档/docstring/
+  交接声明不一致（实现为 `(records, n_groups, P, R, 2, A)`，声明为 `(records, P, R, n_groups, 2, A)`），
+  `n_particles != n_groups` 时用户会静默取错。
+- 风险分类：**局部代码修改**（仅前端 reshape 轴序 + 测试；Rust 设备侧数值与内核未改）。因涉及公开 API 合同，仍请独立复核。
+
+### 86.1 改动（采用 §85.2 推荐项 (a)）
+
+| 文件 | 内容 |
+|---|---|
+| `src/natal/frontend/population/age_structured.py` | `history` 先 `reshape(records, n_groups, P, R, 2, A)`，再 `transpose(0, 2, 3, 1, 4, 5)`，返回文档声明的 `(records, n_particles, n_replicates, n_groups, 2, n_ages)`。 |
+| `tests/test_gpu_particles_frontend.py` | 作者用例按新轴序索引（`totals = history.sum(axis=(4, 5))` → `(records, P, R, groups)`）。 |
+
+未改动：Rust `run_gpu_particles_history` / `ParticleHistoryReadout` 注释（描述设备平铺 `(records, n_groups, n_batch, 2, n_ages)`，与代码一致）、`docs/{zh,en}`（本就声明目标轴序）、后端透传。
+
+### 86.2 自测证据（非独立）
+
+| 命令 | 结果 |
+|---|---|
+| `pytest tests/test_gpu_particles_frontend.py::test_gpu_particles_history_axis_order_matches_doc`（§85.2 失败用例） | **passed**（现返回 `(3, 3, 2, 2, 2, A)`） |
+| `cargo test --features gpu` | **254 passed** |
+| `pytest -q` / `ruff` / `pyright` / `phase0` | **3633 passed** / 通过 / 0 errors / bit-identical |
+| `check_rust.py` | **EXIT=0** |
+
+### 86.3 请 evaluator 独立复核
+
+- 复跑 §85.2 失败用例（现应通过）与 §85.3 的 interval/replicates 对照；确认轴序为 `(records, P, R, groups, 2, A)` 且 `history[r, p, rep, g]` 选对。
+- 确认实现与 `docs/{zh,en}` 及 frontend docstring 完全一致，无其他广播/轴序歧义。
+- 无回归：P9e、空间 B6、E12、phase0。
+
+结论请追加为 **§87**。
 
 ---
 
@@ -4573,3 +4609,81 @@ P9e 逐粒子 genetics（生态 + 遗传表、去重变体库）经独立复核�
 P9e 逐粒子 genetics 与去重变体库正确：逐粒子/跨 replicate 映射与独立 CPU 一致，相同表逐位共享，缓存刷新正确，
 错误路径显式，无回归，测试/门禁/覆盖率达标。**APPROVED**（范围：当前 HEAD `5a98b0e` 与被审测试集；不声称任何历史基线失败消失）。
 §83.4 为已知非阻塞边界。
+
+---
+
+## 85. 第 38 轮结论（evaluator 独立执行，2026-09-24，HEAD=`654951f`）
+
+### 85.1 裁定：**NOT APPROVED**
+
+存在 1 个阻塞项：**新公开 API `run_gpu_particles_history` 返回的 `history` 轴序与文档/docstring/交接声明不一致**，
+且用户按文档索引会得到静默错误的数据。设备侧数值投影本身正确（见 §85.3），需统一契约后回交复核。
+
+### 85.2 阻塞项（附已实际运行且失败的回归测试）
+
+- **测试**：`tests/test_gpu_particles_frontend.py::test_gpu_particles_history_axis_order_matches_doc`（本轮 evaluator 新增）。
+- **声明契约**（frontend docstring + `docs/en|zh/4_simulation_engine.md` + §84.1 交接）：
+  `history` 形状 `(records, n_particles, n_replicates, n_groups, 2, n_ages)`。
+- **实际实现**（`src/natal/frontend/population/age_structured.py`）：
+  `history_array = np.asarray(history, ...).reshape(records, n_groups, particles, replicates, 2, n_ages)`
+  → 实际形状 `(records, n_groups, n_particles, n_replicates, 2, n_ages)`（`groups` 与 `(P,R)` 两轴顺序互换）。
+- **命令**：`PYTHONUTF8=1 .venv/bin/pytest -q tests/test_gpu_particles_frontend.py::test_gpu_particles_history_axis_order_matches_doc`
+- **预期**（按文档，P=3、R=2、groups=2、records=3、A=4）：`(3, 3, 2, 2, 2, 4)`
+- **实际**：`AssertionError: (3, 2, 3, 2, 2, 4)`（`At index 1 diff: 2 != 3`）
+- **独立复现（ad-hoc 探针）**：P=3、R=2、groups=2，group1 权重=7×group0；`hist.shape=(3,2,3,2,2,4)`，`hist[0,0]` 为 group0（值 50），
+  `hist[0,1]` 为 group1（值 350）——确认第 2 轴为 `group`、第 3 轴为 `particle`。既有 Python 用例因 P=R=groups=2 全为 2 未能区分。
+- **影响**：用户按文档写 `history[r, p, rep, g]` 时实际取到 `history[r, g, p, rep]`，在 `n_particles != n_groups` 时**静默取错**。
+- **修复方向（二选一，需与文档一致）**：
+  (a) 前端 `reshape` 后 `transpose` 为 `(records, P, R, groups, 2, A)`（与文档/交接一致，推荐）；
+  (b) 若确以 `(records, groups, P, R, 2, A)` 为接口，则同步修正 frontend docstring 与 en/zh 文档并说明该轴序。
+- **严重度**：medium（公开 API 合同/文档不一致；无静默数值错误，但会误导用户索引）。
+
+### 85.3 其余核对（通过）
+
+- **设备投影正确性**：新增 `evaluator_gpu_particles_history_interval_and_replicates_match_projection`：P=2、R=2、groups=3、
+  `record_interval=2`、`n_ticks=5`（记录 tick 0/2/4），逐行与「逐步 `run_gpu_particles` 后主机 `output::observation::project`」对照一致
+  （容差 1.2e-5）。作者用例（interval=1、R=1）亦通过。
+- **记录点/长度**：`n_records = n_ticks/interval + 1`，tick 0 + interval 倍数；`wrap=false` 下循环以 `recorded<n_records` 守卫，不越界。
+- **错误路径**（作者 Rust 用例 + Python 用例）：未 enable、mask 长度不符、缺 variant bank、缺执行器均显式报错。
+- **无逐 tick 同步（读码）**：循环内仅 `gpu.tick`（无 set_param 时无 D2H）与设备 `record_history_row`；结束一次 `download_history_rows`。
+  （未独立计时复现 §84.3 的 6.4×；属性能声明，非正确性门禁。）
+- **`Rust` readout 文档**：`ParticleHistoryReadout` 写 `(records, n_groups, n_batch, 2, n_ages)`，与代码一致；仅 Python 侧文档写反。
+- **无回归**：`rust/src/gpu/**` 本轮 0 改动；受保护用例（executor/kernels/spatial_session）0 改动；phase0 bit-identical。
+
+### 85.4 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **254 passed**（作者 253 + evaluator 1） |
+| `cargo test --features gpu evaluator_` | **76 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3632 passed, 1 failed**（失败=本轮阻塞项回归测试） |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3314/3417 = 96.99%**（本轮 gpu/ 未改） |
+
+### 85.5 逐条发现（非阻塞）
+
+1. **low / 记录 tick 跨多次调用的解释**（§84.5 已述）：行 tick 相对设备 tick（enable 复位为会话 tick），调用方需自行按 `start + r·interval` 解释。
+2. **low / 一次性返回整窗主机数组**：大 B/长跑有主机内存峰值（可选分块 flush 另立）。
+3. **low / 仅粒子路径接入观测历史**；单群体/ensemble/raw 历史未做（可按需扩展）。
+
+### 85.6 阻塞项
+
+见 §85.2（公开 API `history` 轴序与文档不符，附失败回归测试）。
+
+### 85.7 证据来源
+
+- **独立运行**：上表门禁、`evaluator_gpu_particles_history_interval_and_replicates_match_projection`、
+  失败回归测试 `test_gpu_particles_history_axis_order_matches_doc`、ad-hoc 轴序探针（P=3/R=2/groups=2）、扩展重编、覆盖率采集。
+- **仅代码阅读**：`run_gpu_particles_history`（Rust）的记录点/容量/一次下载、前端 `reshape`、`docs/{en,zh}` 与 docstring、
+  `ParticleHistoryReadout` 注释、`observation::project` 与设备 `HistorySpec`。
+
+### 85.8 结论
+
+P9f 设备历史数值正确、无逐 tick 同步、错误路径显式，但**公开 API 返回的 `history` 轴序与文档/交接声明不一致**，
+属公开合同缺陷，**NOT APPROVED**。按 §85.2 统一轴序（推荐加转置回到文档声明的 `(records, P, R, groups, 2, A)`）并通过
+上述回归测试后回交复核（范围：HEAD `654951f` 与被审测试集；不声称任何历史基线失败消失）。

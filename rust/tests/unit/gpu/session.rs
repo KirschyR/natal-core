@@ -3941,3 +3941,85 @@ fn evaluator_per_particle_offspring_tensor_matches_cpu() {
         assert_ne!(&iflat[..ib], &iflat[ib..2 * ib]);
     });
 }
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for P9f (particle device history).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn evaluator_gpu_particles_history_interval_and_replicates_match_projection() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let particles = vec![particle_ecology(&base, 0), particle_ecology(&base, 1)];
+        let replicates = 2usize;
+        let n = particles.len() * replicates;
+        let (n_ages, n_z) = (blueprint.n_ages, blueprint.n_ztypes);
+        let plane = 2 * n_ages * n_z;
+        // Three groups with weights 1x/2x/3x on z0.
+        let n_groups = 3usize;
+        let mut mask = vec![0.0f64; n_groups * plane];
+        for group in 0..n_groups {
+            for sex in 0..2usize {
+                for age in 0..n_ages {
+                    mask[group * plane + (sex * n_ages + age) * n_z] = (group + 1) as f64;
+                }
+            }
+        }
+        let dims = [n, 2, n_ages, n_z];
+        let selected: Vec<usize> = (0..n).collect();
+        let interval = 2i64;
+        let ticks = 5i64;
+        let records = (ticks / interval + 1) as usize; // ticks 0,2,4
+
+        let mut gpu = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        gpu.enable_gpu_particles_ecologies_replicated(particles.clone(), replicates)
+            .expect("enable particles");
+        let (_t, _i, _s, hist_arr) = gpu
+            .run_gpu_particles_history(py, ticks, mask.clone(), n_groups, interval)
+            .expect("run with history");
+        let hist: Vec<f64> = hist_arr.readonly().as_slice().expect("history").to_vec();
+
+        // Reference: advance in `interval` steps and project each boundary.
+        let mut reference = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        reference
+            .enable_gpu_particles_ecologies_replicated(particles, replicates)
+            .expect("enable reference");
+        let mut expected: Vec<f64> = Vec::new();
+        for record in 0..records {
+            let step = if record == 0 { 0 } else { interval };
+            let (_t, i_arr, _s) = reference.run_gpu_particles(py, step).expect("ref run");
+            let state: Vec<f64> = i_arr.readonly().as_slice().expect("ind").to_vec();
+            expected.extend(
+                crate::output::observation::project(&state, &mask, dims, &selected, false, false)
+                    .expect("host project"),
+            );
+        }
+        assert_eq!(hist.len(), expected.len(), "history length");
+        assert_eq!(hist.len(), records * n_groups * n * 2 * n_ages);
+        for (index, (got, want)) in hist.iter().zip(expected.iter()).enumerate() {
+            let tolerance = 1.2e-5f64 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "history[{index}]: device {got} vs host {want}"
+            );
+        }
+    });
+}

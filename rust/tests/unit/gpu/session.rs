@@ -2424,6 +2424,50 @@ fn evaluator_gpu_particles_history_rejects_bad_inputs() {
 }
 
 #[test]
+fn evaluator_enable_gpu_reuses_resident_executor() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let mut session = make_session(blueprint, params, genetics, ind, sperm);
+        session.enable_gpu().expect("first enable");
+        // Second enable reuses the resident context and compiled kernels.
+        session.enable_gpu().expect("re-enable reuses the executor");
+        assert_eq!(session.gpu_status(), "enabled");
+        let (tick, _history, stopped) = session.run_inner(py, 2, 0, None, 0).expect("run");
+        assert_eq!(tick, 2);
+        assert!(!stopped);
+    });
+}
+
+#[test]
+fn evaluator_enable_gpu_ensemble_reuses_resident_executor() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, params, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let mut session = make_session(blueprint, params, genetics, ind, sperm);
+        session.enable_gpu_ensemble(4).expect("first enable");
+        let (_, first, _) = session.run_gpu_ensemble(py, 2).expect("run");
+        let first: Vec<f64> = first.readonly().as_slice().expect("ind").to_vec();
+        session
+            .enable_gpu_ensemble(4)
+            .expect("re-enable reuses the executor");
+        let (_, second, _) = session.run_gpu_ensemble(py, 2).expect("run");
+        let second: Vec<f64> = second.readonly().as_slice().expect("ind").to_vec();
+        assert_eq!(first, second, "reuse restarts from the same state");
+    });
+}
+
+#[test]
 fn evaluator_gpu_particles_hooks_and_set_param_match_cpu() {
     if !hardware_required() {
         eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
@@ -4021,5 +4065,150 @@ fn evaluator_gpu_particles_history_interval_and_replicates_match_projection() {
                 "history[{index}]: device {got} vs host {want}"
             );
         }
+    });
+}
+
+// ---------------------------------------------------------------------------
+// Independent evaluator tests for P9g (cross-batch executor reuse).
+// ---------------------------------------------------------------------------
+
+fn arr_bits(arr: &pyo3::Bound<'_, numpy::PyArray1<f64>>) -> Vec<u64> {
+    arr.readonly()
+        .as_slice()
+        .expect("array")
+        .iter()
+        .map(|v| v.to_bits())
+        .collect()
+}
+
+#[test]
+fn evaluator_particle_reconfigure_shrink_matches_fresh() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+        let three = vec![
+            particle_ecology(&base, 0),
+            particle_ecology(&base, 1),
+            particle_ecology(&base, 2),
+        ];
+        let two = vec![particle_ecology(&base, 0), particle_ecology(&base, 1)];
+
+        // 3 -> 2 particles: the second enable shrinks the resident executor.
+        let mut resized = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        resized
+            .enable_gpu_particles_ecologies_replicated(three, 1)
+            .expect("enable 3");
+        resized.run_gpu_particles(py, 2).expect("run 3");
+        resized
+            .enable_gpu_particles_ecologies_replicated(two.clone(), 1)
+            .expect("shrink to 2");
+        let (rtick, rind, rsperm) = resized.run_gpu_particles(py, 2).expect("run resized");
+
+        // Fresh 2-particle reference.
+        let mut fresh = make_session(blueprint, base, genetics, ind, sperm);
+        fresh
+            .enable_gpu_particles_ecologies_replicated(two, 1)
+            .expect("fresh enable 2");
+        let (ftick, find, fsperm) = fresh.run_gpu_particles(py, 2).expect("fresh run");
+
+        assert_eq!(rtick, ftick);
+        assert_eq!(arr_bits(&rind), arr_bits(&find), "shrink must match fresh");
+        assert_eq!(
+            arr_bits(&rsperm),
+            arr_bits(&fsperm),
+            "shrink must match fresh (sperm)"
+        );
+    });
+}
+
+#[test]
+fn evaluator_ensemble_reconfigure_stochastic_matches_fresh() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (mut blueprint, base, genetics) = fixture();
+        blueprint.stochastic = true;
+        let (ind, sperm) = initial_state();
+
+        let mut resized = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        resized.enable_gpu_ensemble(2).expect("enable 2");
+        resized.run_gpu_ensemble(py, 2).expect("run 2");
+        resized.enable_gpu_ensemble(4).expect("resize to 4");
+        let (_, rind, rsperm) = resized.run_gpu_ensemble(py, 3).expect("run resized");
+
+        let mut fresh = make_session(blueprint, base, genetics, ind, sperm);
+        fresh.enable_gpu_ensemble(4).expect("fresh enable 4");
+        let (_, find, fsperm) = fresh.run_gpu_ensemble(py, 3).expect("fresh run");
+
+        assert_eq!(
+            arr_bits(&rind),
+            arr_bits(&find),
+            "stochastic ensemble resize must match a fresh build"
+        );
+        assert_eq!(arr_bits(&rsperm), arr_bits(&fsperm));
+    });
+}
+
+#[test]
+fn evaluator_reconfigure_across_entry_paths_matches_fresh() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    pyo3::prepare_freethreaded_python();
+    Python::with_gil(|py| {
+        let (blueprint, base, genetics) = fixture();
+        let (ind, sperm) = initial_state();
+
+        // single population (B=1) -> ensemble (B=3) -> particles (P=2), each a
+        // different batch size on the same resident executor.
+        let mut mixed = make_session(
+            blueprint.clone(),
+            base.clone(),
+            genetics.clone(),
+            ind.clone(),
+            sperm.clone(),
+        );
+        mixed.enable_gpu().expect("enable single");
+        mixed.enable_gpu_ensemble(3).expect("resize single->3");
+        mixed.run_gpu_ensemble(py, 1).expect("ensemble run");
+        let two = vec![particle_ecology(&base, 0), particle_ecology(&base, 1)];
+        mixed
+            .enable_gpu_particles_ecologies_replicated(two.clone(), 1)
+            .expect("resize 3->2 particles");
+        let (mtick, mind, _) = mixed.run_gpu_particles(py, 2).expect("mixed run");
+
+        let mut fresh = make_session(blueprint, base, genetics, ind, sperm);
+        fresh
+            .enable_gpu_particles_ecologies_replicated(two, 1)
+            .expect("fresh particles");
+        let (ftick, find, _) = fresh.run_gpu_particles(py, 2).expect("fresh run");
+
+        assert_eq!(mtick, ftick);
+        assert_eq!(
+            arr_bits(&mind),
+            arr_bits(&find),
+            "cross-path resize must match fresh particles"
+        );
     });
 }

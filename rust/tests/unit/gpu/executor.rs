@@ -91,6 +91,56 @@ fn cache_bytes_matches_the_param_cache_layout() {
 }
 
 #[test]
+fn reconfigure_resizes_and_matches_fresh_executor() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let n_ages = 4;
+    let n_ztypes = 2;
+    let (ind2, sperm2) = populated_state(2, n_ages, n_ztypes);
+    let (ind3, sperm3) = populated_state(3, n_ages, n_ztypes);
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor =
+        GpuExecutor::new(context, 2, n_ages, n_ztypes, &ind2, &sperm2).expect("executor");
+    executor.age_tick().expect("advance before resize");
+    executor
+        .reconfigure(3, n_ages, n_ztypes, &ind3, &sperm3)
+        .expect("reconfigure to a larger batch");
+    assert_eq!(executor.n_batch(), 3);
+    assert_eq!(executor.current_tick(), 0, "resize resets the device tick");
+    // A malformed resize must leave the executor usable.
+    assert!(executor
+        .reconfigure(3, n_ages, n_ztypes, &ind3[..ind3.len() - 1], &sperm3)
+        .is_err());
+    assert!(executor
+        .reconfigure(3, n_ages, n_ztypes, &ind3, &sperm3[..sperm3.len() - 1])
+        .is_err());
+    assert_eq!(executor.n_batch(), 3);
+    executor
+        .age_tick()
+        .expect("advance after a rejected resize");
+
+    let got_ind = executor.download_ind().expect("download ind");
+    let got_sperm = executor.download_sperm().expect("download sperm");
+
+    // A fresh executor on the same state must match bit for bit.
+    let fresh_ctx = GpuContext::new(0).expect("device 0 context");
+    let mut fresh =
+        GpuExecutor::new(fresh_ctx, 3, n_ages, n_ztypes, &ind3, &sperm3).expect("fresh executor");
+    fresh.age_tick().expect("fresh advance");
+    assert_eq!(
+        bits(&got_ind),
+        bits(&fresh.download_ind().expect("fresh ind"))
+    );
+    assert_eq!(
+        bits(&got_sperm),
+        bits(&fresh.download_sperm().expect("fresh sperm"))
+    );
+}
+
+#[test]
 fn device_aging_matches_the_cpu_reference_bit_for_bit() {
     if !hardware_required() {
         eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");

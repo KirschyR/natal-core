@@ -177,6 +177,25 @@ def test_gpu_particles_history_rejects_bad_mask_and_missing_enable() -> None:
         pop.run_gpu_particles_history(1, np.ones(7))
 
 
+def test_gpu_particles_batch_resize_matches_fresh_population() -> None:
+    """Re-enabling with a different particle count resizes and matches fresh."""
+    params = [{"carrying_capacity": 300.0 + 100.0 * k} for k in range(3)]
+    pop = _build_pop("__gpu_particles_resize__")
+    try:
+        pop.enable_gpu_particles(params[:2])
+        pop.run_gpu_particles(2)
+        # Different count: the executor keeps its kernels and resizes buffers.
+        pop.enable_gpu_particles(params)
+        _, ind_resized, _ = pop.run_gpu_particles(2)
+        fresh = _build_pop("__gpu_particles_resize_fresh__")
+        fresh.enable_gpu_particles(params)
+        _, ind_fresh, _ = fresh.run_gpu_particles(2)
+    except RuntimeError as exc:  # CPU-only host.
+        pytest.skip(f"GPU particles unavailable: {exc}")
+    assert ind_resized.shape == (3, 1, 2, 4, 3)
+    assert np.array_equal(ind_resized, ind_fresh)
+
+
 def test_enable_gpu_particles_rejects_zero_replicates() -> None:
     """``n_replicates`` must be positive even before any device work."""
     pop = _build_pop("__gpu_particles_zero_reps__")

@@ -410,9 +410,31 @@ impl AgeStructuredSession {
                 "GPU path does not support custom growth curves",
             ));
         }
-        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let ind_host: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
         let sperm_host: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
+        // Reuse the resident context and compiled kernels when one exists.
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.reconfigure(
+                1,
+                self.blueprint.n_ages,
+                self.blueprint.n_ztypes,
+                &ind_host,
+                &sperm_host,
+            )
+            .map_err(map_lifecycle_error)?;
+            gpu.set_seed(self.seed);
+            gpu.ensure_migration_budget(&self.blueprint)
+                .map_err(map_lifecycle_error)?;
+            gpu.configure_hooks(&self.hooks, true)
+                .map_err(map_lifecycle_error)?;
+            if self.hooks.n_hooks != 0 {
+                gpu.set_tick(self.state_tick.max(0) as u64);
+            }
+            self.particle_ecology = None;
+            self.particle_variants = None;
+            return Ok(());
+        }
+        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let mut executor = crate::gpu::executor::GpuExecutor::new(
             context,
             1,
@@ -497,9 +519,32 @@ impl AgeStructuredSession {
                 "GPU ensemble does not support custom growth curves",
             ));
         }
-        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let ind_one: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
         let sperm_one: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();
+        // Reuse the resident context and compiled kernels when one exists.
+        if let Some(gpu) = self.gpu.as_mut() {
+            let ind_all: Vec<f32> = (0..n_replicates)
+                .flat_map(|_| ind_one.iter().copied())
+                .collect();
+            let sperm_all: Vec<f32> = (0..n_replicates)
+                .flat_map(|_| sperm_one.iter().copied())
+                .collect();
+            gpu.reconfigure(
+                n_replicates,
+                self.blueprint.n_ages,
+                self.blueprint.n_ztypes,
+                &ind_all,
+                &sperm_all,
+            )
+            .map_err(map_lifecycle_error)?;
+            gpu.set_seed(self.seed);
+            gpu.ensure_migration_budget(&self.blueprint)
+                .map_err(map_lifecycle_error)?;
+            self.particle_ecology = None;
+            self.particle_variants = None;
+            return Ok(());
+        }
+        let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let executor = crate::gpu::executor::GpuExecutor::ensemble(
             context,
             n_replicates,
@@ -1626,21 +1671,39 @@ impl AgeStructuredSession {
             .collect();
 
         let particle_variants = (variant_bank, ids);
-        // Reuse the resident executor/context/kernels when the batch size is
-        // unchanged (successive ABC-SMC iterations): reset the state, refresh
-        // the hooks, and keep the compiled kernels instead of recompiling.
+        // Reuse the resident executor/context/kernels: ABC-SMC evaluates a
+        // different number of particles each generation, so resize the buffers
+        // (without recompiling kernels) rather than rebuild from scratch.
         if let Some(gpu) = self.gpu.as_mut() {
             if gpu.n_batch() == n_batch {
+                // Same batch: reset the state in place.
                 let tick = self.state_tick.max(0) as u64;
                 gpu.restore_state(&ind_all, &sperm_all, tick)
                     .map_err(map_lifecycle_error)?;
-                gpu.configure_hooks(&self.hooks, true)
-                    .map_err(map_lifecycle_error)?;
-                gpu.set_stage_masking(self.hooks.n_hooks == 0);
-                self.particle_ecology = Some(ecology);
-                self.particle_variants = Some(particle_variants);
-                return Ok(());
+            } else {
+                // Different batch: keep the context + compiled kernels, only
+                // reallocate the size-dependent buffers.
+                gpu.reconfigure(
+                    n_batch,
+                    self.blueprint.n_ages,
+                    self.blueprint.n_ztypes,
+                    &ind_all,
+                    &sperm_all,
+                )
+                .map_err(map_lifecycle_error)?;
+                gpu.set_seed(self.seed);
+                if self.hooks.n_hooks != 0 {
+                    gpu.set_tick(self.state_tick.max(0) as u64);
+                }
             }
+            gpu.ensure_migration_budget(&self.blueprint)
+                .map_err(map_lifecycle_error)?;
+            gpu.configure_hooks(&self.hooks, true)
+                .map_err(map_lifecycle_error)?;
+            gpu.set_stage_masking(self.hooks.n_hooks == 0);
+            self.particle_ecology = Some(ecology);
+            self.particle_variants = Some(particle_variants);
+            return Ok(());
         }
 
         let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;

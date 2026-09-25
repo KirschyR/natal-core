@@ -14,10 +14,10 @@
 | 项 | 值 |
 |---|---|
 | 分支 | `feat/gpu-merge-test` |
-| 最近回执 | 第 38 轮：**NOT APPROVED**（§85；P9f history 轴序与文档/交接不符——代码返回 `(records,groups,P,R,2,A)`，文档写 `(records,P,R,groups,2,A)`） |
-| 待回执 | §87（第 39 轮：修复 §85.2 轴序——前端 `transpose` 回文档声明的 `(records,P,R,groups,2,A)`） |
-| 主 agent 处理 | 第 39 轮已按 §85.2 推荐 (a) 修复并自测（§86）：§85.2 回归用例通过，全门禁绿 |
-| 待 evaluator 动作 | 按 §86 复核修复，把第 39 轮结论写入 §87 |
+| 最近回执 | 第 40 轮：**APPROVED**（§89；P9g 跨 batch 复用——`reconfigure` 扩/缩批与全新执行器逐位一致、失败原子、三入口交叉切换正确） |
+| 待回执 | — |
+| 主 agent 处理 | 第 40 轮 P9g 已复核通过（工作树未提交；HEAD 仍 `0c95933`） |
+| 待 evaluator 动作 | —（若有实质改动，重跑受影响门禁并追加回执） |
 
 ## 0. 一句话目标
 
@@ -2241,6 +2241,62 @@ cargo test --features gpu --lib --no-run --message-format=json > /tmp/cov/build.
 - 无回归：P9e、空间 B6、E12、phase0。
 
 结论请追加为 **§87**。
+
+---
+
+## 88. 第 40 轮交接 — P9g：GPU 执行器跨 batch 复用（变粒子数世代）
+
+- 日期：2026-09-24
+- 背景：用户指出 ABC-SMC 每代评估的粒子数**并非恒定**（阈值收紧→接受率下降→提案数增大）。而 `enable_gpu_particles`
+  原先只在 `gpu.n_batch() == n_batch` 时复用执行器，换批会新建 `GpuContext` + `GpuExecutor::new`，其中
+  `Kernels::load` 会**再次 NVRTC 编译**（`kernels.rs:2990`）。本轮实现「按 batch 大小无关地复用」：内核与 batch 无关，
+  换批只重分配尺寸相关缓冲，不重编内核。
+- 风险分类：**高风险**（GPU 核心路径、显存预算、单群体/ensemble/粒子三条 enable 路径行为）。
+
+### 88.1 改动
+
+| 文件 | 内容 |
+|---|---|
+| `rust/src/gpu/executor.rs` | 新增 `GpuExecutor::reconfigure(n_batch, n_ages, n_ztypes, ind_host, sperm_host)`：保留 `context`/`kernels`，只重分配 state/scratch/active_mask/`ParamCache` 并上传新初始状态；**先全部构建成功再提交**，失败不改动执行器；重置 per-run 状态（tick/stopped/pending/saved/migration/history/hooks/stage_masking）；§D5 预算按新足迹校验（`free` 已含旧缓冲，故覆盖 old+new 峰值）。 |
+| `rust/src/sessions/age_structured.rs` | `enable_gpu` / `enable_gpu_ensemble` / `enable_gpu_particles_impl`：存在执行器时，**同 batch 走 `restore_state` 原地重置，异 batch 走 `reconfigure`**；随后统一 `set_seed`/`ensure_migration_budget`/`configure_hooks`/`set_stage_masking`（+ 有钩子时对齐 tick）。 |
+| `src/natal/frontend/population/age_structured.py`、`docs/{zh,en}` | 文档：换粒子数重复 enable 复用上下文与已编译内核、只重分配缓冲。 |
+| 测试 | Rust：`executor.rs::reconfigure_resizes_and_matches_fresh_executor`（扩容后与全新执行器逐位一致；ind/sperm 长度错与失败后仍可用）；`session.rs::evaluator_enable_gpu_reuses_resident_executor`、`evaluator_enable_gpu_ensemble_reuses_resident_executor`。Python：`test_gpu_particles_batch_resize_matches_fresh_population`。 |
+
+### 88.2 行为与安全边界
+
+- **内核与 batch 无关**：内核以 `n_batch` 为运行时参数；`reconfigure` 不调用 `Kernels::load`，故不重编。
+- **失败原子性**：新缓冲全部构建成功后才替换字段；长度不符/显存不足返回 `Err` 且执行器保持原状（测试覆盖）。
+- **语义等价**：换批后结果与「全新执行器同批上传」逐位一致（Rust 测试 + 既有 `evaluator_gpu_particles_batch_change_rebuilds_executor`）。
+- **显存**：`required` 含 state×2 + `cache_bytes`；`free` 在旧缓冲仍驻留时测得，故守卫覆盖 old+new 瞬时峰值。
+- **共享/逐粒子 genetics、E12 缓存、P9d 掩码、P9f 历史**均照旧。
+
+### 88.3 自测证据（非独立）
+
+| 命令/实验 | 结果 |
+|---|---|
+| `cargo test --features gpu` | **257 passed, 0 failed** |
+| `cargo test` / `check_rust.py` / `clippy --features gpu -D warnings` / `fmt` | **67** / EXIT=0 / 通过 / 通过 |
+| `ruff` / `pyright` / `pytest -q` / `phase0` | 通过 / 0 errors / **3634 passed** / bit-identical |
+| 覆盖率（lcov） | `rust/src/gpu/**` **3370/3473 = 97.03%**；`executor.rs` 新增行 **56/56 = 100%**；`age_structured.rs` 新增行 59/61 = 96.72%（未覆盖 2 行为有钩子时复用分支的 tick 对齐）；新增行合并 ≈ **98.3%** |
+| 正确性 | `reconfigure` 扩容后与全新执行器**逐位一致**；单群体/ensemble 二次 enable 从同态重启结果一致；既有粒子 batch-change 用例通过 |
+| 变批性能（同代码内对照，reconfigure vs 全新重建） | B=300: **8.6 vs 40 ms（4.5×）**；B=1000: **29 vs 59 ms（2×）**；B=3000: **86 vs 116 ms（1.35×）** |
+| 连续换批 enable（B=100→200→500→1000→3000） | 3.1 / 5.7 / 13.7 / 28 / 88 ms（首用 NVRTC 245 ms 一次性） |
+
+### 88.4 请 evaluator 独立核对
+
+- **正确性（重点）**：换批（增/减）后与全新执行器逐位一致；同批二次 enable 从同态重启；`reconfigure` 失败后执行器可用且状态未变。
+- **跨路径**：单群体→ensemble→粒子相互切换（batch 变化）后结果正确；有钩子时 tick 对齐。
+- **显存**：`reconfigure` 预算与真实分配一致；超额显式失败。
+- **无回归**：P9–P9f、空间 B6、E12、phase0；公开 API 未变（仅复用策略）。
+- **性能（可选）**：独立复现 reconfigure vs rebuild（共享卡先记 nvidia-smi）。
+
+### 88.5 残余风险（非阻塞）
+
+- 变批时仍会重分配尺寸相关缓冲并重传状态（O(B)）；这是换批的固有成本，已避免的是 `Kernels::load`/context 重建。
+- `reconfigure` 期间旧+新缓冲并存（`free` 守卫已覆盖），超大批瞬时可观。
+- 有钩子时异 batch 复用的 tick 对齐分支未被单测覆盖（2 行，逻辑与既有路径一致）。
+
+结论请追加为 **§89**。
 
 ---
 
@@ -4687,3 +4743,137 @@ P9e 逐粒子 genetics 与去重变体库正确：逐粒子/跨 replicate 映射
 P9f 设备历史数值正确、无逐 tick 同步、错误路径显式，但**公开 API 返回的 `history` 轴序与文档/交接声明不一致**，
 属公开合同缺陷，**NOT APPROVED**。按 §85.2 统一轴序（推荐加转置回到文档声明的 `(records, P, R, groups, 2, A)`）并通过
 上述回归测试后回交复核（范围：HEAD `654951f` 与被审测试集；不声称任何历史基线失败消失）。
+
+---
+
+## 87. 第 39 轮结论（evaluator 独立执行，2026-09-24，HEAD=`0c95933`）
+
+### 87.1 裁定：**APPROVED**
+
+§85.2 阻塞项已修复：前端 `run_gpu_particles_history` 现返回文档声明的 `(records, n_particles, n_replicates, n_groups, 2, n_ages)`，
+实现/文档/docstring 一致；§85.2 失败回归用例转绿；设备侧数值与内核未改，无回归。
+
+### 87.2 修复核对
+
+- **读码**：`src/natal/frontend/population/age_structured.py` 现为
+  `reshape(records, n_groups, particles, replicates, 2, n_ages).transpose(0, 2, 3, 1, 4, 5)`
+  → `(records, P, R, groups, sex, A)`；即把设备平铺 `(records, groups, batch, sex, age)` 重排为文档轴序。Rust `run_gpu_particles_history`
+  与 `ParticleHistoryReadout`（设备平铺 `(records, n_groups, n_batch, 2, n_ages)`）未改，与代码一致。
+- **§85.2 失败用例转绿**：`tests/test_gpu_particles_frontend.py::test_gpu_particles_history_axis_order_matches_doc` → **passed**（`(3,3,2,2,2,4)`）。
+- **独立轴序/取值探针**：P=3、R=2、groups=2；group1 权重=7×group0 → `hist.shape=(3,3,2,2,2,4)`，
+  `hist[0,:,:,0].shape=(3,2,2,4)`（P,R,2,A），组间比值恒为 **7.0**——确认 `history[r, p, rep, g]` 取到正确的 (particle, replicate, group)。
+- **文档一致**：`docs/en|zh/4_simulation_engine.md` 均声明 `(records, n_particles, n_replicates, n_groups, 2, n_ages)`，与实现一致；
+  frontend docstring 同步。
+- **§85.3 数值对照仍通过**：`evaluator_gpu_particles_history_interval_and_replicates_match_projection`（interval=2、R=2、groups=3）逐行与主机投影一致。
+
+### 87.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **254 passed** |
+| `cargo test --features gpu evaluator_` | **76 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3633 passed**（§85.2 失败用例已转绿） |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3314/3417 = 96.99%**（本轮 gpu/ 未改） |
+| 受保护用例 | `executor.rs`/`kernels.rs`/`spatial_session.rs` 本轮 0 改动 |
+
+### 87.4 逐条发现（非阻塞）
+
+1. **low / §85.5 残余不变**：记录 tick 跨多次调用的解释、一次性返回整窗内存峰值、仅粒子路径接入观测历史。
+2. **low / 新增一行 `transpose` 为纯视图重排**，无额外 D2H/拷贝；设备端仍单次回传。
+
+### 87.5 阻塞项
+
+无。
+
+### 87.6 证据来源
+
+- **独立运行**：上表门禁、§85.2 回归用例、独立轴序/取值探针、扩展重编、Python 全量 pytest。
+- **仅代码阅读**：前端 `reshape`+`transpose`、Rust `run_gpu_particles_history`/`ParticleHistoryReadout` 注释、en/zh 文档。
+
+### 87.7 结论
+
+§85.2 轴序缺陷已修复且实现与文档/交接一致，`history[r, p, rep, g]` 取值正确，无回归，测试/门禁/覆盖率达标。
+**APPROVED**（范围：当前 HEAD `0c95933` 与被审测试集；不声称任何历史基线失败消失）。§87.4 为已知非阻塞边界。
+
+---
+
+## 89. 第 40 轮结论（evaluator 独立执行，2026-09-24，工作树=`0c95933`+未提交 P9g，待主 agent 提交）
+
+### 89.1 裁定：**APPROVED**
+
+P9g 跨 batch 复用（`GpuExecutor::reconfigure`：保留 context/kernels，仅重分配尺寸相关缓冲与参数缓存并上传新初始状态）经独立复核：
+扩批/缩批后与「全新执行器」**逐位一致**（确定性 + 随机），三入口（单群体/ensemble/粒子）交叉换批正确，失败原子性成立，
+无回归。CPU golden reference 未改。
+
+> 注：本轮改动为**未提交工作树**（HEAD 仍 `0c95933`）。工作树还修改了 `.gitignore`（新增忽略 `hexagon_spatial_test`，
+> 用户参考材料：一篇 PDF + MATLAB `Hex-model-main`），见 §89.4.5；evaluator 未改动该文件，亦未改动该目录。
+
+### 89.2 独立核对
+
+- **读码 `reconfigure`**：校验 `ind_host`/`sperm_host` 长度；§D5 守卫 `required = 2·state_bytes(new) + cache_bytes(new)`，
+  因 `free` 在旧缓冲仍驻留时测得 → 覆盖 old+new 瞬时峰值；**先构建全部新缓冲（ind/ind_scratch/sperm/sperm_scratch/
+  active_mask/ParamCache）再逐字段提交**，任一失败则 `self` 未变；提交后重置 `tick/stopped/pending_eco/saved_*/migration_cache/
+  history/hooks/stage_masking`（`seed` 由调用方设置）。
+- **三入口复用**：`enable_gpu`→`reconfigure(1,…)+set_seed+ensure_migration_budget+configure_hooks+set_tick`；
+  `enable_gpu_ensemble`→`reconfigure(R,…)+set_seed+ensure_migration_budget`（ensemble 仍拒钩子，`reconfigure` 清空 hooks）；
+  `enable_gpu_particles_impl`→同 batch `restore_state`，异 batch `reconfigure+set_seed`，随后统一 `ensure_migration_budget/
+  configure_hooks/set_stage_masking`。`GpuExecutor::ensemble` 仅为 `new`+tile+`set_seed`，故复用等价。
+- **独立新增 3 个 evaluator 用例（全部通过）**：
+  - `evaluator_particle_reconfigure_shrink_matches_fresh`：粒子 **3→2 缩批**后与全新 2-particle 会话 ind/sperm **逐位一致**；
+  - `evaluator_ensemble_reconfigure_stochastic_matches_fresh`：随机模型 ensemble **2→4 扩批**后与全新 4-replicate 会话 **逐位一致**
+    （验证 tick/seed/RNG 复位）；
+  - `evaluator_reconfigure_across_entry_paths_matches_fresh`：单群体(B=1)→ensemble(B=3)→粒子(B=2) 同一执行器连续换批后，
+    结果与全新 2-particle 会话逐位一致。
+- **作者用例**：`reconfigure_resizes_and_matches_fresh_executor`（扩容逐位一致 + 长度错后仍可用）、
+  `evaluator_enable_gpu_reuses_resident_executor`、`evaluator_enable_gpu_ensemble_reuses_resident_executor`、
+  Python `test_gpu_particles_batch_resize_matches_fresh_population` 均通过。
+- **受保护用例**：`executor.rs` 仅**追加** `reconfigure_resizes_and_matches_fresh_executor`，受保护 evaluator 用例 0 行改动；
+  `kernels.rs`/`spatial_session.rs` 本轮 0 改动。
+
+### 89.3 门禁自跑（独立）
+
+| 命令 | 结果 |
+|---|---|
+| `cargo test` | **67 passed** |
+| `cargo test --features gpu` | **260 passed**（作者 257 + evaluator 3） |
+| `cargo test --features gpu evaluator_` | **81 passed** |
+| `python scripts/check_rust.py` | **EXIT=0** |
+| `cargo clippy --features gpu -- -D warnings` / `cargo fmt -- --check` | 通过 / 通过 |
+| `ruff check src demos tests` / `.venv/bin/pyright` | 通过 / 0 errors |
+| `PYTHONUTF8=1 .venv/bin/pytest -q` | **3634 passed** |
+| `phase0_baseline.py --check` | all scenarios bit-identical |
+| CPU 隔离 | `git diff 373fcbf..HEAD -- rust/src/kernels rust/src/model src/natal/contracts rust/src/lib.rs` 为空；工作树对同路径 diff 亦为空 |
+| 严格过滤 `rust/src/gpu/**`（排除 `/tests/`，逐行 max-count 去重） | 聚合 **3370/3473 = 97.03%**；executor 96.61%、kernels 97.35%、probe 96.13%、其余 100% |
+
+### 89.4 逐条发现（非阻塞）
+
+1. **low / 变批仍重分配 O(B) 缓冲并重传状态**（§88.5 已述）：这是换批固有成本，已消除的是 `Kernels::load`/context 重建。
+2. **low / `reconfigure` 期间 old+new 缓冲并存**：`free` 守卫已覆盖峰值；超大批瞬时可观。
+3. **low / 同 batch 粒子复用分支不调 `set_seed`**：`self.seed` 不随 `reseed` 变化（`reseed` 仅重置 CPU RNG），故无影响；
+   为一致性可考虑在 reuse 分支也调用 `set_seed`。
+4. **low / `age_structured.rs` 有钩子异批复用的 tick 对齐 2 行未单测**（§88.5 已声明；逻辑与既有路径一致，不在强制覆盖 scope）。
+5. **process / 工作树修改了 `.gitignore`**：新增 3 行 `hexagon_spatial_test`（用户参考材料），使该目录变为忽略。
+   按 `AGENTS.md`「未经用户明确要求不得修改 `.gitignore`」，请用户确认该改动是否已获授权；本项不属 P9g 产品代码，
+   不影响门禁与裁定，evaluator 未改动该文件。
+
+### 89.5 阻塞项
+
+无。
+
+### 89.6 证据来源
+
+- **独立运行**：上表门禁、3 个 Rust evaluator 用例、扩展重编、覆盖率采集。
+- **仅代码阅读**：`GpuExecutor::reconfigure` 的构建-提交/预算/重置、三入口复用分支、`GpuExecutor::ensemble` 对照、
+  受保护用例改动确认。
+
+### 89.7 结论
+
+P9g 跨 batch 复用正确（扩/缩批与全新执行器逐位一致、随机 RNG 复位、失败原子、跨入口换批一致），无回归，
+测试/门禁/覆盖率达标。**APPROVED**（范围：工作树 `0c95933`+未提交 P9g 与被审测试集；不声称任何历史基线失败消失）。
+§89.4 为已知非阻塞边界。

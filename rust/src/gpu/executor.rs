@@ -871,6 +871,91 @@ impl GpuExecutor {
         })
     }
 
+    /// Resize the executor to a new batch size while keeping the device
+    /// context and the compiled kernels resident.
+    ///
+    /// The kernels take the batch size as a runtime argument, so NVRTC does
+    /// not need to run again: this only reallocates the size-dependent buffers
+    /// (state, scratches, parameter cache) and uploads the new initial state.
+    /// It is what lets successive ABC-SMC generations, whose evaluated particle
+    /// count changes per generation, avoid recompiling kernels each time.
+    ///
+    /// Per-run state (tick, stop flags, saved/history/migration buffers, hook
+    /// program) is cleared; the caller re-applies the seed, hooks, tick and
+    /// stage masking afterwards.
+    ///
+    /// ## Parameters
+    /// - `n_batch`, `n_ages`, `n_ztypes`: New dimensions.
+    /// - `ind_host`: Batch-major individual counts, `(B, 2, A, Z)`.
+    /// - `sperm_host`: Batch-major stored sperm, `(B, A, Z, Z)`.
+    ///
+    /// ## Returns
+    /// `Ok(())` once every buffer is reallocated and the state is uploaded.
+    ///
+    /// ## Errors
+    /// Returns a description on a length mismatch or when the new footprint
+    /// exceeds the measured free memory.
+    pub fn reconfigure(
+        &mut self,
+        n_batch: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        ind_host: &[f32],
+        sperm_host: &[f32],
+    ) -> Result<(), String> {
+        let expected_ind = 2 * n_ages * n_ztypes * n_batch;
+        let expected_sperm = n_ages * n_ztypes * n_ztypes * n_batch;
+        if ind_host.len() != expected_ind {
+            return Err(format!(
+                "GpuExecutor individual state needs {expected_ind} elements, got {}",
+                ind_host.len()
+            ));
+        }
+        if sperm_host.len() != expected_sperm {
+            return Err(format!(
+                "GpuExecutor sperm state needs {expected_sperm} elements, got {}",
+                sperm_host.len()
+            ));
+        }
+        // `free` already excludes the old buffers, so this check also covers the
+        // transient old+new peak while the new allocations are made.
+        let required = 2 * Self::state_bytes(n_batch, n_ages, n_ztypes)
+            + Self::cache_bytes(n_batch, n_ages, n_ztypes);
+        let (free, _total) = self.context.memory_info()?;
+        ensure_memory_budget(free, required)?;
+        let ind_inner = batch_to_inner(ind_host, &[2, n_ages, n_ztypes], n_batch)?;
+        let sperm_inner = batch_to_inner(sperm_host, &[n_ages, n_ztypes, n_ztypes], n_batch)?;
+        let stream = self.context.stream();
+        // Build every replacement before committing, so a failed allocation
+        // leaves the executor untouched.
+        let ind = DeviceBuffer::from_host(&stream, &ind_inner)?;
+        let ind_scratch = DeviceBuffer::from_host(&stream, &vec![0.0f32; ind_inner.len()])?;
+        let sperm = DeviceBuffer::from_host(&stream, &sperm_inner)?;
+        let sperm_scratch = DeviceBuffer::from_host(&stream, &vec![0.0f32; sperm_inner.len()])?;
+        let active_mask = DeviceBuffer::from_host(&stream, &vec![1i32; n_batch])?;
+        let params = ParamCache::new(&stream, n_batch, n_ages, n_ztypes)?;
+        self.n_batch = n_batch;
+        self.n_ages = n_ages;
+        self.n_ztypes = n_ztypes;
+        self.ind = ind;
+        self.ind_scratch = ind_scratch;
+        self.sperm = sperm;
+        self.sperm_scratch = sperm_scratch;
+        self.active_mask = active_mask;
+        self.params = params;
+        self.tick = 0;
+        self.stopped = false;
+        self.pending_eco = None;
+        self.saved_ind = None;
+        self.saved_sperm = None;
+        self.saved_mask = vec![false; n_batch];
+        self.migration_cache = None;
+        self.history = None;
+        self.hooks = None;
+        self.stage_masking = false;
+        Ok(())
+    }
+
     /// Set the sampling seed for the counter-based device RNG.
     ///
     /// ## Parameters

@@ -1162,9 +1162,10 @@ class AgeStructuredPopulation(BasePopulation[PopulationState]):
         whole batch; identical genetics tables are deduplicated, so varying the
         fitness tables per particle costs only the distinct variants.
 
-        Re-calling with the same batch size (typical for successive ABC-SMC
-        iterations) reuses the resident device executor and resets the state,
-        avoiding a kernel rebuild.
+        Re-calling reuses the resident device context and compiled kernels and
+        only resets or resizes the device buffers — even when the particle
+        count changes (e.g. ABC-SMC generations that evaluate a different
+        number of particles), so kernels are not recompiled each time.
 
         Args:
             param_sets: One mapping per particle, keyed by ``Params`` field

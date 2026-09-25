@@ -67,3 +67,6 @@ demos/test*
 demos/gpu_spatial/**/outputs/
 demos/gpu_spatial/**/*.npy
 demos/gpu_spatial/**/*_summary*.json
+
+# hexo-model reconstruction test
+hexagon_spatial_test

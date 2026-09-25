@@ -386,6 +386,11 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
   column and genetics tables on the device. **Identical genetics tables are
   deduplicated** into a variant bank, so only genuinely distinct variants cost
   extra.
+- **Reuse across generations**: repeated `enable_gpu_particles` calls — including
+  when the particle count changes — reuse the resident device context and
+  compiled kernels, only resetting/resizing the device buffers, so kernels are
+  not recompiled. This fits ABC-SMC generations that evaluate a different
+  number of particles.
 - **Weekly history**: `run_gpu_particles_history(n_ticks, observation_mask,
   record_every=1)` records one observation-projection row per `(particle,
   replicate)` on the device (`observation_mask` is a `(n_groups, 2, n_ages,

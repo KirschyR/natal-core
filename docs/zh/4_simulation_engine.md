@@ -354,6 +354,8 @@ tick, individual_count, sperm_storage = pop.run_gpu_particles(n_ticks=100)
 
 - **初始状态共享**：初始个体/储精状态在整个 `(particle, replicate)` 批次间共享；每个 particle 保留自己的生态列
   与遗传表。**内容相同的遗传表会被去重**成一个变体库，只有真正不同的 variant 才占额外开销。
+- **跨代复用**：重复调用 `enable_gpu_particles`（**包括粒子数变化**）会复用设备上下文与已编译内核，只重置/重分配
+  设备缓冲，**不重新编译内核**——适合 ABC-SMC 每代评估不同数量粒子的场景。
 - **逐周历史**：`run_gpu_particles_history(n_ticks, observation_mask, record_every=1)` 在设备上为每个
   `(particle, replicate)` 记录观测投影行（`observation_mask` 是形如 `(n_groups, 2, n_ages, n_ztypes)` 的权重，语义与
   主机观测投影一致）。**运行期每记录 tick 只写显存、不回传**，结束时一次下载，因此没有逐 tick 同步。返回

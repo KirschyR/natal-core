@@ -282,7 +282,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 | P9d | 灭绝 particle/replicate 跳过后续 stage（per-batch 活跃掩码，无钩子程序）（§78） | APPROVED（§79） |
 | P9e | GPU particle 逐粒子 genetics（每粒子生态+遗传表；相同表去重为变体库）（§82） | APPROVED（§83） |
 | P9f | GPU particle 逐周观测历史（设备投影、环形窗口、单次回传、无逐 tick 同步）（§84；§86 修复返回轴序） | APPROVED（§87） |
-| P9g | GPU 执行器跨 batch 复用（换批只重分配缓冲、不重编内核；面向 ABC-SMC 变粒子数世代）（§88） | **已实现，待 §89 复核** |
+| P9g | GPU 执行器跨 batch 复用（换批只重分配缓冲、不重编内核；面向 ABC-SMC 变粒子数世代）（§88） | APPROVED（§89） |
 
 ### 11.2 未完成项计划表（按建议优先级）
 
@@ -350,7 +350,7 @@ GPU：RTX 5090 D V2 / CUDA 13.2 / 驱动 595.84，**多租户共享**（benchmar
 
 - **分支/HEAD**：`feat/gpu-merge-test`；P7.1–P7.4a 及 §59.4/§65 修复已由用户提交并 APPROVED（§59/§61/§63/§67/§69）。
 - **最近回执**：§79（P9d）**APPROVED**；P9 增强项（P9a–P9d）已全部完成。
-- **待回执**：**§89**（P9g：GPU 执行器跨 batch 复用，高风险 GPU 核心路径）——已实现并自测。
+- **待回执**：无；P9g 已复核通过（§89）。
 - **后续未开始**：**E13** 待用户口径；**P7.4b**（ensemble 钩子）、**B7**、**C9** 已决定不做（除非用户改口）。
 - **ABC-SMC 性能基准已跑（§84.3）**：组件微基准 + 粒子历史对比完成，结果见 `EVALUATE.md` §84。
 - **门禁基线（§69 时）**：`check_rust.py` EXIT=0、`cargo test` 67、`cargo test --features gpu` **221**、

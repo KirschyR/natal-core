@@ -68,5 +68,9 @@ demos/gpu_spatial/**/outputs/
 demos/gpu_spatial/**/*.npy
 demos/gpu_spatial/**/*_summary*.json
 
-# hexo-model reconstruction test
-hexagon_spatial_test
+# hex model reproduction: ignore only the paper/derived information sources;
+# reproduction scripts and other artifacts under this directory stay tracked.
+hexagon_spatial_test/*.pdf
+hexagon_spatial_test/Hex-model-main/
+hexagon_spatial_test/hex_model_2026_paper/
+hexagon_spatial_test/hexagon_sptial_test.md

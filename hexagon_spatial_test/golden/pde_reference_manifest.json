@@ -99,7 +99,8 @@
   },
   "generator": "hexagon_spatial_test/repro/gen_golden_pde_reference.py",
   "model": "reaction-diffusion PDE main.m (D=avd^2/pi, dx=0.1, dt=1e-4)",
-  "source": "/home/jovyan/node2/natal-core/hexagon_spatial_test/Hex-model-main/parameter_sensitive/hex code\u4e0a\u4ea4\u7248.zip",
+  "source": "/home/jovyan/node2/natal-core/hexagon_spatial_test/Hex-model-main/parameter_sensitive/hex code\u4e0a\u4ea4\u7248",
   "source_sha256": "e0e5cc970964302209771b2dbfd18886eb706b4b79e00f745ae043cce8b541d8",
+  "source_zip": "/home/jovyan/node2/natal-core/hexagon_spatial_test/Hex-model-main/parameter_sensitive/hex code\u4e0a\u4ea4\u7248.zip",
   "speed_units": "domain units per unit time (reaction applied once per unit time)"
 }

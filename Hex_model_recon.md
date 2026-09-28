@@ -84,7 +84,7 @@
 - 扩散系数换算：`D = avd²/π`。
 
 ### 1.4 参考一维 PDE（金标准）
-域 300、dx=0.1、dt=0.001、K=1、λ=5；方程 `∂N/∂t = D·N_xx + Nλ/(N(λ−1)+1) − N²`。
+域 300、dx=0.1、dt=1e-4、K=1、λ=5；方程 `∂N/∂t = D·N_xx + Nλ/(N(λ−1)+1) − N²`。（`pde/main.m:24` 为 `dt=0.0001`）
 
 ### 1.5 实验矩阵
 | 实验 | 场地 | 初始/释放 | 读数 |
@@ -227,6 +227,7 @@
 - **输出**：`hex_recon/golden/`（CSV/NPZ）+ 映射说明。
 - **验证**：MATLAB 复跑自身可复现；文档坐标等价性证明（手推一组偏移距离相等）。
 - **交付物**：M0 报告 + golden 数据。
+- **状态（2026-09-28）**：首份 golden 与复现骨架已产出（实际路径 `hexagon_spatial_test/{repro,golden,results}`；参考实现用 ZIP `wave justification/{flat,junction}`）；坐标等价证明由 evaluator 独立补齐（natal `dr²+dc²+dr·dc` 与 MATLAB `Δx²+Δy²−Δx·Δy` 在 `(dr,dc)=(Δx,−Δy)` 下逐点相等）。`hexagon_spatial_test/EVALUATE.md` §2 = **APPROVED**。
 
 ### M1 — 遗传系统单点对照（中风险：数值语义）
 - **目标**：在 natal 中表达 5/2/25 基因型系统的**一步后代转移**，与 `renew_function` 对照。
@@ -243,6 +244,7 @@
 - **验证**：natal CPU 与 MATLAB 波速相对误差目标 < 5%（先定性，再收紧）；两方向（flat/junction）各测。
 - **风险**：核截断差异、边界 `replicate` 缺失、坐标映射。
 - **交付物**：`hex_recon/wavespeed/` + 报告。
+- **M2 前置口径（M0 + evaluator §2.8 冻结项）**：① 场地/检查点口径三方不一——论文正文 300×300、50%/60%；发布 flat launcher 200×200、40%/70%；PDE launcher 写 300 而随附 `.mat` 为 n=100/60/60/40——需先冻结；② 低 avd（≲0.5）离散核有效扩散远低于标称 avd，应同时报告核有效均值 `Σ(w·d)/Σw` 或改用等效扩散对照；③ `flat/junction` 命名与 √3/2 归属存在作者自注歧义，需明确；④ PDE（domain units/time）与 hex（cells/generation）速度单位不同，需给显式换算。
 
 ### M3 — 宽核与规模实测（中风险，决断前置）
 - **目标**：量化 CSR 折叠在宽核/大格点下的内存/时间；核定 GPU 可行性。

@@ -17,6 +17,7 @@
 | `golden/pde_wavespeed_reference.npz` | PDE 波速：4 驱动 × 20 个 avd（0.1–2.0） |
 | `golden/pde_waveshape_reference.npz` | PDE 波形：4 驱动 × avd∈{0.5,10} 的 `(xlist, ylist)` |
 | `golden/pde_reference_manifest.json` | ZIP 源路径、逐文件 SHA-256、域长/检查点 |
+| `Hex-model-main/parameter_sensitive/hex code上交版/` | 参考 ZIP 的持久解压（gitignored）；PDE 提取脚本默认读取该目录 |
 | `results/m0_fig3_wavespeed_compare.json`、`results/m0_figS5_waveshape_summary.json` | 对照表 |
 
 ## 2. 选用的参考实现（与 prompt 的偏差说明）
@@ -97,5 +98,10 @@ matlab -batch "addpath('.../hexagon_spatial_test/repro'); gen_golden_hex_wavespe
 
 ## 7. 独立审查状态
 
-以上均为**主 agent 自测**。已按流程在 `hexagon_spatial_test/EVALUATE.md` 提交 §1 交接，等待 evaluator §2 回执；
-未获得独立 `APPROVED` 前不宣称 M0 完成。
+- 主 agent 自测：见 §5。
+- 独立审查（evaluator，`hexagon_spatial_test/EVALUATE.md` §2）：**APPROVED（M0 §1）**。独立复现了逐字性、
+  PDE 提取、hex 确定性与数值；补齐坐标等价证明；并补强 `verify_goldens.py`（新增 §0/0b：provenance 哈希
+  与 golden 覆盖网格断言），未改产品代码或 §1 正文。
+- 审查遗留（口径冻结、核有效扩散、方向命名、单位换算）已记入 `Hex_model_recon.md` §5「M2 前置口径」；
+  recon §1.4 的 PDE `dt` 已按源码修正为 `1e-4`。
+- 结论：M0 §1 通过独立审查；仅覆盖 M0 golden 与复现骨架，不构成对 M1/M2 数值语义的认可。

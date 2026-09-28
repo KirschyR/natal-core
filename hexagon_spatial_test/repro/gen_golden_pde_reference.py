@@ -17,8 +17,10 @@ Usage::
 
     python repro/gen_golden_pde_reference.py [path-to-zip-or-extracted-dir]
 
-Defaults to ``../Hex-model-main/parameter_sensitive/hex code上交版.zip``
-relative to this file.
+By default the already-extracted directory
+``../Hex-model-main/parameter_sensitive/hex code上交版/`` is used; if it is
+absent the sibling ``.zip`` is extracted to a temporary directory instead.
+Set ``HEX_PDE_SOURCE`` to override.
 """
 
 from __future__ import annotations
@@ -79,9 +81,12 @@ def main(argv: list[str]) -> int:
 
     if len(argv) > 1:
         src = Path(argv[1]).resolve()
+    elif os.environ.get("HEX_PDE_SOURCE"):
+        src = Path(os.environ["HEX_PDE_SOURCE"]).resolve()
     else:
-        src = (hexroot / "Hex-model-main" / "parameter_sensitive"
-               / "hex code上交版.zip").resolve()
+        ps = hexroot / "Hex-model-main" / "parameter_sensitive"
+        extracted = ps / "hex code上交版"
+        src = extracted if extracted.is_dir() else (ps / "hex code上交版.zip").resolve()
 
     tmp = None
     if src.is_dir():
@@ -100,9 +105,11 @@ def main(argv: list[str]) -> int:
         print(f"error: no '{pde}' in source", file=sys.stderr)
         return 2
 
+    source_zip = src if src.is_file() else src.parent / (src.name + ".zip")
     manifest = {
         "source": str(src),
-        "source_sha256": _sha256(src) if src.is_file() else None,
+        "source_zip": str(source_zip) if source_zip.is_file() else None,
+        "source_sha256": _sha256(source_zip) if source_zip.is_file() else None,
         "generator": "hexagon_spatial_test/repro/gen_golden_pde_reference.py",
         "model": "reaction-diffusion PDE main.m (D=avd^2/pi, dx=0.1, dt=1e-4)",
         "speed_units": "domain units per unit time (reaction applied once per unit time)",

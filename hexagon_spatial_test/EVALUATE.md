@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | — |
-| 待回执 | §1（M0 首份 golden）→ 期望 §2 |
-| 主 agent 处理 | M0 首份 golden 已产出，交接区已追加 §1 |
-| 待 evaluator 动作 | 独立核对 §1 的 golden、自测证据与结论边界 |
+| 最近回执 | §2（M0 §1）= **APPROVED**（evaluator） |
+| 待回执 | —（下一交接为 M2 完成后的 §3） |
+| 主 agent 处理 | M0 §1 经独立审查通过；已同步 recon §1.4 `dt`、记录 M2 前置口径（见 §1.6） |
+| 待 evaluator 动作 | —（M2 §3 交接后） |
 
 ---
 
@@ -107,6 +107,9 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
   已逐字复制并记录 SHA-256（见 golden JSON `reference_files`）。
 - hex golden 为确定性：两次运行 6 个速度值逐位相同。
 - PDE golden 直接来自 ZIP 预计算 `.mat`（v7.3 波形 / v5 波速），转换为 `.npz` + manifest。
+- （后续更新）参考 ZIP 已解压到持久目录 `hexagon_spatial_test/Hex-model-main/parameter_sensitive/hex code上交版/`
+  （gitignored）；`gen_golden_pde_reference.py` 默认读取该目录、不再每次解压到 /tmp，manifest 仍记录源 ZIP 的
+  SHA-256（`e0e5cc…`），PDE golden 数组逐位不变。
 
 ### 1.3 自测证据（主 agent）
 命令与结果见 `results/M0_golden_report.md` §5。摘要：
@@ -128,8 +131,154 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - 核版本二义（51×51 无截断 vs 59×59+`d≤25`）；hex 波形未导出（参考 `main` 触发即 `return`）。
 - `HexGrid` 与 MATLAB 六边形度量/旋转坐标的映射尚未核对（M0 计划项，顺延到 M2）。
 
+### 1.6 审查后文档同步（主 agent，2026-09-28）
+
+§2 = APPROVED。按 §2.3 / §2.8 处理（**仅文档**，未改 golden、复现脚本或任何产品代码）：
+
+- 修正 `Hex_model_recon.md` §1.4 PDE `dt=0.001 → 1e-4`（与 `pde/main.m:24`、manifest 一致）。
+- 在 `Hex_model_recon.md` §5 记录 M0 状态与「M2 前置口径」（场地/检查点、核有效扩散、方向命名、单位换算）。
+- 更新本文件状态表与 `results/M0_golden_report.md` §7（独立审查结论）。
+- evaluator 补强的 `repro/verify_goldens.py`（§0/0b）保留；复跑 `ALL HARD CHECKS PASSED`、EXIT=0。
+- 以上为审查后的文档同步，不触发新一轮数值审查；如需可请 evaluator 复核该同步。
+
 ---
 
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
 
 > 首个回执将对应 §1 交接（编号 §2）。
+
+## §2 — M0 §1 独立审查回执（evaluator）
+
+### 2.0 裁定
+
+**APPROVED（M0 §1）**。审查范围：提交 `2a7123c` 及其后 4 个未提交小改动（`EVALUATE.md` §1、
+`golden/pde_reference_manifest.json`、`repro/gen_golden_pde_reference.py`、`results/M0_golden_report.md`）。
+风险分类：复现脚本/数据 = 局部修改；未触碰 natal 产品代码（`git status` 仅上述 4 个
+`hexagon_spatial_test/` 文件）。核心 golden 数值、逐字性、PDE 提取、确定性均**独立复现通过**；
+未发现过度解读。审查期间 evaluator **补强了 `repro/verify_goldens.py`**（见 §2.7），未改任何产品代码或 §1 正文。
+
+前置声明：以下除注明「主 agent 自测」外，均为 evaluator 独立运行所得；MATLAB/py 命令见各条。
+
+### 2.1 逐条独立核对（对应 §1.4 请求核对点）
+
+| # | 核对点 | 结论 | 独立证据（命令/结果） |
+|---|---|---|---|
+| 1 | `repro/ref/` 与 ZIP 源逐字一致 | **PASS** | 见 §2.2 |
+| 2 | PDE golden 提取正确性 | **PASS** | 见 §2.3 |
+| 3 | hex golden 数值与确定性可复现 | **PASS** | 见 §2.4 |
+| 4 | 方法/单位/坐标一致性 | **PASS（含 4 项已披露差异）** | 见 §2.5 |
+| 5 | 结论边界（无过度解读） | **PASS** | 见 §2.6 |
+| 6 | 自测脚本逻辑有效 | **PASS（1 处缺口已由 evaluator 补强）** | 见 §2.7 |
+
+### 2.2 逐字性（独立核对 #1）
+
+未信任主 agent 声明，直接以 ZIP 成员字节为基准计算 SHA-256，并与 golden JSON `reference_files` 比对：
+
+- `repro/ref/{flat,junction}/{main.m,get_mig_matrix25.m,homing/drive_generator.m,homing/renew_function.m}`
+  共 8 个文件，与 `hex code上交版.zip` 内
+  `wave justification/{flat side direction,junction direction}/...` **逐字节相同，SHA-256 全部相等**。
+- 命令：Python `zipfile.ZipFile(...).read(member)` vs `pathlib.read_bytes()`，逐文件 `==` 且
+  `hashlib.sha256` 对比 golden JSON；输出 8/8 `identical=True`。
+- 结论：§1.1「逐字复制」成立。`flat` 与 `junction` 的 `get_mig_matrix25.m` 本身同源同哈希（预期）。
+
+### 2.3 PDE golden 提取正确性（独立核对 #2）
+
+直接读 ZIP 原始 `.mat`（v5 波速用 `scipy.io.loadmat`，v7.3 波形用 `h5py`），逐数组与
+`golden/pde_wavespeed_reference.npz` / `pde_waveshape_reference.npz` 比较：
+
+- 波速：4 驱动 `retlist`（20 点，avd 0.1→2.0）与 npz **逐位相同**，全部严格单调递增、有限、正；
+  `avdlist` 逐位相同。
+- 波形：4 驱动 × avd∈{0.5,10} 的 `(xlist,ylist)` 与 npz **逐位相同**；`xlist` 严格递增；
+  `ylist∈[0,1]`（cifab_10 max=0.9992）；点数 601/1601/2601 与 manifest 记录一致。
+- manifest 逐文件 SHA-256：12 个 `.mat`（4 驱动 × {wavespeed, shape0.5, shape10}）与
+  **ZIP 成员及持久解压目录均相等**；`source_sha256=e0e5cc…` 确为 **ZIP 本身**哈希（非解压目录）。
+- 命令：`python` 脚本如上；输出 `exact_vs_npz=True` ×8、`ALL MATCH: True`。
+- 备注（文档性，非本 golden 缺陷）：`Hex_model_recon.md` §1.4 写 PDE `dt=0.001`，而 `pde/main.m:24`
+  与 manifest `model` 均为 `dt=1e-4`；以源码/manifest 为准，建议 M0/M2 同步 recon §1.4。
+
+### 2.4 hex golden 可复现性与确定性（独立核对 #3）
+
+在临时副本 `/tmp/hexeval/a/repro`（不动仓库文件）用
+`/opt/matlab/bin/matlab -batch "addpath('/tmp/hexeval/a/repro'); gen_golden_hex_wavespeed"` 连跑两次：
+
+- 两次 6 个速度值**逐位相同**，且与仓库 `golden/hex_homing_wavespeed_smallcase.json` **逐位相同**：
+  flat `{0.082144957338308802, 0.48893138750491955, 1.0681417904840802}`、
+  junction `{0.076423160330297127, 0.42341169311233984, 0.91627874966219225}`。
+- 两次 `reference_files` 哈希与仓库一致。`elapsed_s` 每次不同（壁钟元数据，§2.7-BF3 说明其不影响判定）。
+
+### 2.5 方法 · 单位 · 坐标一致性（独立核对 #4）
+
+**与论文 / recon §1.3、§2.6 一致的部分（已核）**：通用 hex 模型 `data=data+renew(...)` 后逐基因型
+`imfilter(...,'replicate','same')`；`renew` 递归 `d_ar=rct·λ/((λ−1)N+1)/N − ar·N`（代码变量名
+`rcat`，M0 报告写 `rct`，仅命名差异）；`get_mig_matrix25` 为 **51×51、六边形度量
+`d=sqrt(dx²+dy²−dx·dy)`、全核归一化、无 `d≤25` 截断**；`σ=avd/√(π/2)`；flat/junction harness
+镜像发布 `launcher_speed.m`（flat `cp=0.4n/0.7n`；junction `cp=L/(2√3)+0.45L/+0.65L`）。
+
+**evaluator 独立补齐的坐标等价证明**（§1.5 顺延到 M2 的 M0 计划项）：
+natal `HexGrid` 度量 `dr²+dc²+dr·dc`（`topology.py:257-262`，`COS_OPPOSITE_ANGLE=−0.5`）与 MATLAB
+`Δx²+Δy²−Δx·Δy` 在映射 `(dr,dc)=(Δx,−Δy)` 下对全部 51×51 偏移**完全相等**；`build_gaussian_kernel`
+的 `mean_dispersal→sigma=avd/√(π/2)`（`topology.py:389-393`）与参考实现同一约定。命令：numpy 全网格
+比较，输出 `metric identical ...: True`。→ 该 M0 验证项实际成立，主 agent 的顺延不构成缺陷。
+
+**独立核对发现、报告未逐条点名的差异（均不改变 M0 结论，供 M2 处理）**：
+
+- **(a) 场地/检查点口径三方不一**：论文正文（p.6）为 **300×300、检查点 50%/60%**；发布 flat
+  `launcher_speed.m` 为 **200×200、40%/70%**；junction launcher `actual_length=600`；PDE
+  `launcher_speed.m` 写 `n=300` 但随附 `.mat` 实际 `n=100/60/60/40`。M0 harness 取了小规模
+  （flat m=60,n=200；junction L=100）。M0 报告 §4 已把「检查点间距」列为偏差来源，但未点明与论文
+  正文口径不同。→ 属 M2 定量对照前必须冻结的口径项。
+- **(b) 51×51 核未执行论文「最大 25 hexes」限制**：`get_mig_matrix25.m` 无 `d≤25` 掩膜，51×51
+  方阵内六边形距离最大可达 `√1875≈43.3`（>25），共 **546/2601** 个格点超界；但这些权重在
+  σ=avd/√(π/2)、avd≥0.5 时**可忽略**（avd=1 时超界总权重 ~1e-214），故对 M0 golden 无实际影响。
+  报告已列「51×51 无截断 vs 59×59+d≤25」为版本二义。
+- **(c) √3/2 换算方向**：M0 对 **flat** 乘 √3/2，与 `wavespeed_analyse.m:139-141` 及作者
+  `homing_wavespeed_compare.m` 的**算术对象**（flat side 数据）一致；`flat` 的坐标映射
+  `X=√3/2·I`（`draw_3d_plot.m`）也从几何上确认该因子。但 ZIP 内目录名
+  `junction和flatside是反的！！！！！junction乘sqrt3除2` 与作者比较脚本的变量命名互换表明
+  **方向标签存在歧义**。M0 报告已按「近似观察（非恒等）」陈述比值，未过度断言；建议 M2 明确方向命名。
+- **(d) 低 avd 下离散核有效扩散远低于标称 avd**：`get_mig_matrix25` 自打印的实际核均值
+  `sum(w·d)/sum(w)` 在 avd=0.25/0.5/1.0 时约 **2.1e-5 / 0.207 / 0.950**（MATLAB 独立复算）。
+  故 avd=0.25 的 −75% 偏差除「有限域+检查点+固定核」外，主因是**离散化后核近乎 δ 函数**。
+  报告未点名此点（§2.7-BF5）。属解释性遗珠，非 M0 缺陷（M0 不主张定量）。
+
+### 2.6 结论边界（独立核对 #5）
+
+逐项检查 `results/M0_golden_report.md` 与 §1：未发现过度解读。报告 §4 标题即「初步，非最终结论」，
+明确「不能当作收敛后的定量结论；定量对照留待 M2」；方向比值出现在 §1.3/§4 且标注「观察」，
+`verify_goldens.py` 第 4 节标注「report only」；`unit_note` 与 §3 只陈述换算事实。**PASS**。
+
+### 2.7 自测脚本逻辑（独立核对 #6 + 竞态审查）
+
+按 `adversarial-review` 流程执行 Bug-finder → Adversarial Defender → Referee（evaluator 裁定）。
+Bug-finder 报 6 项；Defender 回 1 confirmed / 4 false-positive / 1 disputed；evaluator 复核如下：
+
+- **BF-001（medium，confirmed）**：`gen_golden_pde_reference.py:142-143` 对缺失波形源 `continue`，
+  `verify_goldens.py` 只遍历现有 `_ylist` 键 → **波形 golden 不完整仍全绿**。evaluator 已在隔离副本
+  （删去 4 个 `cifab_*` 键）实际复现：原脚本报 `ALL HARD CHECKS PASSED`，仅检查 6/8 条剖面。
+- BF-002/003/006（low，false-positive）：均为逐字第三方源码的潜在/壁钟问题，M0 harness 未触发，
+  报告也未作对应断言；已见证（m=60 与 m=200 速度逐位相同；`elapsed_s` 不被任何检查消费）。
+- BF-004（low）：`verify_goldens` 确未复算 provenance（Defender 以「文件被字节截断」反例不成立，
+  但「删除键」一例成立）→ 已并入下面补强。
+- BF-005（low，disputed）：数值子声明正确（见 §2.5-d），但将其定性为 M0「缺陷」过头——报告已把
+  固定 51×51 核列为偏差来源。裁定为「有效观察 / 记录性遗留」，非缺陷。
+
+**evaluator 补强（测试修改，允许范围）**：在 `repro/verify_goldens.py` 新增第 0/0b 节——
+(a) 用 `hashlib` 复算 `repro/ref/` 8 个文件哈希并与 golden JSON `reference_files` 比对；
+(b) 断言 golden 覆盖文档化网格（6 条 hex、4×2 波速数组、4×2 波形剖面），缺失即失败。
+
+- 补强后对**完好 golden** 运行：`ALL HARD CHECKS PASSED`，EXIT=0（8/8 剖面）。
+- 对**删除 cifab 的隔离副本**运行：`waveform profile set mismatch ... FAIL`，EXIT=1。
+- 即 BF-001 缺口已由可运行测试封堵，且未弱化任何原有断言。
+
+### 2.8 残余风险
+
+1. 小规模域 + 51×51 核 + 口径不一（论文 300×300/50-60% vs 代码 200×200/40-70%）→ 定量对照
+   必须在 M2 冻结口径后重做（§2.5-a）。
+2. 低 avd（≲0.5）离散核有效扩散远低于标称 avd（§2.5-d）；M2 应同时报告核有效均值或改以等效
+   扩散对照，避免把离散化伪影误读为收敛问题。
+3. 方向标签歧义（§2.5-c）：M2 需明确 `flat/junction` 命名与 √3/2 归属。
+4. PDE/hex 速度单位不同（PDE=domain units/time；hex=cells/generation）；M2 需给出显式换算。
+5. 本次为局部修改，APPROVED 仅覆盖 M0 golden 与复现骨架；不构成对 M1/M2 数值语义的认可。
+
+> 交付物说明：evaluator 实际运行命令见 §2.2–§2.7；主 agent 自测与独立审查已分别标注。
+> 审查期间唯一改动文件为 `repro/verify_goldens.py`（补强测试），未改 `EVALUATE.md` §1 正文及任何产品代码。

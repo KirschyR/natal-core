@@ -1,0 +1,105 @@
+{
+  "drives": {
+    "cifab": {
+      "waveshape_0.5": {
+        "avd": 0.5,
+        "file": "wave justification/pde/cifab/cifab_pde_waveshape0.5.mat",
+        "n": 60,
+        "n_points": 601,
+        "sha256": "e61d1ae6ef0258b705d316e0c56bc1621bedf279a65b44915ca11a1a9f48a240"
+      },
+      "waveshape_10": {
+        "avd": 10.0,
+        "file": "wave justification/pde/cifab/cifab_pde_waveshape10.mat",
+        "n": 260,
+        "n_points": 2601,
+        "sha256": "43ef37eb93f24f47666496bca89947d6ea60b308a607f4ab5d35a0e4bb08db57"
+      },
+      "wavespeed": {
+        "checkpoint1": 20.0,
+        "checkpoint2": 24.0,
+        "file": "wave justification/pde/cifab/cifab_pde_wavespeed.mat",
+        "n": 40.0,
+        "n_dispersal": 20,
+        "sha256": "53ed37b83fcad09bcd234ddfd04e124d3af55b6318ba09b850ea56d003916518"
+      }
+    },
+    "homing": {
+      "waveshape_0.5": {
+        "avd": 0.5,
+        "file": "wave justification/pde/homing/homing_pde_waveshape0.5.mat",
+        "n": 60,
+        "n_points": 601,
+        "sha256": "b79908a87c3bbf357e8b59b8a2bae837a1abb6fddc14bf176f73e7f7e6eba821"
+      },
+      "waveshape_10": {
+        "avd": 10.0,
+        "file": "wave justification/pde/homing/homing_pde_waveshape10.mat",
+        "n": 260,
+        "n_points": 2601,
+        "sha256": "e89e944d184b7372c161521005d59cbdd60f4a01703ed7cf2a1377ce3cd084a9"
+      },
+      "wavespeed": {
+        "checkpoint1": 50.0,
+        "checkpoint2": 60.0,
+        "file": "wave justification/pde/homing/homing_pde_wavespeed.mat",
+        "n": 100.0,
+        "n_dispersal": 20,
+        "sha256": "fc7bdea3c0f86fe7a621cfcbd4c3719d1d559997a6424354168e682ffab77976"
+      }
+    },
+    "tade11": {
+      "waveshape_0.5": {
+        "avd": 0.5,
+        "file": "wave justification/pde/tade11/tade11_pde_waveshape0.5.mat",
+        "n": 60,
+        "n_points": 601,
+        "sha256": "feaf6081744f849f98f5acb888e9f76892190edb019fe2daf8250bd6de2dfbf7"
+      },
+      "waveshape_10": {
+        "avd": 10.0,
+        "file": "wave justification/pde/tade11/tade11_pde_waveshape10.mat",
+        "n": 160,
+        "n_points": 1601,
+        "sha256": "033108ae96cc2279b6c571155ef93fdce52fa261345fda7bdbdecebdec2dc124"
+      },
+      "wavespeed": {
+        "checkpoint1": 30.0,
+        "checkpoint2": 36.0,
+        "file": "wave justification/pde/tade11/tade11_pde_wavespeed.mat",
+        "n": 60.0,
+        "n_dispersal": 20,
+        "sha256": "13aa05c351fe57d449bc5d2cfbd548ffa5ae2118df3129b7c4e006ed5d85e944"
+      }
+    },
+    "tare": {
+      "waveshape_0.5": {
+        "avd": 0.5,
+        "file": "wave justification/pde/tare/tare_pde_waveshape0.5.mat",
+        "n": 60,
+        "n_points": 601,
+        "sha256": "80873a579da064ff6d0eafd2aa8851a08a016e071ae501800bf44cf7e12fe388"
+      },
+      "waveshape_10": {
+        "avd": 10.0,
+        "file": "wave justification/pde/tare/tare_pde_waveshape10.mat",
+        "n": 260,
+        "n_points": 2601,
+        "sha256": "e254c8a5c0ec2fd4308f7ca2315dc3518149968e54e8800e6c57c636eec04242"
+      },
+      "wavespeed": {
+        "checkpoint1": 30.0,
+        "checkpoint2": 36.0,
+        "file": "wave justification/pde/tare/tare_pde_wavespeed.mat",
+        "n": 60.0,
+        "n_dispersal": 20,
+        "sha256": "2c52e82390ca18c7e4544080fdb2c6ff3d8ac2b2e21e2920ad7ca79e64694f2b"
+      }
+    }
+  },
+  "generator": "hexagon_spatial_test/repro/gen_golden_pde_reference.py",
+  "model": "reaction-diffusion PDE main.m (D=avd^2/pi, dx=0.1, dt=1e-4)",
+  "source": "/home/jovyan/node2/natal-core/hexagon_spatial_test/Hex-model-main/parameter_sensitive/hex code\u4e0a\u4ea4\u7248.zip",
+  "source_sha256": "e0e5cc970964302209771b2dbfd18886eb706b4b79e00f745ae043cce8b541d8",
+  "speed_units": "domain units per unit time (reaction applied once per unit time)"
+}

@@ -1,0 +1,82 @@
+{
+  "created_by": "hexagon_spatial_test/repro/gen_golden_hex_wavespeed.m",
+  "model": "general hex model (flat/junction), homing drive, boundary1=0.2, lambda=5, kernel=51x51",
+  "unit_note": "speed in cells/generation; wavespeed_analyse.m scales flat-side speeds by sqrt(3)/2",
+  "reference_files": {
+    "flat_main_m": "997517c63f51febd96abfe0f210d450783dceb02795486506f70527ac4646da0",
+    "flat_get_mig_matrix25_m": "aef2ed0f0c35a020335083f3f47999fb0dae8dfb7f5826abdde4293d2eb7136c",
+    "flat_homing_drive_generator_m": "d14978f0dca5970791b5e6d2d1fba06283c12f8586cfe57294e5b12a96df1684",
+    "flat_homing_renew_function_m": "82961286d66a61b2657eca87fb4e13a01a5ec0bf48e7b0d11459896b4460e218",
+    "junction_main_m": "c8bc9c83ea4571ff08b2db73959b8dd519103863374ba50bc344ca38c4e8a2bd",
+    "junction_get_mig_matrix25_m": "aef2ed0f0c35a020335083f3f47999fb0dae8dfb7f5826abdde4293d2eb7136c",
+    "junction_homing_drive_generator_m": "d14978f0dca5970791b5e6d2d1fba06283c12f8586cfe57294e5b12a96df1684",
+    "junction_homing_renew_function_m": "82961286d66a61b2657eca87fb4e13a01a5ec0bf48e7b0d11459896b4460e218"
+  },
+  "flat": [
+    {
+      "direction": "flat",
+      "avd": 0.25,
+      "speed": 0.0821449573383088,
+      "m": 60,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140,
+      "elapsed_s": 4.480179
+    },
+    {
+      "direction": "flat",
+      "avd": 0.5,
+      "speed": 0.48893138750491955,
+      "m": 60,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140,
+      "elapsed_s": 0.768704
+    },
+    {
+      "direction": "flat",
+      "avd": 1,
+      "speed": 1.0681417904840802,
+      "m": 60,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140,
+      "elapsed_s": 0.346348
+    }
+  ],
+  "junction": [
+    {
+      "direction": "junction",
+      "avd": 0.25,
+      "speed": 0.076423160330297127,
+      "actual_length": 100,
+      "m": 158,
+      "n": 116,
+      "checkpoint1": 74,
+      "checkpoint2": 94,
+      "elapsed_s": 3.218393
+    },
+    {
+      "direction": "junction",
+      "avd": 0.5,
+      "speed": 0.42341169311233984,
+      "actual_length": 100,
+      "m": 158,
+      "n": 116,
+      "checkpoint1": 74,
+      "checkpoint2": 94,
+      "elapsed_s": 0.596915
+    },
+    {
+      "direction": "junction",
+      "avd": 1,
+      "speed": 0.91627874966219225,
+      "actual_length": 100,
+      "m": 158,
+      "n": 116,
+      "checkpoint1": 74,
+      "checkpoint2": 94,
+      "elapsed_s": 0.287296
+    }
+  ]
+}

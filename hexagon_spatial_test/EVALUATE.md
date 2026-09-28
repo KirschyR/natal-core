@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | — |
-| 待回执 | — |
-| 主 agent 处理 | 已建分支；规范声明与通道就绪；等待 M0 启动 |
-| 待 evaluator 动作 | — |
+| 待回执 | §1（M0 首份 golden）→ 期望 §2 |
+| 主 agent 处理 | M0 首份 golden 已产出，交接区已追加 §1 |
+| 待 evaluator 动作 | 独立核对 §1 的 golden、自测证据与结论边界 |
 
 ---
 
@@ -89,6 +89,44 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 # 主 agent 交接区（追加式；主 agent 写，evaluator 据此审查）
 
 > 首个交接将在 M0 完成后追加（编号从 §1 起）。
+
+## §1 — M0：范围冻结与首份外部 golden（波速/波形）
+
+### 1.1 改动清单（均在 `hexagon_spatial_test/`，未触碰 natal-core）
+- 新增 `repro/`：`ref/{flat,junction}/`（自发布 ZIP 逐字复制的参考实现）、`gen_golden_hex_wavespeed.m`、
+  `gen_golden_pde_reference.py`、`compare_goldens.py`、`verify_goldens.py`。
+- 新增 `golden/`：`hex_homing_wavespeed_smallcase.{json,mat}`、`pde_wavespeed_reference.npz`、
+  `pde_waveshape_reference.npz`、`pde_reference_manifest.json`。
+- 新增 `results/`：`M0_golden_report.md`、`m0_fig3_wavespeed_compare.json`、`m0_figS5_waveshape_summary.json`。
+- 未改任何 natal 源文件；`gpu` feature 默认关闭；未 commit。
+
+### 1.2 行为与原因
+- 目标 M0：产出可复跑的外部 golden 并建立 Fig 3/S5 数据基座，为 M2 波速/波形与 M1 遗传对照提供参照。
+- 参考实现选用 ZIP 的 `wave justification/{flat,junction direction}`（论文 Fig S3/S5 实际实现、参数化、
+  与预计算 PDE 同源），而非 prompt 提及的 `test_code/{hs,hv}`（后者 `m`/`n`/`return_list` 有缺陷且不可参数化）。
+  已逐字复制并记录 SHA-256（见 golden JSON `reference_files`）。
+- hex golden 为确定性：两次运行 6 个速度值逐位相同。
+- PDE golden 直接来自 ZIP 预计算 `.mat`（v7.3 波形 / v5 波速），转换为 `.npz` + manifest。
+
+### 1.3 自测证据（主 agent）
+命令与结果见 `results/M0_golden_report.md` §5。摘要：
+- `gen_golden_hex_wavespeed`：flat avd{0.25,0.5,1.0}→{0.082145,0.488931,1.068142}；
+  junction→{0.076423,0.423412,0.916279}（cells/generation）。
+- `verify_goldens.py`：硬检查全部 OK（有限/正/单调、PDE 波速单调、波形∈[0,1]）。
+- 确定性：重跑 harness 速度值逐位一致。
+- 方向交叉核对（观察）：`flat·√3/2 / junction` = 0.9309 / 1.0000 / 1.0096（avd=0.25/0.5/1.0）。
+
+### 1.4 请 evaluator 核对点
+1. `repro/ref/` 与 ZIP 源是否逐字一致（比对 golden JSON 的 SHA-256；ZIP 路径见 manifest `source_sha256`）。
+2. PDE golden 的提取是否正确（字段、形状、单调性；可对照 ZIP 原始 `.mat`）。
+3. 小规模 hex golden 的数值与确定性是否可独立复现（命令见报告 §5）。
+4. 结论边界：报告已声明**小规模未收敛、不作定量复现声明**，请核对是否仍有过度解读。
+5. 单位/方向换算（flat×√3/2）的表述是否恰当（已按“近似观察”而非“恒等”陈述）。
+
+### 1.5 残余风险
+- 小规模域 + 固定 51×51 核 → 低 avd 波速明显偏低，需 M2 以论文规模收敛。
+- 核版本二义（51×51 无截断 vs 59×59+`d≤25`）；hex 波形未导出（参考 `main` 触发即 `return`）。
+- `HexGrid` 与 MATLAB 六边形度量/旋转坐标的映射尚未核对（M0 计划项，顺延到 M2）。
 
 ---
 

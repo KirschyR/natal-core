@@ -107,7 +107,8 @@ def test_run_gpu_ensemble_missing_backend_raises() -> None:
 def test_single_population_gpu_path_runs() -> None:
     """``enable_gpu`` / ``gpu_status`` expose the single-population device path."""
     pop = _build_pop("__gpu_single__")
-    assert pop.gpu_status() == "disabled"
+    # A no-gpu build reports "unavailable"; both are valid pre-enable states.
+    assert pop.gpu_status() in {"disabled", "unavailable"}
     try:
         pop.enable_gpu()
     except RuntimeError as exc:  # CPU-only host / extension without gpu feature.

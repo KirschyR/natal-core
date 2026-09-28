@@ -1,0 +1,166 @@
+{
+  "created_by": "hexagon_spatial_test/repro/gen_golden_m2_wavespeed.m",
+  "model": "general hex model (flat/junction), homing drive, boundary1=0.2, lambda=5, 51x51 kernel",
+  "avds": [
+    0.5,
+    1,
+    2
+  ],
+  "unit_note": "speed in cells/generation; flat is scaled by sqrt(3)/2 by wavespeed_analyse.m",
+  "reference_files": {
+    "flat_main_m": "997517c63f51febd96abfe0f210d450783dceb02795486506f70527ac4646da0",
+    "flat_get_mig_matrix25_m": "aef2ed0f0c35a020335083f3f47999fb0dae8dfb7f5826abdde4293d2eb7136c",
+    "flat_homing_drive_generator_m": "d14978f0dca5970791b5e6d2d1fba06283c12f8586cfe57294e5b12a96df1684",
+    "flat_homing_renew_function_m": "82961286d66a61b2657eca87fb4e13a01a5ec0bf48e7b0d11459896b4460e218",
+    "junction_main_m": "c8bc9c83ea4571ff08b2db73959b8dd519103863374ba50bc344ca38c4e8a2bd",
+    "junction_get_mig_matrix25_m": "aef2ed0f0c35a020335083f3f47999fb0dae8dfb7f5826abdde4293d2eb7136c",
+    "junction_homing_drive_generator_m": "d14978f0dca5970791b5e6d2d1fba06283c12f8586cfe57294e5b12a96df1684",
+    "junction_homing_renew_function_m": "82961286d66a61b2657eca87fb4e13a01a5ec0bf48e7b0d11459896b4460e218"
+  },
+  "runs": [
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 0.5,
+      "speed": 0.49037143407825179,
+      "m": 300,
+      "n": 300,
+      "checkpoint1": 150,
+      "checkpoint2": 180,
+      "kernel_mean_dist": 0.20651402431812316,
+      "elapsed_s": 3.613485
+    },
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 1,
+      "speed": 1.0736557782979632,
+      "m": 300,
+      "n": 300,
+      "checkpoint1": 150,
+      "checkpoint2": 180,
+      "kernel_mean_dist": 0.95001207834243651,
+      "elapsed_s": 1.570084
+    },
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 2,
+      "speed": 2.1250933211651262,
+      "m": 300,
+      "n": 300,
+      "checkpoint1": 150,
+      "checkpoint2": 180,
+      "kernel_mean_dist": 1.9884097130934471,
+      "elapsed_s": 0.880713
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 0.5,
+      "speed": 0.48893138750491955,
+      "m": 200,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140,
+      "kernel_mean_dist": 0.20651402431812316,
+      "elapsed_s": 1.618425
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 1,
+      "speed": 1.0681417904840802,
+      "m": 200,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140,
+      "kernel_mean_dist": 0.95001207834243651,
+      "elapsed_s": 0.748982
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 2,
+      "speed": 2.1058424313453821,
+      "m": 200,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140,
+      "kernel_mean_dist": 1.9884097130934471,
+      "elapsed_s": 0.407449
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 0.5,
+      "speed": 0.42849999093567431,
+      "m": 947,
+      "n": 693,
+      "checkpoint1": 443,
+      "checkpoint2": 563,
+      "kernel_mean_dist": 0.20651402431812316,
+      "elapsed_s": 45.100649
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 1,
+      "speed": 0.93545522720276508,
+      "m": 947,
+      "n": 693,
+      "checkpoint1": 443,
+      "checkpoint2": 563,
+      "kernel_mean_dist": 0.95001207834243651,
+      "elapsed_s": 21.338809
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 2,
+      "speed": 1.8634521869041361,
+      "m": 947,
+      "n": 693,
+      "checkpoint1": 443,
+      "checkpoint2": 563,
+      "kernel_mean_dist": 1.9884097130934471,
+      "elapsed_s": 10.753629
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 0.5,
+      "speed": 0.42763348522266909,
+      "m": 474,
+      "n": 347,
+      "checkpoint1": 222,
+      "checkpoint2": 282,
+      "kernel_mean_dist": 0.20651402431812316,
+      "elapsed_s": 7.438965
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 1,
+      "speed": 0.93187025790601752,
+      "m": 474,
+      "n": 347,
+      "checkpoint1": 222,
+      "checkpoint2": 282,
+      "kernel_mean_dist": 0.95001207834243651,
+      "elapsed_s": 3.500215
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 2,
+      "speed": 1.8455296065072622,
+      "m": 474,
+      "n": 347,
+      "checkpoint1": 222,
+      "checkpoint2": 282,
+      "kernel_mean_dist": 1.9884097130934471,
+      "elapsed_s": 1.855316
+    }
+  ]
+}

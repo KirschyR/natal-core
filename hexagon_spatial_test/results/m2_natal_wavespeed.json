@@ -1,0 +1,144 @@
+{
+  "kernel_check": {
+    "0.5": {
+      "max_abs_diff": 0.03423845681561279,
+      "max_abs_diff_col_mirror": 1.1102230246251565e-16,
+      "equals_matlab_col_mirror": true,
+      "kernel_sum": 1.0
+    },
+    "1.0": {
+      "max_abs_diff": 0.07819295486634911,
+      "max_abs_diff_col_mirror": 2.7755575615628914e-17,
+      "equals_matlab_col_mirror": true,
+      "kernel_sum": 1.0000000000000002
+    },
+    "2.0": {
+      "max_abs_diff": 0.019548244919347556,
+      "max_abs_diff_col_mirror": 1.3877787807814457e-17,
+      "equals_matlab_col_mirror": true,
+      "kernel_sum": 0.9999999999999999
+    }
+  },
+  "avds": [
+    0.5,
+    1.0,
+    2.0
+  ],
+  "runs": [
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 0.5,
+      "speed": 0.4904441711845907,
+      "m": 300,
+      "n": 300,
+      "checkpoint1": 150,
+      "checkpoint2": 180
+    },
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 1.0,
+      "speed": 1.0738100681500893,
+      "m": 300,
+      "n": 300,
+      "checkpoint1": 150,
+      "checkpoint2": 180
+    },
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 2.0,
+      "speed": 2.1291767471115413,
+      "m": 300,
+      "n": 300,
+      "checkpoint1": 150,
+      "checkpoint2": 180
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 0.5,
+      "speed": 0.48897455677004087,
+      "m": 200,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 1.0,
+      "speed": 1.0683413213092166,
+      "m": 200,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 2.0,
+      "speed": 2.1015773632083974,
+      "m": 200,
+      "n": 200,
+      "checkpoint1": 80,
+      "checkpoint2": 140
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 0.5,
+      "speed": 0.42763348522260924,
+      "L": 300,
+      "m": 474,
+      "n": 347
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 1.0,
+      "speed": 0.9318702579057991,
+      "L": 300,
+      "m": 474,
+      "n": 347
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 2.0,
+      "speed": 1.8455296065011961,
+      "L": 300,
+      "m": 474,
+      "n": 347
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 0.5,
+      "speed": 0.42850285957217776,
+      "L": 600,
+      "m": 947,
+      "n": 693
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 1.0,
+      "speed": 0.9349463099171955,
+      "L": 600,
+      "m": 947,
+      "n": 693
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 2.0,
+      "speed": 1.8625880529924674,
+      "L": 600,
+      "m": 947,
+      "n": 693
+    }
+  ],
+  "hexgrid_embedding_max_abs_err": 1.1368683772161603e-13
+}

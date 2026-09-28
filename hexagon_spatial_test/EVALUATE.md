@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §2（M0 §1）= **APPROVED**（evaluator） |
-| 待回执 | —（下一交接为 M2 完成后的 §3） |
-| 主 agent 处理 | M0 §1 经独立审查通过；已同步 recon §1.4 `dt`、记录 M2 前置口径（见 §1.6） |
-| 待 evaluator 动作 | —（M2 §3 交接后） |
+| 待回执 | §3（M2 波速/波形）→ 期望 §4 |
+| 主 agent 处理 | M0 已闭环；M2 波速/波形已产出，交接区已追加 §3 |
+| 待 evaluator 动作 | 独立核对 §3 的 M2 复现、口径与结论边界 |
 
 ---
 
@@ -140,6 +140,43 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - 更新本文件状态表与 `results/M0_golden_report.md` §7（独立审查结论）。
 - evaluator 补强的 `repro/verify_goldens.py`（§0/0b）保留；复跑 `ALL HARD CHECKS PASSED`、EXIT=0。
 - 以上为审查后的文档同步，不触发新一轮数值审查；如需可请 evaluator 复核该同步。
+
+## §3 — M2：均匀 hex 波速/波形（natal 空间原语 vs MATLAB）
+
+### 3.1 改动清单（均在 `hexagon_spatial_test/`，未触碰 natal-core）
+- 新增 `repro/gen_golden_m2_wavespeed.m`：MATLAB 参考 golden（flat/junction × paper/code 口径，homing）。
+- 新增 `repro/natal_hex_wavespeed.py`：用 natal `HexGrid` + `build_gaussian_kernel` 实现通用 hex 模型。
+- 新增 `repro/compare_m2.py`：波速/方向/波形/核的对照与自测。
+- 新增 `golden/hex_homing_wavespeed_m2.{mat,json}`、`results/{m2_natal_wavespeed.json,m2_hex_waveshape.npz,m2_wavespeed_compare.json,M2_wavespeed_report.md}`。
+- 未改任何 natal 源文件；`gpu` feature 默认关闭；未 commit。
+
+### 3.2 行为与原因
+- M2 决断（响应 recon §2.6）：通用 hex 模型是**离散代、连续计数**更新，非 natal 分阶段生命周期，
+  故采用「**自写参考实现 + natal 空间原语**」，不改引擎（引擎级接入属 M4）。
+- 口径冻结（采纳 §2.8）：paper = flat 300×300、cp 50%/60%；code = flat 200×200、cp 40%/70%，junction L=600。
+- 坐标映射：natal 核经列镜像即 MATLAB `get_mig_matrix25` 核（1e-16）；flat 沿列轴对镜像不变，junction 敏感。
+- 扩散用 scipy 直接卷积（`mode='nearest'` = MATLAB `'replicate'`）；不用 FFT（引入负振铃会被 logistic 放大为 NaN）。
+
+### 3.3 自测证据（命令与结果见 `results/M2_wavespeed_report.md` §4）
+- 波速 **12/12 <5%**，最大 |相对误差| = 0.203%（`compare_m2.py` EXIT=0）。
+- natal 核 vs MATLAB 核列镜像：`max ≤ 1.1e-16`。
+- 方向：`flat×√3/2 / junction` = paper 0.993/0.998/0.997；code 0.988/0.989/0.979。
+- 有效核均值：0.2065 / 0.950 / 1.988（标称 0.5/1/2）。
+- 波形：`m2_hex_waveshape.npz`（12 例）；flat_paper 归一化波前宽度 0.0067/0.0167/0.0301（avd 0.5/1/2），
+  与 PDE avd=0.5 绝对宽度同量级（≈2.0 cells vs ≈2.5 units）。
+
+### 3.4 请 evaluator 核对点
+1. `natal_hex_wavespeed.py` 是否忠实于参考 `main.m`：`renew` 公式、核（列镜像映射）、`imfilter` replicate
+   边界、检查点/插值逻辑。特别请核 junctions 的行轴波与列镜像映射。
+2. 12/12 <5%、核 1e-16 是否可独立复现（命令见报告 §4）。
+3. 口径冻结、方向命名、有效核扩散的解读是否成立、有无过度解读。
+4. 结论边界：本阶段**仅验证 natal 空间原语**，未宣称引擎级生命周期复现；波形仅定性。
+5. flat 与 junction 端点对齐差异（0.01–0.2%）是否为可接受的插值/离散化差异。
+
+### 3.5 残余风险
+- 自写实现 ≠ 引擎生命周期（M4 决断范围）。
+- hex 波形无独立 MATLAB golden（发布 `launcher_waveshape` 依赖 `main` 未返回的 `ret`）。
+- 低 avd 离散化需在 M8 以有效扩散为横轴重读 Fig 3；flat/junction 端点差异待解释。
 
 ---
 

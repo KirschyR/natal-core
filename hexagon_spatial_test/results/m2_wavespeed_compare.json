@@ -1,0 +1,231 @@
+{
+  "tol": 0.05,
+  "flat_to_1d_factor": 0.8660254037844386,
+  "effective_kernel_mean": {
+    "0.5": 0.20651402431812316,
+    "1": 0.9500120783424365,
+    "2": 1.988409713093447
+  },
+  "runs": [
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 0.5,
+      "kernel_mean_dist": 0.20651402431812316,
+      "matlab_speed": 0.4903714340782518,
+      "natal_speed": 0.4904441711845907,
+      "rel_err": 0.00014833063527782883,
+      "pass": true
+    },
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 1,
+      "kernel_mean_dist": 0.9500120783424365,
+      "matlab_speed": 1.0736557782979632,
+      "natal_speed": 1.0738100681500893,
+      "rel_err": 0.00014370513831784846,
+      "pass": true
+    },
+    {
+      "label": "flat_paper",
+      "kind": "flat",
+      "avd": 2,
+      "kernel_mean_dist": 1.988409713093447,
+      "matlab_speed": 2.125093321165126,
+      "natal_speed": 2.1291767471115413,
+      "rel_err": 0.0019215278245645535,
+      "pass": true
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 0.5,
+      "kernel_mean_dist": 0.20651402431812316,
+      "matlab_speed": 0.48893138750491955,
+      "natal_speed": 0.48897455677004087,
+      "rel_err": 8.829309433706379e-05,
+      "pass": true
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 1,
+      "kernel_mean_dist": 0.9500120783424365,
+      "matlab_speed": 1.0681417904840802,
+      "natal_speed": 1.0683413213092166,
+      "rel_err": 0.000186801814996794,
+      "pass": true
+    },
+    {
+      "label": "flat_code",
+      "kind": "flat",
+      "avd": 2,
+      "kernel_mean_dist": 1.988409713093447,
+      "matlab_speed": 2.105842431345382,
+      "natal_speed": 2.1015773632083974,
+      "rel_err": -0.0020253500800911373,
+      "pass": true
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 0.5,
+      "kernel_mean_dist": 0.20651402431812316,
+      "matlab_speed": 0.4284999909356743,
+      "natal_speed": 0.42850285957217776,
+      "rel_err": 6.694601083155907e-06,
+      "pass": true
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 1,
+      "kernel_mean_dist": 0.9500120783424365,
+      "matlab_speed": 0.9354552272027651,
+      "natal_speed": 0.9349463099171955,
+      "rel_err": -0.0005440316872153786,
+      "pass": true
+    },
+    {
+      "label": "junction_code",
+      "kind": "junction",
+      "avd": 2,
+      "kernel_mean_dist": 1.988409713093447,
+      "matlab_speed": 1.863452186904136,
+      "natal_speed": 1.8625880529924674,
+      "rel_err": -0.0004637274397172785,
+      "pass": true
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 0.5,
+      "kernel_mean_dist": 0.20651402431812316,
+      "matlab_speed": 0.4276334852226691,
+      "natal_speed": 0.42763348522260924,
+      "rel_err": -1.3993530229779987e-13,
+      "pass": true
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 1,
+      "kernel_mean_dist": 0.9500120783424365,
+      "matlab_speed": 0.9318702579060175,
+      "natal_speed": 0.9318702579057991,
+      "rel_err": -2.3434686008166686e-13,
+      "pass": true
+    },
+    {
+      "label": "junction_paper",
+      "kind": "junction",
+      "avd": 2,
+      "kernel_mean_dist": 1.988409713093447,
+      "matlab_speed": 1.8455296065072622,
+      "natal_speed": 1.8455296065011961,
+      "rel_err": -3.286881196897808e-12,
+      "pass": true
+    }
+  ],
+  "direction_ratio": {
+    "paper_0.5": 0.993079667231494,
+    "paper_1": 0.9977925264138694,
+    "paper_2": 0.9972122880351094,
+    "code_0.5": 0.9881610530778235,
+    "code_1": 0.9888639226156162,
+    "code_2": 0.9786744488154169
+  },
+  "kernel_check": {
+    "0.5": {
+      "max_abs_diff": 0.03423845681561279,
+      "max_abs_diff_col_mirror": 1.1102230246251565e-16,
+      "equals_matlab_col_mirror": true,
+      "kernel_sum": 1.0
+    },
+    "1.0": {
+      "max_abs_diff": 0.07819295486634911,
+      "max_abs_diff_col_mirror": 2.7755575615628914e-17,
+      "equals_matlab_col_mirror": true,
+      "kernel_sum": 1.0000000000000002
+    },
+    "2.0": {
+      "max_abs_diff": 0.019548244919347556,
+      "max_abs_diff_col_mirror": 1.3877787807814457e-17,
+      "equals_matlab_col_mirror": true,
+      "kernel_sum": 0.9999999999999999
+    }
+  },
+  "waveform_front_width": {
+    "flat_code_0.5": {
+      "front_width": 3.0,
+      "span": 199.0,
+      "front_width_frac": 0.01507537688442211
+    },
+    "flat_code_1": {
+      "front_width": 5.0,
+      "span": 199.0,
+      "front_width_frac": 0.02512562814070352
+    },
+    "flat_code_2": {
+      "front_width": 10.0,
+      "span": 199.0,
+      "front_width_frac": 0.05025125628140704
+    },
+    "flat_paper_0.5": {
+      "front_width": 2.0,
+      "span": 299.0,
+      "front_width_frac": 0.006688963210702341
+    },
+    "flat_paper_1": {
+      "front_width": 5.0,
+      "span": 299.0,
+      "front_width_frac": 0.016722408026755852
+    },
+    "flat_paper_2": {
+      "front_width": 9.0,
+      "span": 299.0,
+      "front_width_frac": 0.030100334448160536
+    },
+    "junction_code_0.5": {
+      "front_width": 2.0,
+      "span": 946.0,
+      "front_width_frac": 0.0021141649048625794
+    },
+    "junction_code_1": {
+      "front_width": 5.0,
+      "span": 946.0,
+      "front_width_frac": 0.005285412262156448
+    },
+    "junction_code_2": {
+      "front_width": 8.0,
+      "span": 946.0,
+      "front_width_frac": 0.008456659619450317
+    },
+    "junction_paper_0.5": {
+      "front_width": 2.0,
+      "span": 473.0,
+      "front_width_frac": 0.004228329809725159
+    },
+    "junction_paper_1": {
+      "front_width": 4.0,
+      "span": 473.0,
+      "front_width_frac": 0.008456659619450317
+    },
+    "junction_paper_2": {
+      "front_width": 8.0,
+      "span": 473.0,
+      "front_width_frac": 0.016913319238900635
+    },
+    "pde_homing_0.5": {
+      "front_width": 2.4999999999999964,
+      "span": 60.0,
+      "front_width_frac": 0.04166666666666661
+    },
+    "pde_homing_10": {
+      "front_width": 46.09999999999998,
+      "span": 260.0,
+      "front_width_frac": 0.17730769230769222
+    }
+  }
+}

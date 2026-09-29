@@ -279,7 +279,9 @@
   1b. **GPU cuFFT 概念验证**：`repro/m4_gpu_fft_prototype.py` + `results/m4_gpu_fft_prototype.json`（conda torch/cuFFT，非 natal）。GPU FFT 归一化卷积 vs CPU 直接卷积：f32 相对误差 ~2e-7、f64 ~1e-15；相对 CPU 直接卷积加速 5–70×（1000²×51²：GPU f32 3.6 ms vs CPU 226 ms）。
   1c. **解析模板构造 + 构建时间**：`repro/m4_template_build.py` + `results/m4_template_build.json`。矩形域解析签名 → 构建 `O(n)+O(#templates·k²)`：300²×51² **0.61 s vs fold 63.5 s（104×）**，存储 58.7 MB vs CSR 3274 MB（~56×）；行数/目的地/权重与 CSR 一致（≤1.4e-16；60²k11 与 120²k21 为**全量**，300² 两例为**抽样核验**（~56 行 + 角/边/中心），解析推导保证全体一致）。
    2. **产品化（高风险，需用户批准 + 独立 evaluator）**：以 **FFT 迁移内核**为主（CPU FFT + GPU cuFFT，按类 batched；GPU 为首选落点）+ 会话接线 + 模板/标签缓存持久化；**默认关闭**；中英文档同步；全量门禁（含 `phase0` bit-identical）。小核直接 stencil 暂不实现。
-     - **设计提案（2026-09-29）**：`results/M4_routeA_productization_design.md`（架构/缓存 key·失效/数值与确定性策略/验证门禁/风险/落地步骤/待决）。**待用户批准后再实施**。
+     - **设计提案（2026-09-29）**：`results/M4_routeA_productization_design.md`（架构/缓存 key·失效/数值与确定性策略/验证门禁/风险/落地步骤/待决）。
+     - **实施（2026-09-29，用户确认 GPU cuFFT 路径）**：分阶段 S0–S4（见设计 §9）。
+       **S0 已验**：cudarc 加 `cufft` feature + `rust/src/gpu/cufft.rs` 探针；`cargo test --features gpu gpu::cufft` = 1 passed（cuFFT 线性卷积 vs CPU 一致）；未改运行路径/契约。**S1（契约/前端）、S2（executor 接线）、S3（会话/文档/门禁）待做**；属高风险，需独立复核。
    3. 纳入根 `EVALUATE.md` 轮次。
 
 ### M5 — 径向释放优化（中）

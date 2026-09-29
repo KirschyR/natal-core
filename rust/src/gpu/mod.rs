@@ -23,6 +23,9 @@ pub mod buffers;
 /// CUDA context ownership and the device skeleton's entry point.
 pub mod context;
 
+/// Route A (GPU FFT migration): `cudarc` cuFFT integration (S0 probe).
+pub mod cufft;
+
 /// `cudarc`-backed binding probe: dynamic driver loading, device queries, and
 /// an NVRTC-compiled kernel that actually runs (P0-b).
 pub mod cuda;

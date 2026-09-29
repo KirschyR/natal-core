@@ -13,7 +13,7 @@ name = "_engine_rs"
 crate-type = ["cdylib"]
 
 [dependencies]
-cudarc = { version = "0.19.9", features = ["cuda-13020"], optional = true }
+cudarc = { version = "0.19.9", features = ["cuda-13020", "cufft"], optional = true }
 numpy = "0.23.0"
 pyo3 = { version = "0.23.5", features = [] }
 

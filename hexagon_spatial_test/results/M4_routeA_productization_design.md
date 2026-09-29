@@ -84,3 +84,21 @@
 - 路线 A 是否也提供「小核直接 stencil」（当前决定：不实现，仅记录）。
 - 缓存持久化格式与失效策略。
 - 是否将路线 A 纳入 M5/M6（径向/海南）的默认执行。
+
+## 9. 实施决定与分阶段计划（2026-09-29，用户确认）
+
+**决定**：路线 A **GPU FFT 路径 = cuFFT，经 `cudarc` 绑定**（cudarc 0.19.9 已有 `cufft` feature；容器内 `libcufft.so.12` 就位；**不新增 crate**）。CPU 保持 CSR golden，不做 CPU FFT。设备态为 batch-minor `(2,A,Z,B)`，每个（性别,年龄,ztype）平面在 B 上连续，适合逐平面 2D FFT。
+
+分阶段（每阶段保持仓库可构建、默认关闭、可独立复核）：
+
+- **S0（本阶段）**：启用 `cudarc` 的 `cufft` feature；新增 `rust/src/gpu/cufft.rs` 薄封装与隔离 **smoke test**（r2c/c2r 往返、与 CPU 参考对比），证明绑定在本机可编译可运行。**不改任何运行路径/契约。**
+- **S1**：契约与前端——新增可选迁移执行模式（如 `migration_execution="csr"|"fft"`，默认 `csr`）+ 传递 stencil 数据（`K'`、`Z`、核 FFT 句柄/尺寸、域 rows/cols）；前端算 `Z` 与模板；**默认关闭，不改 CSR 行为**。
+- **S2**：`GpuExecutor` 接线——新增 FFT 迁移方法（NVRTC 点乘核 + cuFFT R2C/C2R + 预算按 `O(n·classes + FFT 工作区)`）；`enable_gpu` 在选择 fft 模式时走新路径；保持 CSR 路径不变。
+- **S3**：会话/`SpatialPopulation` 暴露开关 + 中英文档 + 测试（GPU-FFT vs CPU-CSR 容差分档）+ 全量门禁（`phase0` 必须 bit-identical）。
+- **S4**：独立 evaluator 复核（高风险）。
+
+**约束**：所有阶段默认关闭；`phase0`/CSR 数值语义不变；不引入第三方 crate（仅启用现有 cudarc feature）。
+
+**S0 状态（2026-09-29，已验）**：`rust/Cargo.toml` 给 cudarc 加 `cufft` feature（不新增 crate）；新增 `rust/src/gpu/cufft.rs`（S0 探针 + 单元测试）。测试
+`cargo test --features gpu gpu::cufft` → **1 passed**：cuFFT r2c/c2r 线性卷积与 CPU 直接卷积一致（f32，相对误差 <1e-4），
+在本机 RTX 5090 上可编译、可运行。**未改任何运行路径/契约/公开 API。** 后续 S1（契约/前端）、S2（executor 接线）、S3（会话/文档/门禁）待做。

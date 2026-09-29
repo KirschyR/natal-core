@@ -214,6 +214,22 @@
 
 **建议**：先按 §5 的 M0–M3 在路线 C 内拿到**可验证的波速/波形与遗传对照**；在 M3 结束时用实测数据决定是否投入路线 A（或接受 B 的近似）。**不要在未决断前动 CSR/内核大改**。
 
+#### 路线 A 设计（候选，2026-09-29 讨论冻结）
+
+目标：把「显式 CSR 展开」换成「平移不变的模板/卷积」，同时解决 M3 暴露的**内存墙**（`16·nnz`）与**构建墙**（纯 Python fold）；每 tick 成本再由 FFT 从 `O(n·k²)` 降到 `O(n log n)`。
+
+- **表示层：模板 + 标签压缩**（取代逐 deme 物化 `dest_idx`）
+  - 迁移算子在内部平移不变、仅边界不同：内部 1 个模板（`k²` 个 `(Δrow,Δcol,weight)`）；边界模板数 ≈ `(R+1)²`（`R`=核半径；矩形 4 重反射对称可再降）。
+  - 存 `n_demes` 的 `type-id` 表；运行时按 `dest = src + Δrow·cols + Δcol`（行主序、不 wrap、不跨行；跨行/越界只发生在边界，由边界模板覆盖）用**索引算术展开**，既不存 `dest_idx`、也不重复存内部核。
+  - 内存 `O(#templates·k² + n)`（300²×51² ≈ 14 MB vs CSR 3.4 GB）；构建 `O(#templates·k²)`（亚秒 vs 63 s）。
+  - 不规则地形（海南 land mask）：按「有效邻居集合签名」哈希分组，签名数 ~`O(周长·k)`。
+  - **缓存 key**：topology（形状、`wrap`）、kernel size/support、`include_center`、`adjust_on_edge`、域掩膜；**不含** σ 数值/迁移率/生态参数。σ/环境变只**原地更新权重**（形状与 `Z` 不变）；**地形/掩膜变才重算类型映射**。
+- **计算层：归一化卷积（边界正确）**
+  - `Z = K' ⊛ m`（`K'`=去中心核，`m`=域内指示；预计算一次，只依赖形状，边界层外为常数）；每 tick `g = rate·f / Z`，`f_new = f·(1−rate) + K' ⊛ g`。
+  - 与本仓库 CSR 的「丢掉越界 + 邻域重归一化」**逐项等价**（我们已验证 CSR 每行权重和恒为 1）。论文口径 `imfilter 'replicate'` 则不用 `Z`，改为边缘填充的线性卷积。
+- **加速层**：小核（`k≲log n`）用直接 stencil（可 SIMD/缓存友好）；大核用 FFT（核 FFT 预计算），每 tick `O(n log n)`；大域用 overlap-add。核在六边形度量下**不可分离**，故无「一维×2」捷径。
+- **约束**：FFT/stencil 改变浮点求和顺序，**不能与 CPU golden 逐位一致**；路线 A 必须是**默认关闭的可选迁移路径**，CPU CSR 继续当 golden 与小核路径，`phase0` 不受影响。原论文用的是直接 `imfilter`（stencil + `'replicate'`），**不是 FFT**；FFT 是此事实上的额外优化。
+
 ---
 
 ## 5. 分阶段复现里程碑（M0–M8）
@@ -257,7 +273,11 @@
 - **状态（2026-09-29，GPU 侧）**：`results/M3_gpu_report.md` + `m3_gpu_data.json`。实测（RTX 5090）：deterministic `enable_gpu` 5/5 成功，迁移缓存 `≈4·nnz·A·Z²+…`（300²×21²=5.1 GiB），GPU tick 相对 CPU ~8–17×；**随机行宽守卫 `MAX_CSR_ROW=32`**（24 通过，120/440 拒绝）；**enable 期显存预算守卫**过预算显式报错（30011 > 19418 MiB）无回退；`phase0` bit-identical。见 EVALUATE §9，待 §10 复核。
 
 ### M4 — 决断门：迁移执行模型（高，需用户批准）
-- 依 M3 数据在 A/B/C 中选择；若选 A，另立高风险特性设计（CPU 内核 + CUDA 内核 + 会话接线 + 文档 + 独立复核），纳入 `EVALUATE.md` 轮次。
+- 依 M3 数据在 A/B/C 中选择；若选 A，按 §4「路线 A 设计（候选）」推进：
+  1. **原型验证（先做，低风险，repro 脚本）**：模板/标签展开与现 CSR **逐位一致**；归一化卷积/FFT 与 CSR **数学一致（~1e-12）**并与 M2 参考一致；给出内存/构建/每 tick 的对比。产物 `results/M4_routeA_prototype_report.md`。
+     - **状态（2026-09-29）**：`results/M4_routeA_prototype_report.md` + `m4_routeA_prototype.json`。已验：模板/标签三元组与 CSR **逐条相同**（权重差 ≤1.3e-16）；归一化卷积（直接/FFT）与 CSR 逐格差 ≤1.0e-15；存储压缩 12–26×；每步成本 k≤5 直接 stencil 最优、k≥11 FFT 最优（300²×51²：FFT 3.3 ms vs 直接 26.9 ms vs CSR 代理 789 ms）。
+  2. **产品化（高风险，需用户批准 + 独立 evaluator）**：CPU stencil 内核 + GPU 内核 + 会话接线 + 缓存持久化；**默认关闭**；中英文档同步；全量门禁（含 `phase0` bit-identical）。
+  3. 纳入根 `EVALUATE.md` 轮次。
 
 ### M5 — 径向释放优化（中）
 - **目标**：以声明式钩子 `Op.add` 实现逐周/逐代释放；计算 ≥90% 覆盖面积与 efficiency；对照论文 Table 1 的**定性排序**（归巢驱动效率远高）。

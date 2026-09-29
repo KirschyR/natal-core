@@ -58,8 +58,9 @@
    地形/掩膜不变即可复用，σ/环境变只需原地更新权重（`Z` 与类型映射仅依赖形状）。
 2. **计算层可行**：归一化卷积（`Z=K'⊛m`）与 CSR 机器精度一致；每步成本从 `O(n·k²)`（CSR）降到直接 stencil
    的 `O(n·k²)`（更小常数）或大核 FFT 的 `O(n log n)`。
-3. **与论文/ M2 自洽**：论文用直接 `imfilter`（stencil + `'replicate'`）；FFT 是其上的额外优化；
-   M2 的卷积路径已与 MATLAB 参考达 4.8e-12（端到端佐证）。
+3. **与论文 / M2 的关系**：论文用直接 `imfilter`（stencil + `'replicate'`）；FFT 是其上的额外优化。
+   M2 的卷积路径已与 MATLAB 参考达 4.8e-12，**佐证 natal 卷积核实现正确**；但 M2 用的是 `'replicate'`（Neumann），
+   与本路线默认的「丢界 + 重归一化」**边界语义不同**，不能直接互证边界处理（`'replicate'` 变体见设计 §3.3）。
 4. **必须默认关闭**：FFT/stencil 改变求和顺序，不能与 CPU CSR golden 逐位一致；`phase0`/CSR 保持 golden。
 5. **实现决策（2026-09-29）**：当前聚焦**论文的大核**情形 → **FFT 优先实现**（CPU FFT / GPU cuFFT，按类 batched，GPU 为首选落点）；小核（`k≲5`）直接 stencil 更优，但**暂不实现**（本原型中的直接 stencil 仅用于验证等价性）。
 

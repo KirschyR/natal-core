@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §8（M3 CPU §6.6 修复复核）= **APPROVED** |
-| 待回执 | §9（M3 GPU 侧）→ 期望 §10 |
-| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧闭环；M3 GPU 侧已实测，交接区追加 §9 |
-| 待 evaluator 动作 | 独立核对 §9 的 GPU enable/预算/行宽守卫与 phase0 |
+| 最近回执 | §12（M4 路线 A §11）= **APPROVED**（仅原型/设计） |
+| 待回执 | —（路线 A **引擎实现**属 M4 高风险，待批准后另立） |
+| 主 agent 处理 | M0/M2/M3 闭环；M4 路线 A 原型/设计经 §12 通过，已按 F1–F4 更正文档（§11.6） |
+| 待 evaluator 动作 | —（产品化实现交接后） |
 
 ---
 
@@ -285,6 +285,52 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 ### 9.5 残余风险
 - GPU 正确性、随机统计等价、age_structured（年龄/性别放大）与 history/hook 未测；结论限本机 RTX 5090。
 - 未测 MIG/多租户争用下的显存；预算守卫按实时空闲显存判定。
+
+## §11 — M4 路线 A：原型验证与产品化设计（请复核）
+
+> 说明：§10 是 M3 GPU 侧 §9 的回执，**未覆盖**本批 M4 路线 A 成果（此前尚未编号）。故此处补交 §11。
+
+### 11.1 改动清单（均在 `hexagon_spatial_test/`，未触碰 natal-core）
+- `repro/m4_routeA_prototype.py` + `results/M4_routeA_prototype_report.md`、`results/m4_routeA_prototype.json`。
+- `repro/m4_template_build.py` + `results/m4_template_build.json`。
+- `repro/m4_gpu_fft_prototype.py` + `results/m4_gpu_fft_prototype.json`（用 conda torch/cuFFT，非 natal；`.venv` 无 torch）。
+- `results/M4_routeA_productization_design.md`（产品化设计提案）。
+- `Hex_model_recon.md` §4「路线 A 设计」+ §5 M4 更新。
+- 未改产品代码；未 commit。
+
+### 11.2 行为与原因
+- M4 路线 A =「模板/标签压缩（表示层）+ 归一化卷积 `Z=K'⊛m`（边界层）+ FFT（加速层）」的**可选、默认关闭**迁移路径；当前聚焦论文大核 → **FFT 优先**，小核直接 stencil 暂不实现。
+- 原型仅验证「与现有 CSR 迁移算子等价 + 存储/构建/每步收益 + GPU cuFFT 可行性」，为 M4 选型提供依据。
+
+### 11.3 自测证据（摘要；详情见各报告）
+- **等价性**：模板/标签三元组与 CSR **逐条相同**（权重差 ≤1.3e-16）；归一化卷积（直接/FFT）vs CSR 逐格 ≤1.0e-15。
+- **构建**：矩形解析模板 300²×51² **0.61 s vs fold 63.5 s（104×）**；存储 **58.7 MB vs CSR 3274 MB（~56×）**；行/目的地/权重一致（≤1.4e-16）。
+- **GPU cuFFT**：归一化卷积 vs CPU 直接卷积，f32 ~2e-7、f64 ~1e-15；相对 CPU 直接卷积 **5–70×**。
+- **每步成本**（300²，numpy 代理）：k≤5 直接 stencil 最优；k≥11 FFT 最优。
+
+### 11.4 请 evaluator 核对点
+1. **等价性推导**：`Z=K'⊛m`（`K'`=去中心核、`m`=域内指示）是否严格对应本仓库 CSR 的「丢界 + 邻域重归一化」（中心排除、每行权重和=1、源保留 `value−outbound`）；`apply_csr`（numpy `bincount` 代理）是否忠实于 Rust `migrate_csr_deterministic`（`rust/src/kernels/spatial.rs:461` 起，含 `stay_after` 分支）。
+2. **模板构造**：解析签名 `min(r,R)/min(rows-1-r,R)/min(c,R)/min(cols-1-c,R)` 与 `normalize_coord`（`topology.py:103-120`）的边界规则一致；corners/edges 的行三元组与 CSR 逐条一致。
+3. **GPU FFT**：线性卷积 padding/crop 无 circular wrap（原型曾有此 bug 已修）；f32/f64 误差与核对齐正确；CPU 参考与 GPU 同口径。
+4. **结论边界**：CSR 计时为 numpy 代理（非 natal Rust；natal 实测见 M3）；构建时间结论仅覆盖**矩形域**；是否存在夸大。
+5. （可选，非本批）§10.5 提到 M3「迁移缓存 delta 实测」可另补——与本 §11 无关。
+
+### 11.5 残余风险
+- 原型未覆盖：不规则 land mask 的签名分组、多类（性别/年龄/ztype）批处理、与 natal Rust 逐 tick 对拍、overlap-add 大域。
+- 产品化实施属高风险，需用户批准 + 独立复核（设计提案见 `results/M4_routeA_productization_design.md`）。
+
+### 11.6 审查后更正（主 agent，响应 §12；仅文档/措辞，未改产品代码或数据）
+
+§12 = **APPROVED**（仅覆盖 §11 的原型/设计；引擎实现不在范围）。按 §12.6 处理：
+- **F1（措辞）**：`results/M4_routeA_prototype_report.md` §5.3 已更正——M2 的 4.8e-12 只**佐证 natal 卷积核实现正确**；
+  M2 用 `'replicate'`（Neumann），与本路线默认「丢界 + 重归一化」**边界语义不同**，不作直接互证。
+- **F2（核验范围）**：`Hex_model_recon.md` §5 M4(1c) 与 `M4_routeA_productization_design.md` §3.1 已标注校验口径：
+  小规模**全量**、300² 两例**抽样**（解析推导保证全体一致）。
+- **F3（流程/文档）**：`.gitignore` 新增 `hexagon_spatial_test/research/` 系**用户**改动（非本批路线 A 改动）；
+  §11.1 的「未 commit」为当时状态，其后路线 A 文件已由用户提交（`00bc4b3`/`9286570`/`c734f90`）。
+- **F4（边界）**：等价性边界（`wrap`/`'replicate'`/不规则掩膜/多类）未验，已在 §11.5 与设计 §6 列出，落地时补。
+
+范围：本批准**不含引擎实现**；路线 A 产品化仍需用户批准 + 独立复核 + 全量门禁。
 
 ---
 
@@ -716,3 +762,150 @@ flat 6 例与 junction_paper 3 例的 `|rel| ≤ 4.8e-12`；junction_code 在 in
 - 本批准仅覆盖 CPU M3 测量口径，不构成 M4 迁移执行模型选型的认可。
 
 > 审查期间未改任何文件；仅新增本回执。§7 的 NOT APPROVED 已由本次修复解除。
+
+## §10 — M3（GPU 侧）§9 独立审查回执（evaluator）
+
+### 10.0 裁定
+
+**APPROVED（M3 GPU 侧 §9）**。风险分类：局部（复现脚本 + 数据），未改产品源码；`git status` 干净
+（GPU feature 只重建 gitignored 的 `_engine_rs`）。§9.4 四项核对点全部独立复现通过；M3 的 CPU+GPU
+守候项均已完成（GPU 数值正确性属 M7，不在本阶段）。
+
+> 独立性声明：evaluator 在隔离副本 `/tmp/hexeval/m3g` 重跑，并把结果与提交 JSON、Rust 源码逐项比对。
+
+### 10.1 逐条独立核对（对应 §9.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | 忠实调用 session API；`migration_cache_bytes` Python 镜像与 Rust 一致 | **PASS**（逐字节相等，见 §10.2） |
+| 2 | enable/行宽/预算三项守卫 + `phase0` 可复现 | **PASS**（见 §10.3/§10.4） |
+| 3 | 结论边界（正确性属 M7，本阶段仅 enable/预算/守卫/时间） | **PASS**（§9.4.3、报告 §7 明示） |
+| 4 | 预算报错时 free<nvidia-smi 的差额解释 | **合理**（非阻塞，见 §10.5） |
+
+### 10.2 API 与缓存公式核对
+
+- Rust `migration_cache_bytes`（`executor.rs:3065`）展开 = `8(n_batch+1) + 20·nnz + 4·n_batch
+  + 8·nnz·A·Z + 4·nnz·A·Z²`；Python 镜像（`m3_gpu_probe.py:49-56`）逐项相同。代入实测值逐行相等
+  （如 300²×21²：nnz=3.82261e7、A=2、Z=3 → 5,352,734,008 B = 5104.8 MiB，与报告/JSON 一致）。
+- Rust 常量：`MAX_Z=32`、`MAX_CSR_ROW=MAX_Z=32`（`kernels.rs:60-63`）；行宽守卫在
+  `migrate_tick_stochastic`（`executor.rs:2360,2389-2392`）；预算守卫 `ensure_memory_budget`
+  （`executor.rs:3038-3047`）经 `spatial.rs:386` 在 enable 期调用。报告引用的错误文本与源码逐字一致。
+
+### 10.3 独立运行证据（隔离副本）
+
+环境：RTX 5090 D v2，24455 MiB 总 / 23961 MiB 空闲；GPU feature 构建已存在。
+命令：`unset PYTHONHOME PYO3_PYTHON PYTHONPATH` + `LD_LIBRARY_PATH=.../nvidia/cu13/lib` 下
+`python repro/m3_gpu_probe.py`（1m17s）：
+
+- deterministic 5/5 `disabled→enabled`；cache 2.7 / 52.6 / 773.7 / 1416.7 / 5104.8 MiB（与提交逐位相同）；
+  GPU tick 0.0011 / 0.0156 / 0.2151 / 0.4194 / 1.4270 s（报告 0.0011/0.0155/0.2148/0.4218/1.4422）。
+- stochastic：30²×k=5 `max_row=24 → tick_ok`；30²×k=11（120）、60²×k=21（440）→ **rejected**，
+  文本 `stochastic migration CSR row length {120,440} exceeds the device scratch limit of 32`。
+- budget：7 等位（Z=28）×200²×k=11 → `RuntimeError: GPU memory budget exceeded: the state needs
+  30011 MiB (31468866008 B), but only 19418 MiB is free`；公式复算 31468866008 B **完全一致**。
+- 空闲显存 23961→23959 MiB（上下文释放正常）。
+
+### 10.4 `phase0` 回归（GPU feature 构建）
+
+`unset PYTHONHOME PYO3_PYTHON PYTHONPATH && .venv/bin/python scripts/phase0_baseline.py --check`
+→ 全部 scenario `[OK]`、`all scenarios bit-identical`、**EXIT=0**。GPU feature 未改变 CPU 数值语义。
+
+### 10.5 非阻塞
+
+- 报告的「迁移缓存足迹」由 Python 镜像**公式**给出，而非 nvidia-smi 实测的 used-memory delta；
+  但 enable 成功（真实分配）与预算守卫（同一公式对实时空闲显存判定）已从经验上相互印证。recon §5 M3
+  的「显存实测」若按字面要求逐例 delta，可另补；当前实现足以支撑 M4 结论。
+- 预算报错时 `free=19418 < nvidia-smi 23961`（差 4543 MiB）归因 state/sperm/上下文；方向合理，
+  未逐项分解。仅解释性，不影响守卫正确性。
+- 报告 §3 用「2-locus Z=25 → ~69×」举例；本机 7 等位实测 Z=28（(28/3)²≈87×），趋势一致。仅示例。
+
+### 10.6 范围 / 残余
+
+- 本批准仅覆盖 M3 GPU 侧的 enable/预算/行宽/时间；**GPU 数值正确性（GPU vs CPU）属 M7**。
+- 未测 GPU 随机统计等价、hook/history、age_structured 放大、MIG/多租户争用；结论限本机 RTX 5090。
+- M3 至此 CPU（§7/§8）与 GPU（§9/§10）守候项均已独立复核；后续 M4 选型不在本回执范围。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。
+
+## §12 — M4 路线 A §11 原型/设计独立审查回执（evaluator）
+
+### 12.0 裁定
+
+**APPROVED（仅 §11 的原型验证与设计提案）**。风险分类：局部（独立 repro 脚本 + 报告）；`git status` 仅
+`EVALUATE.md` 由 evaluator 追加，未改产品代码。§11.4 四项核对点独立复现通过；核心等价性（模板/标签、
+归一化卷积/FFT 与 CSR）经推导与实测确认。**注意**：本批准**不覆盖**任何引擎级实现——设计提案
+（`M4_routeA_productization_design.md`）明确「待用户批准后再实施」，其落地属高风险，须另立独立复核。
+
+> 独立性声明：evaluator 在隔离副本 `/tmp/hexeval/m4{,_t,_g}` 重跑三个脚本，并与提交 JSON、natal/Rust 源码逐项比对。
+
+### 12.1 逐条独立核对（对应 §11.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | `Z=K'⊛m` 等价 CSR（丢界+重归一化+源保留）；`apply_csr` 忠实于 Rust | **PASS**（见 §12.2） |
+| 2 | 解析模板签名与 `normalize_coord` 边界规则一致 | **PASS**（300² 为抽样核验，见 §12.3/§12.6） |
+| 3 | GPU FFT 线性卷积无 circular wrap、f32/f64 误差、CPU 同口径 | **PASS**（见 §12.4） |
+| 4 | 结论边界（CSR 为 numpy 代理；构建仅矩形域） | **PASS**（报告 §4 注、§11.4.4、设计 §4） |
+
+### 12.2 等价性推导核对
+
+- natal `fold_migration_csr` kernel 模式（`include_center=False, adjust_on_edge=False`）每行最终权重
+  `= k'_o / Σ_{o': s+o'∈D} k'_{o'}`，行和=1（实测 `max|row_sum−1| ≤ 1.1e-15`），`stay_after_send=True`。
+- Rust `migrate_csr_deterministic`（`kernels/spatial.rs:461`，`stay_after=true`）：
+  `out[d] += outbound·w`、`out[s] += value − Σ outbound·w`，即 `v(1−rate)+Σ`。与 `apply_csr`
+  （`v − rate·v + bincount(dest, rate·v·w)`）逐项一致（对单标量场；Rust 的 virgin/stored-sperm
+  记账属生命周期细节，不在迁移算子内）。
+- 归一化卷积：`g=rate·f/Z`、`Z=K'⊛m=Σ_{o:s+o∈D}k'_o`（即 CSR 每行分母）；
+  目的格 `d` 收到 `Σ_{s=d−o} rate·k'_o·f(s)/Z(s)`，与 CSR `rate·f(s)·k'_o/Z(s)` 相同；源保留
+  `f(1−rate)`。`ndimage.convolve`/`fftconvolve` 对中心对称的 `K'` 与 CSR 的 visit 顺序一致
+  （非 wrap 下无重复目的地）。实测逐格差 `2.2e-16 ~ 1.0e-15`。
+
+### 12.3 模板/标签与构建核对
+
+- 独立复跑 `m4_template_build.py`：60²k11 / 120²k21 / 300²k21 / 300²k51 → `row_length_mismatch=0`、
+  `dest_mismatch=0`、`max_weight_diff ≤ 1.4e-16`；`n_templates`、`csr_bytes`、`template_bytes` 与提交**完全相同**。
+- 签名 `(min(r,R),min(rows−1−r,R),min(c,R),min(cols−1−c,R))` 与 `normalize_coord`（`topology.py:103-120`
+  逐轴越界判定）推导一致：有效 `dr∈[−key0,key1]`、`dc∈[−key2,key3]`。
+- 构建时间：300²×51² 解析 **0.606 s vs fold 61.7 s（~102×）**；存储 58.73 MB vs 3274 MB（~56×），与 §11.3 一致。
+
+### 12.4 GPU cuFFT 核对
+
+- 独立复跑 `/opt/conda/bin/python repro/m4_gpu_fft_prototype.py`（torch 2.12.0+cu130，RTX 5090）：
+  5/5 规模 `f32_rel ≤ 2.6e-7`、`f64_rel ≤ 2.6e-15`，与提交逐位相同。
+- 复核 `gpu_conv`：零填充到 `(rows+k−1,cols+k−1)` 后 FFT → **线性卷积无 circular wrap**；裁剪
+  `[R:R+rows,R:R+cols]` 为 `'same'` 区；与 CPU `ndimage.convolve`（中心对称 `K'`）同口径。
+- 相对 CPU 直接卷积加速实测 ~4.7–72×（报告 5–70×）。
+
+### 12.5 独立运行证据（隔离副本）
+
+- `python repro/m4_routeA_prototype.py`（1m22s）：等价性/存储/每步成本表复现（`conv/fft ≤ 1e-15`；
+  300² k51 FFT 1.39 ms vs 直接 26.6 ms）。
+- `python repro/m4_template_build.py`（1m16s）：见 §12.3。
+- `/opt/conda/bin/python repro/m4_gpu_fft_prototype.py`（3s）：见 §12.4。
+- 三个提交 JSON 的结构量/误差量与复跑一致（时间量随负载波动，属正常）。
+
+### 12.6 非阻塞发现
+
+- **F1（低，措辞）**：`M4_routeA_prototype_report.md:61`「M2 的卷积路径已与 MATLAB 参考达 4.8e-12（端到端
+  佐证）」把 M2 的 **replicate** 边界卷积与路线 A 默认的 **丢界+重归一化**卷积混为直接佐证——二者边界语义
+  不同（设计 §3.3 亦将 `'replicate'` 列为另需实现的变体）。建议改为「M2 佐证 natal 卷积核正确，边界语义
+  两者不同」。
+- **F2（低，核验范围）**：`m4_template_build.py` 对 300² 两例为**抽样核验**（`full=False`，`rows·cols·k²>1.5e7`），
+  仅 ~56 行 + 角/边/中心；§11.3/§11.4.2 的「行/目的地/权重一致」宜注明抽样。解析推导已保证全体一致，
+  但可在小规模做全量、大规模抽样并明示。
+- **F3（低，流程/文档）**：`c734f90` 修改了 `.gitignore`（新增 `hexagon_spatial_test/research/`）。
+  AGENTS 要求改 `.gitignore` 需用户明确要求；`research/` 含用户研究材料（DeepSeek 边界卷积、
+  hex 坐标系报告），大概率属用户要求，但 §11.1 未记录，且其「未 commit」与现存提交（`00bc4b3`/`9286570`/
+  `c734f90`）不符。建议补记。
+- **F4（低，边界）**：等价性仅在 `wrap=False`、`adjust_on_edge=False`、矩形域、单标量场、f64 下验证；
+  重复目的地（wrap 核）、不规则掩膜、replicate、多类批处理未验（§11.5 已列）。设计落地时须补。
+
+### 12.7 范围 / 残余
+
+- 本批准**仅覆盖原型与设计证据**；路线 A 引擎实现（新增迁移路径、CPU/GPU 内核、会话接线、缓存持久化）
+  属 **M4 高风险**，须用户批准 + 独立 evaluator 复核 + 全量门禁，**不在本回执范围**。
+- 设计提案中的数值/确定性策略（非逐位、容差分档、默认关闭）方向正确；`phase0`/CSR golden 不受影响
+  的前提是默认关闭，实施后须实测。
+- 未测 overlap-add 大域、不规则地形签名分组、路线 A 与 natal Rust 的逐 tick 对拍（§11.5）。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。

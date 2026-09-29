@@ -277,7 +277,7 @@
   1. **原型验证（先做，低风险，repro 脚本）**：模板/标签展开与现 CSR **逐位一致**；归一化卷积/FFT 与 CSR **数学一致（~1e-12）**并与 M2 参考一致；给出内存/构建/每 tick 的对比。产物 `results/M4_routeA_prototype_report.md`。
      - **状态（2026-09-29）**：`results/M4_routeA_prototype_report.md` + `m4_routeA_prototype.json`。已验：模板/标签三元组与 CSR **逐条相同**（权重差 ≤1.3e-16）；归一化卷积（直接/FFT）与 CSR 逐格差 ≤1.0e-15；存储压缩 12–26×；每步成本 k≤5 直接 stencil 最优、k≥11 FFT 最优（300²×51²：FFT 3.3 ms vs 直接 26.9 ms vs CSR 代理 789 ms）。
   1b. **GPU cuFFT 概念验证**：`repro/m4_gpu_fft_prototype.py` + `results/m4_gpu_fft_prototype.json`（conda torch/cuFFT，非 natal）。GPU FFT 归一化卷积 vs CPU 直接卷积：f32 相对误差 ~2e-7、f64 ~1e-15；相对 CPU 直接卷积加速 5–70×（1000²×51²：GPU f32 3.6 ms vs CPU 226 ms）。
-  1c. **解析模板构造 + 构建时间**：`repro/m4_template_build.py` + `results/m4_template_build.json`。矩形域解析签名 → 构建 `O(n)+O(#templates·k²)`：300²×51² **0.61 s vs fold 63.5 s（104×）**，存储 58.7 MB vs CSR 3274 MB（~56×）；行数/目的地/权重与 CSR 全部一致（≤1.4e-16）。
+  1c. **解析模板构造 + 构建时间**：`repro/m4_template_build.py` + `results/m4_template_build.json`。矩形域解析签名 → 构建 `O(n)+O(#templates·k²)`：300²×51² **0.61 s vs fold 63.5 s（104×）**，存储 58.7 MB vs CSR 3274 MB（~56×）；行数/目的地/权重与 CSR 一致（≤1.4e-16；60²k11 与 120²k21 为**全量**，300² 两例为**抽样核验**（~56 行 + 角/边/中心），解析推导保证全体一致）。
    2. **产品化（高风险，需用户批准 + 独立 evaluator）**：以 **FFT 迁移内核**为主（CPU FFT + GPU cuFFT，按类 batched；GPU 为首选落点）+ 会话接线 + 模板/标签缓存持久化；**默认关闭**；中英文档同步；全量门禁（含 `phase0` bit-identical）。小核直接 stencil 暂不实现。
      - **设计提案（2026-09-29）**：`results/M4_routeA_productization_design.md`（架构/缓存 key·失效/数值与确定性策略/验证门禁/风险/落地步骤/待决）。**待用户批准后再实施**。
    3. 纳入根 `EVALUATE.md` 轮次。

@@ -27,7 +27,8 @@
 - 启用时按地形构造模板/标签：
   - **矩形域**（论文 flat/junction）：解析式
     `key=(min(r,R), min(rows-1-r,R), min(c,R), min(cols-1-c,R))`，构建 `O(n)` + `O(#templates·k²)`；
-    已验：300²×k=51 构建 **0.61 s vs fold 63.5 s（104×）**，存储 58.7 MB vs CSR 3274 MB（~56×）。
+    已验：300²×k=51 构建 **0.61 s vs fold 63.5 s（104×）**，存储 58.7 MB vs CSR 3274 MB（~56×）；
+    校验口径：小规模全量、300² 两例抽样（解析推导保证全体一致）。
   - **不规则域**（海南 land mask）：按「有效邻居集合签名」哈希分组（位打包/字典），签名数 ~`O(周长·k)`。
 - **缓存 key**：topology（形状/`wrap`）、kernel size/support、`include_center`、`adjust_on_edge`、域掩膜。
   **不含** σ 数值/迁移率/生态参数。σ/环境变只**原地更新权重**；地形/掩膜变才重建类型映射。

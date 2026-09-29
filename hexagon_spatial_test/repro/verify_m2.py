@@ -17,7 +17,9 @@ translate that convention exactly; the common failure is to reuse MATLAB's
 round-half-away-from-zero.  Such offsets partially cancel, so the residual can
 stay inside the 5% band while still being far above floating-point noise.
 
-This test is expected to FAIL until those offsets are fixed.
+This test passes only when those offsets are translated faithfully; it is the
+regression that caught the original 1-based/0-based indexing defect (see
+``EVALUATE.md`` §4/§5).
 """
 
 from __future__ import annotations

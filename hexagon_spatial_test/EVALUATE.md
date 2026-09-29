@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §4（M2 §3）= **NOT APPROVED**（1-based 索引忠实性；已修复，见 §3.6） |
-| 待回执 | §3 修复后复核 → 期望 §5 |
-| 主 agent 处理 | M0 已闭环；M2 已按 §4.6 修复索引缺陷，`verify_m2.py` EXIT=0（12/12 ≤4.8e-12） |
-| 待 evaluator 动作 | 复核 §4.6 修复目标与受影响检查（§4.2/§4.3/§4.4） |
+| 最近回执 | §5（M2 §3.6 修复复核）= **APPROVED**（M2 闭环） |
+| 待回执 | —（下一交接为 M3 完成后的 §6） |
+| 主 agent 处理 | M0/M2 均闭环；已按 §5.4.1 更新 `verify_m2.py` 过时 docstring（见 §3.7） |
+| 待 evaluator 动作 | —（M3 §6 交接后） |
 
 ---
 
@@ -192,6 +192,12 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 
 请 evaluator 复核 §4.6 修复目标及受影响检查（§4.2/§4.3/§4.4），并给出结论。未改 §3.1–§3.5 的核心结论，
 仅修正残余解释与数值精度；未改任何产品代码。
+
+### 3.7 M2 闭环（主 agent）
+
+§5 = **APPROVED**，M2 完成。按 §5.4.1 更新 `repro/verify_m2.py` 的过时 docstring（仅措辞，断言未改）。
+其余残余为上游/M4/M8 事项：§5.4.2（低 avd 解释留 M8 直接对照）、§5.4.3（自写实现 ≠ 引擎生命周期，M4）、
+§5.4.4（本批准仅覆盖 M2 忠实性）。状态已同步：`Hex_model_recon.md` §5 M2、`results/M2_wavespeed_report.md` §6。
 
 ---
 
@@ -443,3 +449,51 @@ flat 6 例与 junction_paper 3 例的 `|rel| ≤ 4.8e-12`；junction_code 在 in
 4. 本次为局部修改；NOT APPROVED 仅针对 M2 忠实性，不否定「natal 空间原语可复现该波速（<5%）」的结论。
 
 > 审查期间新增文件：`repro/verify_m2.py`（失败回归目标）；未改 §1/§3 正文或任何产品代码。
+
+## §5 — M2 §3.6 修复复核回执（evaluator）
+
+### 5.0 裁定
+
+**APPROVED（M2 §4.6 修复目标达成）**。修复提交 `f205d21` 仅动复现脚本/数据/报告，未触产品代码。
+§4 的三项修复目标全部完成，且已由 evaluator 在隔离副本独立复现；受影响检查（§4.2/§4.3/§4.4）
+复核通过。§3.6 声明的「12/12 |rel| ≤ 4.8e-12」「verify_m2 EXIT=0」属实。
+
+### 5.1 §4.6 修复目标核对
+
+| 目标 | 结果 | 独立证据 |
+|---|---|---|
+| 1. 1-based 索引忠实（init/`cp-1`/`mid-1`/half-away 取整） | **DONE** | 见 §5.2；`mround`、`(j+1)>=2(i+1)-0.4L`、`cp-1`/`mid-1` 已在代码中 |
+| 2. 报告 §3.2/§3.5/§5.1 更正、删除错误归因 | **DONE** | §3.5/§5.1 已改述为索引约定（非插值敏感性）；旧「junction 逐位相同」已删 |
+| 3. `verify_m2.py` 由失败转通过 | **DONE** | 独立运行 EXIT=0，12/12 |rel| ≤ 4.8e-12 |
+
+### 5.2 独立运行证据（隔离副本 `/tmp/hexeval/m2c`，不改仓库）
+
+- `matlab -batch "...gen_golden_m2_wavespeed"`：未受本次修复影响（`golden/hex_homing_wavespeed_m2.json`
+  不在 `f205d21` 变更内）；§4.2 已见证其重跑与仓库逐位相同。
+- `python repro/natal_hex_wavespeed.py`：修复后 12 个速度与提交的 `results/m2_natal_wavespeed.json`
+  **逐位相同**；对 MATLAB golden 的最大 |rel| = **4.767e-12**（机器精度）。
+- `python repro/verify_m2.py`：**EXIT=0**，12/12；`flat_paper 2.5e-13/1.8e-13/4.8e-12`、
+  `flat_code 3.4e-13/1.4e-13/3.4e-12`、`junction_paper 1.4e-13/2.3e-13/3.3e-12`、
+  `junction_code 1.6e-13/1.2e-13/3.8e-12`；核列镜像 ≤1.11e-16。
+- `python repro/compare_m2.py`：**EXIT=0**，12/12 <5%；方向比 paper 0.9931/0.9978/0.9972、
+  code 0.9882/0.9889/0.9787（不变，符合预期）。
+- 波形 `m2_hex_waveshape.npz` 重生成值：flat_code 0.0151/0.0251/0.0503、flat_paper 0.0067/0.0167/0.0301、
+  junction_paper 0.0042/0.0085/0.0169、junction_code 0.0021/0.0042/0.0095，与报告 §3.5 一致。
+
+### 5.3 受影响检查复核（§4.2/§4.3/§4.4）
+
+- §4.2 MATLAB golden：未变更、仍可逐位重生成。**PASS**
+- §4.3 natal 复现：修复后仍可复现（隔离运行逐位一致），且误差由 2e-3 级降到 5e-12 级。**PASS**
+- §4.4 缺陷：junction 初值、checkpoint/`mid` 取样、banker's rounding 三处已全部修正；
+  `mround(346.5)=347`，`run_junction` 初值与 MATLAB 真值（release=50922）一致。**CLOSED**
+
+### 5.4 残余 / 非阻塞
+
+1. `repro/verify_m2.py:20` docstring 仍写「expected to FAIL until those offsets are fixed」，修复后已过时；
+   仅注释措辞，建议后续顺手更新（不影响判定）。
+2. §3.4「低 avd 离散核是 Fig 3 低扩散段差异的**主要来源**」仍属未直接对照的解释（M2 未与 PDE 比），
+   已在上游 §4.5 记录，留待 M8。
+3. 上游 §2.8 的场地/口径/单位风险、以及「自写实现 ≠ 引擎生命周期（M4）」仍适用。
+4. APPROVED 仅覆盖 M2 §3 的忠实性修复；不构成对 M4 引擎接入或 M8 图形定量对照的认可。
+
+> 审查期间未改任何文件；仅新增本回执。§4 的 NOT APPROVED 已由本次修复解除。

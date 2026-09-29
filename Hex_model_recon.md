@@ -245,6 +245,7 @@
 - **风险**：核截断差异、边界 `replicate` 缺失、坐标映射。
 - **交付物**：`hex_recon/wavespeed/` + 报告。
 - **M2 前置口径（M0 + evaluator §2.8 冻结项）**：① 场地/检查点口径三方不一——论文正文 300×300、50%/60%；发布 flat launcher 200×200、40%/70%；PDE launcher 写 300 而随附 `.mat` 为 n=100/60/60/40——需先冻结；② 低 avd（≲0.5）离散核有效扩散远低于标称 avd，应同时报告核有效均值 `Σ(w·d)/Σw` 或改用等效扩散对照；③ `flat/junction` 命名与 √3/2 归属存在作者自注歧义，需明确；④ PDE（domain units/time）与 hex（cells/generation）速度单位不同，需给显式换算。
+- **状态（2026-09-28）**：**完成**（`EVALUATE.md` §5 = APPROVED）。口径冻结为 paper(300×300,50/60%) 主 + code(200×200,40/70%,junction L=600) 交叉；采用「自写实现 + natal 空间原语（`HexGrid`+`build_gaussian_kernel`）」，非引擎生命周期。natal 复现与 MATLAB golden **12/12 在机器精度内一致**（|rel| ≤ 4.8e-12）；核与 MATLAB 核列镜像 ≤1.1e-16；方向 `flat×√3/2/junction` paper 0.993–0.998；有效核均值 0.2065/0.950/1.988。产物：`repro/{gen_golden_m2_wavespeed.m,natal_hex_wavespeed.py,compare_m2.py,verify_m2.py}`、`golden/hex_homing_wavespeed_m2.*`、`results/M2_wavespeed_report.md` 等。注：首版因 1-based 索引不忠实被 §4 判 NOT APPROVED，修复后 §5 通过（见 EVALUATE §3.6/§3.7）。
 
 ### M3 — 宽核与规模实测（中风险，决断前置）
 - **目标**：量化 CSR 折叠在宽核/大格点下的内存/时间；核定 GPU 可行性。

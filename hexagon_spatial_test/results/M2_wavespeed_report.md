@@ -111,4 +111,8 @@ cd hexagon_spatial_test && ../.venv/bin/python repro/verify_m2.py
 
 ## 6. 独立审查状态
 
-以上均为**主 agent 自测**。已在 `EVALUATE.md` 提交 §3 交接，等待 evaluator §4；获 `APPROVED` 前不宣称 M2 完成。
+- 主 agent 自测：见 §3–§4。
+- 独立审查（evaluator）：§3 → §4 **NOT APPROVED**（1-based 索引忠实性）；修复后 `EVALUATE.md` §5 = **APPROVED**。
+  evaluator 独立复现：修复后 12/12 |rel| ≤ 4.8e-12、`verify_m2.py` EXIT=0、核列镜像 ≤1.11e-16，受影响检查
+  （§4.2/§4.3/§4.4）复核通过。
+- 结论：M2 完成；批准范围仅覆盖 M2 忠实性修复，不含 M4 引擎接入或 M8 图形定量对照。

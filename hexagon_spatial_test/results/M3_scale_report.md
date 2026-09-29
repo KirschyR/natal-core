@@ -78,7 +78,8 @@ cd hexagon_spatial_test && ../.venv/bin/python repro/m3_scale_probe.py
 
 ## 6. 残余与下一步
 
-- **GPU 侧待做**（用户指示：确认后再做）：deterministic `enable_gpu` 成功率与显存、随机迁移行宽 ≤32 拒绝。
+- **GPU 侧已完成**：见 `results/M3_gpu_report.md` + `m3_gpu_data.json`（deterministic enable/缓存足迹、
+  随机行宽 ≤32 拒绝、预算守卫、`phase0` bit-identical）。
 - CPU 侧尚未测：migrate 在 age_structured（含年龄/性别类）下的 tick 成本放大；海南逐月 K 的额外开销。
 - 结论边界：本报告结论针对 CPU CSR 路径与确定性模式；`gpu` feature 默认关闭，未触及。外推为线性外推，
   未实测。

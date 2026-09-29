@@ -1,0 +1,100 @@
+{
+  "budget": {
+    "cache_MiB": 30011.049278259277,
+    "error": "RuntimeError: GPU memory budget exceeded: the state needs 30011 MiB (31468866008 B), but only 19418 MiB is free; reduce the batch size or free the device",
+    "n_ztypes": 28,
+    "nnz": 4668900,
+    "raised": true
+  },
+  "deterministic": [
+    {
+      "cache_MiB": 2.6586990356445312,
+      "error": null,
+      "gpu_tick_s": 0.0011028372682631016,
+      "k": 5,
+      "n_ages": 2,
+      "n_ztypes": 3,
+      "nnz": 19836,
+      "size": 30,
+      "status_after": "enabled",
+      "status_before": "disabled"
+    },
+    {
+      "cache_MiB": 52.55242156982422,
+      "error": null,
+      "gpu_tick_s": 0.015523070702329278,
+      "k": 11,
+      "n_ages": 2,
+      "n_ztypes": 3,
+      "nnz": 393300,
+      "size": 60,
+      "status_after": "enabled",
+      "status_before": "disabled"
+    },
+    {
+      "cache_MiB": 773.7072067260742,
+      "error": null,
+      "gpu_tick_s": 0.2148366547189653,
+      "k": 21,
+      "n_ages": 2,
+      "n_ztypes": 3,
+      "nnz": 5793700,
+      "size": 120,
+      "status_after": "enabled",
+      "status_before": "disabled"
+    },
+    {
+      "cache_MiB": 1416.6698532104492,
+      "error": null,
+      "gpu_tick_s": 0.4218380775502218,
+      "k": 11,
+      "n_ages": 2,
+      "n_ztypes": 3,
+      "nnz": 10602900,
+      "size": 300,
+      "status_after": "enabled",
+      "status_before": "disabled"
+    },
+    {
+      "cache_MiB": 5104.764945983887,
+      "error": null,
+      "gpu_tick_s": 1.4422392177262477,
+      "k": 21,
+      "n_ages": 2,
+      "n_ztypes": 3,
+      "nnz": 38226100,
+      "size": 300,
+      "status_after": "enabled",
+      "status_before": "disabled"
+    }
+  ],
+  "free_mib_after": 23959,
+  "free_mib_before": 23961,
+  "max_csr_row": 32,
+  "stochastic": [
+    {
+      "error": null,
+      "expected_ok": true,
+      "k": 5,
+      "max_csr_row": 24,
+      "result": "tick_ok",
+      "size": 30
+    },
+    {
+      "error": "RuntimeError: stochastic migration CSR row length 120 exceeds the device scratch limit of 32",
+      "expected_ok": false,
+      "k": 11,
+      "max_csr_row": 120,
+      "result": "rejected",
+      "size": 30
+    },
+    {
+      "error": "RuntimeError: stochastic migration CSR row length 440 exceeds the device scratch limit of 32",
+      "expected_ok": false,
+      "k": 21,
+      "max_csr_row": 440,
+      "result": "rejected",
+      "size": 60
+    }
+  ]
+}

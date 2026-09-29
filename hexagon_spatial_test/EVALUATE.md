@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §8（M3 CPU §6.6 修复复核）= **APPROVED**（M3 CPU 侧闭环；GPU 未审） |
-| 待回执 | —（GPU 侧确认后另立；或 M5/M8 交接） |
-| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧闭环；GPU 侧待用户确认 |
-| 待 evaluator 动作 | —（GPU 侧交接后） |
+| 最近回执 | §8（M3 CPU §6.6 修复复核）= **APPROVED** |
+| 待回执 | §9（M3 GPU 侧）→ 期望 §10 |
+| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧闭环；M3 GPU 侧已实测，交接区追加 §9 |
+| 待 evaluator 动作 | 独立核对 §9 的 GPU enable/预算/行宽守卫与 phase0 |
 
 ---
 
@@ -250,6 +250,41 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 §8 = **APPROVED**，M3 **CPU 侧完成**。按 §8.4 在 `results/M3_scale_report.md` §4 注明「2.7–3.0e-7 s/entry」
 为大核（`k≳21`）渐近带。M3 **整体仍为部分完成**：GPU 侧（deterministic `enable_gpu`/显存、随机行宽 ≤32 拒绝、
 `phase0`）按用户指示 NOT CHECKED，待确认后另立。状态已同步 `Hex_model_recon.md` §5 M3。
+
+## §9 — M3（GPU 侧）：空间 CUDA enable / 预算与行宽守卫
+
+### 9.1 改动清单（均在 `hexagon_spatial_test/`，未触碰 natal-core 源码）
+- 新增 `repro/m3_gpu_probe.py`；新增 `results/m3_gpu_data.json`、`results/M3_gpu_report.md`。
+- 更新 `results/M3_scale_report.md` §6（GPU 侧指向新报告）。
+- 构建带 GPU 的扩展：`.venv/bin/maturin develop --features "gpu,extension-module"`（写入 gitignored 的
+  `_engine_rs`；未改源码）。运行需 `LD_LIBRARY_PATH` 含 `/opt/conda/lib/python3.11/site-packages/nvidia/cu13/lib`。
+- 未 commit。
+
+### 9.2 行为与原因
+- 经**现有** session API `pop._rust_spatial_backend.enable_gpu()/gpu_status()/run_tick()`（与现有 tests 用法一致），
+  不改引擎。
+- 测：① deterministic enable 成功率与迁移缓存足迹；② stochastic `MAX_CSR_ROW=32` 行宽守卫；③ enable 期显存
+  预算守卫（过预算须显式报错）；④ `phase0` bit-identical。
+
+### 9.3 自测证据（命令见 `results/M3_gpu_report.md` §6；数据 `m3_gpu_data.json`）
+- deterministic（30²–300²，k=5/11/21）：5/5 `disabled→enabled`；缓存 2.7–5105 MiB；GPU tick 0.0011–1.442 s
+  （相对 CPU ~8–17×）。
+- stochastic：`max_row` 24 → `tick_ok`；120、440 → **rejected**（`... exceeds the device scratch limit of 32`）。
+- 预算：7 等位（Z=28）×200²×11 的 `enable_gpu` 抛 `RuntimeError: GPU memory budget exceeded: ... needs 30011 MiB,
+  but only 19418 MiB is free`（显式、无回退）。
+- `phase0_baseline --check`：all bit-identical，EXIT=0。
+- 退出后显存回落（23961→23959 MiB）。
+
+### 9.4 请 evaluator 核对点
+1. probe 是否忠实调用现有 session API；`migration_cache_bytes` 的 Python 镜像是否与 Rust 公式一致
+   （`4·nnz·A·Z² + 8·nnz·A·Z + 20·nnz + ...`）。
+2. 三项守卫（enable 成功、行宽拒绝、预算报错）与 `phase0` 是否可独立复现。
+3. 结论边界：GPU **正确性对照属 M7**，本阶段仅 enable/预算/守卫/时间。
+4. 预算报错时 `free=19418` 低于 `nvidia-smi` 的 23961 的差额解释（state/sperm/上下文）是否合理。
+
+### 9.5 残余风险
+- GPU 正确性、随机统计等价、age_structured（年龄/性别放大）与 history/hook 未测；结论限本机 RTX 5090。
+- 未测 MIG/多租户争用下的显存；预算守卫按实时空闲显存判定。
 
 ---
 

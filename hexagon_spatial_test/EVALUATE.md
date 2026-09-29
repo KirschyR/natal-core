@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §5（M2 §3.6 修复复核）= **APPROVED**（M2 闭环） |
-| 待回执 | —（下一交接为 M3 完成后的 §6） |
-| 主 agent 处理 | M0/M2 均闭环；已按 §5.4.1 更新 `verify_m2.py` 过时 docstring（见 §3.7） |
-| 待 evaluator 动作 | —（M3 §6 交接后） |
+| 待回执 | §6（M3 CPU 侧规模实测）→ 期望 §7 |
+| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧完成，GPU 侧待用户确认（见 §6） |
+| 待 evaluator 动作 | 独立核对 §6 的 CPU 规模测量与结论边界 |
 
 ---
 
@@ -198,6 +198,37 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 §5 = **APPROVED**，M2 完成。按 §5.4.1 更新 `repro/verify_m2.py` 的过时 docstring（仅措辞，断言未改）。
 其余残余为上游/M4/M8 事项：§5.4.2（低 avd 解释留 M8 直接对照）、§5.4.3（自写实现 ≠ 引擎生命周期，M4）、
 §5.4.4（本批准仅覆盖 M2 忠实性）。状态已同步：`Hex_model_recon.md` §5 M2、`results/M2_wavespeed_report.md` §6。
+
+## §6 — M3（CPU 侧）：宽核/大规模 CSR 折叠实测
+
+### 6.1 改动清单（均在 `hexagon_spatial_test/`，未触碰 natal-core）
+- 新增 `repro/m3_scale_probe.py`（CPU 侧规模探针）。
+- 新增 `results/m3_scale_data.json`、`results/M3_scale_report.md`。
+- 未改任何 natal 源文件；`gpu` feature 默认关闭；未 commit。GPU 侧按用户指示待确认后另做。
+
+### 6.2 行为与原因
+- M3 目标（recon §5）：量化 CSR 折叠在宽核/大格点下的时间/内存，为 M4 决断。
+- 测 `k∈{3,5,11,21,51}` × 场地 `{30²,60²,120²,300²}`（`sigma=1.5` 最坏情形）的 support/nnz/
+  CSR 字节/fold 时间/build 时间/CPU tick；另测论文核（size 51, `mean_dispersal=avd`）@300²。
+- 避免 O(n²) 邻接分配：kernel 模式下 `adjacency_dense=(1,1)`（读 `population.py:819-824` 确认）。
+- 显式预算：CSR > 1.2 GB 的组合标记 skipped（不静默），仍报 fold/nnz/内存。
+
+### 6.3 自测证据
+- 命令：`cd hexagon_spatial_test && ../.venv/bin/python repro/m3_scale_probe.py`（~8 min，峰值 RSS 6.69 GB）。
+- 关键实测：`CSR ≈ 16·nnz B`；fold ≈ 3.3–3.6e6 entries/s；300²×51² = 2.15e8 nnz / 3.44 GB / 60 s；
+  论文核 avd=1.0 = 1.95e8 nnz / 3.12 GB / 56 s；CPU tick ≈ 6e-7 s/entry（300²×21² = 24.9 s/tick）。
+- 完整表见 `results/M3_scale_report.md` §2/§3。
+
+### 6.4 请 evaluator 核对点
+1. `m3_scale_probe.py` 是否忠实调用 natal API（`fold_migration_csr`、`build_gaussian_kernel`、builder）；
+   CSR 字节口径是否完整（indptr/dest/weights）。
+2. 关键数值（fold 吞吐、nnz、CSR 字节、tick）可独立复现。
+3. 结论边界：外推海南不可行为**线性外推**（非实测），请核对该推断的合理性与表述。
+4. CPU 路径无内存预算守卫的观察是否正确（`migration_cache_bytes` 仅 GPU）。
+
+### 6.5 残余风险
+- 外推（海南 ~200 GB / ~64 min）未实测；age_structured 类放大未测。
+- GPU 侧未做（待用户确认）：deterministic enable/显存、随机行宽 ≤32 拒绝。
 
 ---
 

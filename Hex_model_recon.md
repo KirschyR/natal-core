@@ -253,6 +253,7 @@
 - **输出**：规模/内存曲线 + 决断建议。
 - **验证**：超预算必须显式报错（不得静默回退）；`phase0` 不变。
 - **交付物**：`hex_recon/scale_report.md`。
+- **状态（2026-09-28，CPU 侧）**：`results/M3_scale_report.md` + `m3_scale_data.json`。实测：CSR 折叠纯 Python、约 3.3–3.6e6 entries/s；`CSR ≈ 16·nnz B`；300²×51² = 3.4 GB / 60 s；论文核 avd=1.0 = 3.1 GB / 56 s；CPU tick ≈ 6e-7 s/entry（300²×21² 已 24.9 s/tick）。外推海南 `2599×2601` ≈ 200 GB CSR / ~64 min 折叠 → CPU 不可行。**GPU 侧待用户确认后另做**。
 
 ### M4 — 决断门：迁移执行模型（高，需用户批准）
 - 依 M3 数据在 A/B/C 中选择；若选 A，另立高风险特性设计（CPU 内核 + CUDA 内核 + 会话接线 + 文档 + 独立复核），纳入 `EVALUATE.md` 轮次。

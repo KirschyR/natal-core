@@ -38,6 +38,35 @@
 - `K'` = 去中心核；`Z = K' ⊛ m`（仅形状相关；边界层外为常数 `Z∞`，可只存 `O(R²)` 查找表）。
 - FFT 路径：预算 `FFT(K')`（或对每个域尺寸预算一次）；大域用 overlap-add 分块。
 
+### 3.2b scatter（源）↔ gather（目标/卷积）等价，及两种「模板」
+
+本仓库迁移是**源视角（scatter）**：每个源 deme `s` 把 `rate_s·f_s` 按权重 `w(s→t)` 分给邻居，源保留 `f_s(1−rate_s)`：
+`f_new[t] = f[t](1−rate_t) + Σ_s rate_s f_s w(s→t)`。
+**目标视角（gather）**即卷积：`f_new = f(1−rate) + K ⊛ (rate·f)`，其中 `K(offset)=w`、权重和=1。
+因高斯核**中心对称**（`w(s→t)=w(t→s)`），两式是同一算子（scatter = gather）；若核非对称，CSR（出边）是 gather 卷积的**转置**，需对核转置（相关而非卷积）。本核对称，route A 的 `K'⊛g` 与 CSR 逐项一致（原型 1e-15）。
+
+两种「模板」对应同一算子：
+- **增量 Δf**：`Δf = rate·((K−δ)⊛f)`，`δ` 为中心冲激 → `K−δ` 是「中心 −1、邻居为核权重」的**零和扩散模板（负 Laplacian）**；中心为负。
+- **新值 f_new**：`f_new = f(1−rate) + K⊛(rate·f)` → 保留项 + 扩散项，**全非负**（守恒）。
+- 中心的处理：默认 `include_center=False`，核不含中心，“留原地”由 `(1−rate)` 承担；`include_center=True` 时核中心为正权重，仍不会出现负中心。
+
+### 3.2c 关键简化：确定性空间迁移 = 逐平面归一化卷积
+
+核对 `rust/src/kernels/spatial.rs::migrate_csr_deterministic`：它对每源 deme、每年龄
+分开处理 female virgin、stored sperm、male。但注意 female ind 平面满足
+`ind0 = virgin + stored_total`（virgin 仅用于**随机**抽样的记账），而 virgin 与 stored 都以 **female rate**、
+同一核迁移；保留项亦同系数。于是对**确定性**路径：
+
+```
+ind0_new = ind0·(1−rate_f) + K'⊛(rate_f·ind0/Z)     # female plane（每 A×Z 平面）
+ind1_new = ind1·(1−rate_m) + K'⊛(rate_m·ind1/Z)     # male plane（每 A×Z 平面）
+sperm_new = sperm·(1−rate_f) + K'⊛(rate_f·sperm/Z)  # sperm plane（每 A×Z×Z 平面）
+```
+
+即**逐平面的归一化卷积**，`rate` 仅随 (deme, sex, age) 变化、与 ztype 无关，`Z` 对所有平面相同。
+本 route A 原型（`K'⊛g`）与之一一对应，**无需在 GPU 复刻 virgin/stored 记账**，S2 的 kernel 因此大幅简化。
+（随机路径的 virgin/stored 抽样与行宽 ≤32 属另一问题，不在本 GPU FFT 路径范围。）
+
 ### 3.3 运行时内核
 - 每类（性别×年龄×ztype）每 tick：`g = rate·f / Z`；`f_new = f·(1−rate) + IDST( DST(K')·DST(g) )`。
 - **CPU**：FFT 主路径（系统 FFT 库，或自实现 radix-2/混合基）；线程可用 `rayon` 并行 batched。
@@ -102,3 +131,9 @@
 **S0 状态（2026-09-29，已验）**：`rust/Cargo.toml` 给 cudarc 加 `cufft` feature（不新增 crate）；新增 `rust/src/gpu/cufft.rs`（S0 探针 + 单元测试）。测试
 `cargo test --features gpu gpu::cufft` → **1 passed**：cuFFT r2c/c2r 线性卷积与 CPU 直接卷积一致（f32，相对误差 <1e-4），
 在本机 RTX 5090 上可编译、可运行。**未改任何运行路径/契约/公开 API。** 后续 S1（契约/前端）、S2（executor 接线）、S3（会话/文档/门禁）待做。
+
+**S1 状态（2026-09-29，已验）**：`src/natal/frontend/spatial/migration.py` 新增 `MigrationFFTPlan` + `build_fft_migration_plan`（依赖无关解析 `Z`、去中心核 `K'`；与 CSR 语义等价）；`tests/test_spatial_fft_plan.py` 21 passed。
+
+**S2a 状态（2026-09-29，已验）**：`builder.py`/`population.py` 新增 `migration_execution: "csr"|"fft"`（默认 `csr`），纳入归一化 migration 关键字；`"fft"` 暂显式 `NotImplementedError`（S2b 接线）。全量 `pytest -q` = 3658 passed。
+
+**S2b（executor cuFFT 内核 + 会话接线 + 预算）与 S3 待做。** 关键简化见 §3.2c：确定性迁移 = 逐平面归一化卷积，GPU kernel 无需复刻 virgin/stored 记账。

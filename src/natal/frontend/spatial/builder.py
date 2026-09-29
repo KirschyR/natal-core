@@ -609,6 +609,7 @@ class SpatialPopulationBuilder:
         self._deme_kernel_ids: Optional[NDArray[np.int64]] = None
         self._kernel_include_center: bool = False
         self._adjust_migration_on_edge: bool = False
+        self._migration_execution: Literal["csr", "fft"] = "csr"
 
         # Parameter registry (mirrors PopulationBuilderBase._param_values).
         self._param_values: dict[str, object] = {}
@@ -1566,6 +1567,7 @@ class SpatialPopulationBuilder:
         deme_kernel_ids: Optional[NDArray[np.int64]] = None,
         kernel_include_center: bool = False,
         adjust_migration_on_edge: bool = False,
+        migration_execution: Literal["csr", "fft"] = "csr",
     ) -> SpatialPopulationBuilder:
         """Configure spatial migration parameters.
 
@@ -1582,10 +1584,17 @@ class SpatialPopulationBuilder:
                 boundaries. When False (default), boundary demes migrate less
                 due to fewer valid neighbors. When True, all demes have the
                 same total migration rate regardless of position.
+            migration_execution: ``"csr"`` (default) folds the migration into
+                the existing CSR; ``"fft"`` selects the optional GPU cuFFT
+                convolution path (route A). The FFT path is staged and not yet
+                wired, so selecting it currently raises ``NotImplementedError``.
 
         Returns:
             Self for chaining.
         """
+        if migration_execution not in {"csr", "fft"}:
+            raise ValueError("migration_execution must be one of: csr, fft")
+        self._migration_execution = migration_execution
         if isinstance(kernel, BatchSetting):
             if kernel_bank is not None or self._kernel_bank is not None:
                 raise ValueError(
@@ -1746,6 +1755,7 @@ class SpatialPopulationBuilder:
                 "strategy": self._migration_strategy, "kernel_bank": kernel_bank,
                 "deme_kernel_ids": kernel_ids, "kernel_include_center": self._kernel_include_center,
                 "migration_rate": self._migration_rate, "adjust_migration_on_edge": self._adjust_migration_on_edge,
+                "migration_execution": self._migration_execution,
             },
             self._observation_groups, self._observation_collapse_age,
             self._observation_demes, self._observation_deme_mode,
@@ -1843,6 +1853,7 @@ class SpatialPopulationBuilder:
             kernel_include_center=self._kernel_include_center,
             migration_rate=self._migration_rate,
             adjust_migration_on_edge=self._adjust_migration_on_edge,
+            migration_execution=self._migration_execution,
             name=self._spatial_name,
         )
         spatial._definition = definition  # pyright: ignore[reportPrivateUsage]  # attach the actual input consumed by this compilation.

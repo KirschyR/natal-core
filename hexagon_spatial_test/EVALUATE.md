@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §12（M4 路线 A §11）= **APPROVED**（仅原型/设计） |
-| 待回执 | §13（路线 A 引擎 S0+S1）→ 期望 §14 |
-| 主 agent 处理 | 路线 A 引擎分阶段：S0（cuFFT 绑定探针）+ S1（前端 FFT 计划）完成，交接区追加 §13 |
-| 待 evaluator 动作 | 独立核对 §13 的 S0 特性启用与 S1 前端等价性 |
+| 待回执 | §13（路线 A 引擎 S0+S1+S2a）→ 期望 §14 |
+| 主 agent 处理 | 路线 A 引擎分阶段：S0（cuFFT 绑定探针）+ S1（前端 FFT 计划）+ S2a（前端开关）完成，交接区追加 §13/§13.6 |
+| 待 evaluator 动作 | 独立核对 §13 的 S0 特性启用、S1 前端等价性与 S2a 开关边界 |
 
 ---
 
@@ -361,6 +361,15 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 ### 13.5 残余（未做）
 - **S2**：Rust session/executor 接线（cuFFT 迁移内核 + 预算 + 参数传递）；**S3**：会话/`SpatialPopulation` 开关、中英文档、全量门禁。均未做、默认关闭。
 - `wrap=True` 下「重复目的地」与 conv 的严格处理、`include_center=True`、不规则掩膜、多类批处理未验。
+
+### 13.6 S2a 追加（前端开关；2026-09-29）
+
+在 §13 基础上追加 S2a（仍在默认关闭、未接运行路径）：
+- `src/natal/frontend/spatial/builder.py` 与 `population.py`：新增 `migration_execution: "csr"|"fft"`（默认 `"csr"`），并把它纳入 `SpatialInputs` 的归一化 migration 关键字，随 `build()` 传递。
+- **`"fft"` 目前显式 `raise NotImplementedError`**（路线 A 的 executor/session 接线在 S2b），**不静默回退 CSR**。
+- `tests/test_spatial_fft_plan.py` 增测：非法值报 `ValueError`；`"fft"` 报 `NotImplementedError`；默认 `"csr"` 正常构建。
+
+验证：`pytest -q` = **3658 passed**（含 GPU 测试，需 `LD_LIBRARY_PATH` 含 nvidia cu13 lib，否则 GPU 用例因缺 `libnvrtc` 失败——环境项，与本改动无关）；`ruff` 通过；`pyright` 改动行无新增错误。S2b（executor cuFFT 内核 + 会话接线 + 预算）未做。
 
 ---
 
@@ -937,5 +946,74 @@ flat 6 例与 junction_paper 3 例的 `|rel| ≤ 4.8e-12`；junction_code 在 in
 - 设计提案中的数值/确定性策略（非逐位、容差分档、默认关闭）方向正确；`phase0`/CSR golden 不受影响
   的前提是默认关闭，实施后须实测。
 - 未测 overlap-add 大域、不规则地形签名分组、路线 A 与 natal Rust 的逐 tick 对拍（§11.5）。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。
+
+## §14 — M4 路线 A 引擎实现（S0+S1）§13 独立审查回执（evaluator）
+
+### 14.0 裁定
+
+**NOT APPROVED（M4 §13，S0+S1）**。高风险（产品代码）。S0/S1 的隔离性、等价性、默认关闭、
+`phase0` bit-identical 经独立复核**成立**；但**必需 Rust 硬门禁 `cargo fmt --check` 失败**（新增
+`rust/src/gpu/cufft.rs` 未按 rustfmt 格式化），故按 `quality_checks_spec.md`「required standards
+violation」给出 NOT APPROVED。修复为一次性格式化，代价极低。
+
+> 独立性声明：evaluator 在仓库工作树（未改任何文件）运行全部门禁；命令与结果见下。
+
+### 14.1 逐条独立核对（对应 §13.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | S1 `Z`/`K'/Z` 等价 CSR（含 wrap、中心排除、边界） | **PASS**（见 §14.2） |
+| 2 | S0 给 `gpu` 加 `cudarc/cufft` 合规、默认关闭、不影响非 gpu/`phase0` | **PASS**（见 §14.3） |
+| 3 | 阶段边界：S1 未接运行路径、默认关闭、不改 CSR 行为 | **PASS**（见 §14.3） |
+| 4 | pyright 仅既有错误、无新增 | **PASS**（见 §14.4） |
+
+### 14.2 S1 前端计划核对
+
+- `build_fft_migration_plan`（`migration.py:462-545`）：`K'` 去中心（`include_center=False` 默认）、
+  `z(s)=Σ_{o:s+o∈D}K'(o)`（非 wrap 向量化、wrap 取常量=核总和）——与 `fold_migration_csr` 的每行分母一致。
+- 独立运行 `tests/test_spatial_fft_plan.py`：**21 passed**（`z` vs 逐 deme `normalize_coord` 暴力参考；
+  `K'/z` vs CSR dest/权重逐条相等，wrap True/False；偶核报错）。
+- 代码独立检查：`offsets` 仅取 `kp>0`，与 CSR「`weight<=0` 跳过」一致；`include_center=True` 时中心计入
+  `z`，语义正确。非 wrap 下无重复目的地，conv 与 CSR visit 顺序一致（M4 §12 已证）。
+
+### 14.3 S0/S1 隔离性与回归
+
+- **未接运行路径**：`grep -rn "build_fft_migration_plan|MigrationFFTPlan" src/` 除定义处**无调用者**；
+  公开 API 仅**新增**、无既有签名变更；CPU CSR 一行未改。
+- `clippy`（默认）= **PASS**；`clippy --features gpu -- -D warnings` = **PASS**；
+  `cargo check --all-targets` = **PASS**；`cargo test --lib` = **67 passed**；
+  `cargo test --features gpu` = **261 passed**（含 `gpu::cufft::tests::cufft_linear_conv_matches_cpu`）。
+- `scripts/phase0_baseline.py --check` = **all scenarios bit-identical，EXIT=0**。
+- `pytest -q`（设 `LD_LIBRARY_PATH` 含 `/opt/conda/lib` 与 cu13）= **3655 passed**；本测试文件 21 passed。
+  注：不设 `LD_LIBRARY_PATH` 时 `tests/test_gpu_*_frontend.py` 会因缺 `libnvrtc` 失败——**环境性**、
+  与本改动无关（设 env 后全过）。
+- `ruff check src demos` = **All checks passed**。
+
+### 14.4 门禁失败与其它发现
+
+- **F1（阻断，必须修复）：`cargo fmt --check` 失败。** 新增 `rust/src/gpu/cufft.rs` 有 3 处 rustfmt
+  差异（`:6` import 排序、`:56`/`:70` 调用断行）。独立证据：
+  - `cd rust && cargo fmt -- --check` → **FMT=1**，diff 于 `cufft.rs:6/56/70`；
+  - `python scripts/check_rust.py` → **EXIT=1**，`Rust hard gates failed: cargo fmt -- --check`。
+  - 根因：`cargo fmt` 无视 `cfg(feature)`，会格式化 gpu-gated 文件；主 agent §13.3 未运行
+    `cargo fmt`/`scripts/check_rust.py`（仅列 cargo test），故遗漏。
+  - 修复：`cd rust && cargo fmt`（或手工格式化 `cufft.rs`），复跑 `scripts/check_rust.py` → 期望 EXIT=0。
+- **F2（低，公开面/文档）**：`migration.__all__` 新增导出 `MigrationFFTPlan`、`build_fft_migration_plan`
+  （属**新增公开 API**），而 §13.2 称「未改公开 API」。项目对同类构件 `fold_migration_csr` 有
+  `docs/{zh,en}/migration_kernel_impl.md` 记录，新构件暂未入文档（设计称 S3 同步）。建议：要么在 S3
+  前**不导出**（保持模块内部），要么补 docs/zh+en。shims 一致性测试当前通过（新增名未提升到包顶层，
+  不触发 `__init__.pyi` 变更）。
+- **F3（低，测试强度）**：`test_fft_plan_weights_match_csr` 逐 `kr,kc` 期望时未过滤零权重项；对当前
+  σ 的高斯核（全正）无影响，但若核含 0 项会与 CSR「跳过 0」不一致——建议期望侧同样按 `>0` 过滤。
+- **F4（低，S0 探针）**：`cufft.rs` 为 S0 正确性探针（f32 容差 1e-4、host 侧谱乘、无设备谱乘/批处理），
+  与 `cufft` feature 隔离；`clippy --features gpu` 通过。属预期，非缺陷。
+
+### 14.5 范围 / 残余
+
+- 本回执仅覆盖 S0+S1；S2（session/executor 接线）、S3（会话开关/中英文档/全量门禁）**未做**，不在范围。
+- `wrap=True` 下重复目的地与 conv 的严格等价、`include_center=True`、不规则掩膜、多类批处理未测（§13.5）。
+- 修复 F1 后请 evaluator 复跑 `scripts/check_rust.py` 与受影响检查即可转 APPROVED。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。

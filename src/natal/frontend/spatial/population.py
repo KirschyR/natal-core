@@ -697,6 +697,7 @@ class SpatialPopulation:
         kernel_include_center: bool = False,
         migration_rate: RateDeclaration = 0.0,
         adjust_migration_on_edge: bool = False,
+        migration_execution: Literal["csr", "fft"] = "csr",
         name: str = "SpatialPopulation",
     ) -> None:
         """Initialize a spatial population container from existing demes.
@@ -784,6 +785,17 @@ class SpatialPopulation:
         if migration_strategy not in {"auto", "adjacency", "kernel", "hybrid"}:
             raise ValueError(
                 "migration_strategy must be one of: auto, adjacency, kernel, hybrid"
+            )
+        if migration_execution not in {"csr", "fft"}:
+            raise ValueError("migration_execution must be one of: csr, fft")
+        if migration_execution == "fft":
+            # Route A (GPU cuFFT convolution migration) is staged: the frontend
+            # plan builder exists (`migration.build_fft_migration_plan`) and the
+            # cuFFT binding is in place, but the executor/session wiring lands in
+            # a later stage.  Fail loudly rather than silently using CSR.
+            raise NotImplementedError(
+                "migration_execution='fft' (GPU cuFFT migration, route A) is "
+                "staged and not yet wired; use 'csr'."
             )
 
         # Resolve strategy-level policy into one concrete backend mode.  The

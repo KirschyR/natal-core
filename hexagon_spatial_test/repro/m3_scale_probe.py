@@ -56,7 +56,7 @@ def fold(rows: int, cols: int, kernel: np.ndarray):
         migration_kernel=kernel,
         kernel_bank=None,
         deme_kernel_ids=None,
-        kernel_include_center=True,
+        kernel_include_center=False,  # match the builder default (F1)
         adjust_on_edge=False,
         mode="kernel",
     )
@@ -76,7 +76,7 @@ def build_population(size: int, kernel: np.ndarray) -> SpatialPopulation:
             topology=HexGrid(rows=size, cols=size, wrap=False),
             pop_type="discrete_generation",
         )
-        .setup(name="hex_deme", stochastic=True)
+        .setup(name="hex_deme", stochastic=False)
         .initial_state(
             individual_count={
                 "female": {"WT|WT": 500.0, "Dr|WT": 0.0},

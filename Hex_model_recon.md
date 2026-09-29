@@ -253,7 +253,7 @@
 - **输出**：规模/内存曲线 + 决断建议。
 - **验证**：超预算必须显式报错（不得静默回退）；`phase0` 不变。
 - **交付物**：`hex_recon/scale_report.md`。
-- **状态（2026-09-28，CPU 侧）**：`results/M3_scale_report.md` + `m3_scale_data.json`。实测：CSR 折叠纯 Python、约 3.3–3.6e6 entries/s；`CSR ≈ 16·nnz B`；300²×51² = 3.4 GB / 60 s；论文核 avd=1.0 = 3.1 GB / 56 s；CPU tick ≈ 6e-7 s/entry（300²×21² 已 24.9 s/tick）。外推海南 `2599×2601` ≈ 200 GB CSR / ~64 min 折叠 → CPU 不可行。**GPU 侧待用户确认后另做**。
+- **状态（2026-09-28，CPU 侧）**：`results/M3_scale_report.md` + `m3_scale_data.json`。实测：CSR 折叠纯 Python、约 3.3–3.6e6 entries/s；`CSR ≈ 16·nnz B`；300²×51² = 2.15e8 nnz / 3.43 GB / 63 s；论文核 avd=1.0 = 1.95e8 nnz / 3.12 GB / 58 s；**确定性** CPU tick ≈ 2.7–3.0e-7 s/entry（300²×21² 已 11.3 s/tick）；海南 `2599×2601` 外推 ≈ 211 GB CSR / ~65 min 折叠 / ~66 min/tick → CPU 不可行。首版因 fold/builder 口径（`kernel_include_center`）与 stochastic 标签被 §7 判 NOT APPROVED，已修复并重跑（见 EVALUATE §6.6），待 §8 复核。**GPU 侧待用户确认后另做**。
 
 ### M4 — 决断门：迁移执行模型（高，需用户批准）
 - 依 M3 数据在 A/B/C 中选择；若选 A，另立高风险特性设计（CPU 内核 + CUDA 内核 + 会话接线 + 文档 + 独立复核），纳入 `EVALUATE.md` 轮次。

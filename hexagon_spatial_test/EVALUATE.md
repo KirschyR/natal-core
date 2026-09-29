@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §5（M2 §3.6 修复复核）= **APPROVED**（M2 闭环） |
-| 待回执 | §6（M3 CPU 侧规模实测）→ 期望 §7 |
-| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧完成，GPU 侧待用户确认（见 §6） |
-| 待 evaluator 动作 | 独立核对 §6 的 CPU 规模测量与结论边界 |
+| 最近回执 | §7（M3 CPU 侧 §6）= **NOT APPROVED**（F1/F2/F3；已修复，见 §6.6） |
+| 待回执 | §6 修复后复核 → 期望 §8 |
+| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧按 §7.5 修复并重跑；GPU 侧待用户确认 |
+| 待 evaluator 动作 | 复核 §7.5 修复目标与受影响项（§7.2/§7.4） |
 
 ---
 
@@ -229,6 +229,21 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 ### 6.5 残余风险
 - 外推（海南 ~200 GB / ~64 min）未实测；age_structured 类放大未测。
 - GPU 侧未做（待用户确认）：deterministic enable/显存、随机行宽 ≤32 拒绝。
+
+### 6.6 审查后修复（主 agent，响应 §7；仅复现脚本/数据/报告，未改产品代码）
+
+按 §7.5 修复：
+- **F1**：`fold()` 与 builder 统一为 `kernel_include_center=False`（后者为 builder 默认）。核验：
+  size=30,k=3 fold nnz 7744 → **6844**，与 builder 实际 nnz **一致**（`= 报告 nnz − n_demes`）。
+- **F2**：`build_population` 改 `stochastic=False`（deterministic），重测 tick；报告标签随之成立。
+- **F3**：报告区分 natal 浮点 underflow（σ=0.798 时 d≳30.8）与论文 `d≤25` 盘掩膜。
+- 重跑 probe（~6.5 min）重生成 `results/m3_scale_data.json` 与 `M3_scale_report.md` §2/§3/§4。
+
+修复后关键值：300²×51² = 2.15e8 nnz / 3.43 GB / 63.3 s；论文核 avd=1.0 = 1.95e8 nnz / 3.12 GB / 58.2 s；
+确定性 tick 系数 ~2.7–3.0e-7 s/entry（300²×21² = 11.3 s/tick）；海南外推 ≈ 211 GB / ~65 min 折叠 /
+~66 min/tick。结论方向（CPU 不可行、无预算守卫）不变。
+
+请 evaluator 复核 §7.5 修复目标与受影响项（§7.2/§7.4）；未改产品代码。
 
 ---
 
@@ -528,3 +543,87 @@ flat 6 例与 junction_paper 3 例的 `|rel| ≤ 4.8e-12`；junction_code 在 in
 4. APPROVED 仅覆盖 M2 §3 的忠实性修复；不构成对 M4 引擎接入或 M8 图形定量对照的认可。
 
 > 审查期间未改任何文件；仅新增本回执。§4 的 NOT APPROVED 已由本次修复解除。
+
+## §7 — M3（CPU 侧）§6 独立审查回执（evaluator）
+
+### 7.0 裁定
+
+**NOT APPROVED（M3 CPU 侧 §6）**。风险分类：局部（复现脚本 + 数据），未改产品代码。**M3 的核心结论
+（CSR 内存墙、海南外推不可行、CPU 无预算守卫）经独立复现成立**；但 probe 的 CSR 折叠配置与被实际
+构建/计时的 population 不一致，且报告有一处配置误标，属可修复的在范围内缺陷。GPU 侧按用户指示
+延后（§6.5），本次**未审**。
+
+> 独立性声明：以下数值由 evaluator 在隔离副本 `/tmp/hexeval/m3` 运行（不改仓库）；命令见 §7.3。
+
+### 7.1 逐条独立核对（对应 §6.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | 是否忠实调用 natal API、CSR 字节口径 | **部分 FAIL**：API 调用正确；但 `fold()` 与 builder 配置不一致（§7.4-F1） |
+| 2 | fold 吞吐、nnz、CSR 字节、tick 可独立复现 | **PASS（结构量逐位；时间 ~±25%）** |
+| 3 | 海南线性外推的合理性与表述 | **PASS**（明示外推、算术正确） |
+| 4 | CPU 路径无内存预算守卫 | **PASS**（已核 `ensure_migration_budget` 仅 GPU） |
+
+### 7.2 API/字节口径核对
+
+- `fold_migration_csr(..., mode="kernel")` 签名与调用一致（`migration.py`）；kernel 模式不读
+  `adjacency_dense`，probe 传 `(1,1)` 与 builder 自身的 kernel 分支一致（`population.py:812-819`）。
+- `MigrationCSR` 字段 `indptr(dest int64)`、`dest_idx(int64)`、`weights(float64)`（`migration.py:69-71`）
+  → 字节 = `16·nnz + 8·(n_demes+1)`，与报告一致（逐行核验通过）。
+- CPU 预算守卫：`ensure_migration_budget`/`migration_cache_bytes` 仅存在于
+  `rust/src/sessions/spatial.rs`（GPU enable 分支，创建 `GpuContext` 后）与 `gpu/executor.rs`，
+  用 `context.memory_info()`（设备内存）。CPU 路径确无对应守卫。**报告结论正确**。
+
+### 7.3 独立复现证据
+
+- `cd /tmp/hexeval/m3 && python repro/m3_scale_probe.py`（8m03s）：**20/20 组合的 support/nnz/csr_bytes
+  与提交 JSON 逐位相同**；`16·nnz+8(n+1)` 公式逐行成立；论文核 support=859/2349/2601 一致；
+  `peak_rss`=6.693 GB（提交 6.695）。fold 吞吐 3.552e6 entries/s（提交 3.554e6，报告 3.3–3.6e6）。
+  `fold_s` 复核/提交比 0.97–1.25（机器负载差异，合理）；`tick_s` 亦在 ~±3% 内。
+- 外推核验：`2599×2601=6.76e6`、r25 盘 1951 → nnz=1.32e10、CSR=16·nnz≈211 GB（报告 ~200 GB）、
+  fold≈3.7e3 s≈62 min（报告 64 min）；tick 1.95e8×6e-7≈117 s（报告 ~2 min）。**算术正确、已明示外推**。
+
+### 7.4 发现
+
+- **F1（中）probe 的 fold 配置 ≠ 被计时的 population 配置**：`m3_scale_probe.py:59` 的
+  `fold()` 传 `kernel_include_center=True`，而 `build_population` 走 builder 默认
+  `kernel_include_center=False`（`builder.py:1567`、`population.py:697`）。故同一行的 `nnz`/`csr_gb`
+  与实际 `build_s`/`tick_s` 所测 CSR 不是同一对象：真实 builder nnz = 报告 nnz − `n_demes`。
+  - 实测（隔离）：size=30，k=3 → fold nnz 7744 vs **builder 实际 6844**（高估 11.6%）；
+    k=51 → 774400 vs 773500（高估 0.12%）。`kernel_include_center=False` 在 `_kernel_row_entries`
+    中确实剔除中心项（`migration.py:395`）。
+  - 影响：k=3/5 行的 nnz/CSR 偏大约 11%/4%，相应 tick/entry 偏低；**对 k=51 与论文核（大核）结论
+    无实质影响**（<0.2%），M4 内存墙/海南外推结论不变。
+- **F2（低）配置误标**：报告 §1/§4 称「deterministic CPU tick」，但 `m3_scale_probe.py:79`
+  为 `.setup(name="hex_deme", stochastic=True)`（builder 默认），tick 含随机抽样成本。标签与配置不符。
+- **F3（低）措辞**：`M3_scale_report.md:48`「`d≤25` 之外 underflow 截断后 support=2349」把
+  natal 的**浮点 underflow**（avd=1、σ=0.798 时阈值约 d≳30.8，并非 d=25）与论文的 `d≤25` 六边形盘
+  掩膜混为一谈；natal `build_gaussian_kernel` 不做 `d≤25` 截断（recon §3/§2.8 已述）。数值 support=2349
+  本身正确，仅解释性措辞有误。
+
+### 7.5 修复目标（最小）
+
+1. 令 `fold()` 与被计时 population 的 CSR 口径一致：`m3_scale_probe.py:59`
+   `kernel_include_center=False`（与 builder 默认一致），或反之在
+   `build_population` 的 `.migration(..., kernel_include_center=True)` 显式打开；二者取一并重跑。
+   预期：k=3/5 行 nnz 减少 `n_demes`，大核行基本不变；同步 `M3_scale_report.md` §2/§4 与 JSON。
+2. 修正 F2：若确要「deterministic」，`build_population` 设 `stochastic=False` 并重测 tick；
+   否则改报告措辞为「stochastic（默认）CPU tick」。二者择一，保持标签与配置一致。
+3. 修正 F3 措辞（区分 underflow 与 `d≤25` 盘掩膜）。
+
+> 上述为小改动；修复后请 evaluator 复核（预期结构与结论不变，仅小核行与标签）。
+
+### 7.6 未完成的检查
+
+- **GPU 侧全部 NOT CHECKED**（§6.5 明示按用户指示待确认）：deterministic `enable_gpu` 成功率/显存、
+  随机迁移行宽 ≤32 拒绝、`phase0` bit-identical。recon §5 M3 含 GPU 项，故 M3 目前为**部分完成**。
+- CPU 侧未测：age_structured 下 tick 放大、海南逐月 K 开销（§6.5 已列）。
+
+### 7.7 残余风险
+
+1. 外推（海南 ~200 GB / ~64 min）仍是线性外推，未实测；age/性别/月 K 的结构性放大未纳入。
+2. r25 盘 1951 支持取自论文；natal `size=51` 无 `d≤25` 截断（avd=2 时 support=2601），
+   若按 natal 全核外推海南则为 ~281 GB——报告取 1951 属较乐观口径，结论方向不变。
+3. APPROVED/NOT APPROVED 仅针对 CPU M3 的测量口径；不构成对 M4 迁移执行模型选型的认可。
+
+> 审查期间未改任何文件；仅新增本回执。

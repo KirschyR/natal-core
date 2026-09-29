@@ -61,6 +61,7 @@
 3. **与论文/ M2 自洽**：论文用直接 `imfilter`（stencil + `'replicate'`）；FFT 是其上的额外优化；
    M2 的卷积路径已与 MATLAB 参考达 4.8e-12（端到端佐证）。
 4. **必须默认关闭**：FFT/stencil 改变求和顺序，不能与 CPU CSR golden 逐位一致；`phase0`/CSR 保持 golden。
+5. **实现决策（2026-09-29）**：当前聚焦**论文的大核**情形 → **FFT 优先实现**（CPU FFT / GPU cuFFT，按类 batched，GPU 为首选落点）；小核（`k≲5`）直接 stencil 更优，但**暂不实现**（本原型中的直接 stencil 仅用于验证等价性）。
 
 ## 6. 残余与边界（原型未覆盖）
 - 本原型用**朴素签名构造**（O(n·k²)），未演示“构建时间”从 `O(n·k²)` 降到 `O(#templates·k²)`；产品化需

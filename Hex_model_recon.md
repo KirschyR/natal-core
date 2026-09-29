@@ -227,7 +227,7 @@
 - **计算层：归一化卷积（边界正确）**
   - `Z = K' ⊛ m`（`K'`=去中心核，`m`=域内指示；预计算一次，只依赖形状，边界层外为常数）；每 tick `g = rate·f / Z`，`f_new = f·(1−rate) + K' ⊛ g`。
   - 与本仓库 CSR 的「丢掉越界 + 邻域重归一化」**逐项等价**（我们已验证 CSR 每行权重和恒为 1）。论文口径 `imfilter 'replicate'` 则不用 `Z`，改为边缘填充的线性卷积。
-- **加速层**：小核（`k≲log n`）用直接 stencil（可 SIMD/缓存友好）；大核用 FFT（核 FFT 预计算），每 tick `O(n log n)`；大域用 overlap-add。核在六边形度量下**不可分离**，故无「一维×2」捷径。
+- **加速层（决策 2026-09-29）**：当前聚焦**论文的大核**情形 → **FFT 为优先实现**（核 FFT 预计算，每 tick `O(n log n)`；GPU 侧 cuFFT 按类 batched）；大域用 overlap-add。小核（`k≲log n`）下直接 stencil 更快（可 SIMD/缓存友好）——**记录为已知更优选项，当前不实现**（原型 `m4_routeA_prototype.py` 中两版仅为验证等价性）。核在六边形度量下**不可分离**，故无「一维×2」捷径。
 - **约束**：FFT/stencil 改变浮点求和顺序，**不能与 CPU golden 逐位一致**；路线 A 必须是**默认关闭的可选迁移路径**，CPU CSR 继续当 golden 与小核路径，`phase0` 不受影响。原论文用的是直接 `imfilter`（stencil + `'replicate'`），**不是 FFT**；FFT 是此事实上的额外优化。
 
 ---
@@ -276,7 +276,7 @@
 - 依 M3 数据在 A/B/C 中选择；若选 A，按 §4「路线 A 设计（候选）」推进：
   1. **原型验证（先做，低风险，repro 脚本）**：模板/标签展开与现 CSR **逐位一致**；归一化卷积/FFT 与 CSR **数学一致（~1e-12）**并与 M2 参考一致；给出内存/构建/每 tick 的对比。产物 `results/M4_routeA_prototype_report.md`。
      - **状态（2026-09-29）**：`results/M4_routeA_prototype_report.md` + `m4_routeA_prototype.json`。已验：模板/标签三元组与 CSR **逐条相同**（权重差 ≤1.3e-16）；归一化卷积（直接/FFT）与 CSR 逐格差 ≤1.0e-15；存储压缩 12–26×；每步成本 k≤5 直接 stencil 最优、k≥11 FFT 最优（300²×51²：FFT 3.3 ms vs 直接 26.9 ms vs CSR 代理 789 ms）。
-  2. **产品化（高风险，需用户批准 + 独立 evaluator）**：CPU stencil 内核 + GPU 内核 + 会话接线 + 缓存持久化；**默认关闭**；中英文档同步；全量门禁（含 `phase0` bit-identical）。
+  2. **产品化（高风险，需用户批准 + 独立 evaluator）**：以 **FFT 迁移内核**为主（CPU FFT + GPU cuFFT，按类 batched；GPU 为首选落点）+ 会话接线 + 模板/标签缓存持久化；**默认关闭**；中英文档同步；全量门禁（含 `phase0` bit-identical）。小核直接 stencil 暂不实现。
   3. 纳入根 `EVALUATE.md` 轮次。
 
 ### M5 — 径向释放优化（中）

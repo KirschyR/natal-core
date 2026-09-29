@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §12（M4 路线 A §11）= **APPROVED**（仅原型/设计） |
-| 待回执 | —（路线 A **引擎实现**属 M4 高风险，待批准后另立） |
-| 主 agent 处理 | M0/M2/M3 闭环；M4 路线 A 原型/设计经 §12 通过，已按 F1–F4 更正文档（§11.6） |
-| 待 evaluator 动作 | —（产品化实现交接后） |
+| 待回执 | §13（路线 A 引擎 S0+S1）→ 期望 §14 |
+| 主 agent 处理 | 路线 A 引擎分阶段：S0（cuFFT 绑定探针）+ S1（前端 FFT 计划）完成，交接区追加 §13 |
+| 待 evaluator 动作 | 独立核对 §13 的 S0 特性启用与 S1 前端等价性 |
 
 ---
 
@@ -331,6 +331,36 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - **F4（边界）**：等价性边界（`wrap`/`'replicate'`/不规则掩膜/多类）未验，已在 §11.5 与设计 §6 列出，落地时补。
 
 范围：本批准**不含引擎实现**；路线 A 产品化仍需用户批准 + 独立复核 + 全量门禁。
+
+## §13 — M4 路线 A 引擎实现：S0（cuFFT 绑定探针）+ S1（前端 FFT 计划）
+
+> 用户已批准按设计 §9 的 GPU cuFFT 路径实施；本次交 S0+S1 复核。**高风险**（产品代码），后续 S2/S3 未做。
+
+### 13.1 改动清单（产品代码）
+- **S0（Rust，`gpu` feature 内）**：`rust/Cargo.toml` 给 `cudarc` 加 `cufft` feature（**不新增 crate**）；`rust/src/gpu/mod.rs` 导出 `pub mod cufft;`；新增 `rust/src/gpu/cufft.rs`（cuFFT r2c/c2r 线性卷积探针 + 单元测试）。**未接任何运行路径/契约。**
+- **S1（Python 前端，默认关闭）**：`src/natal/frontend/spatial/migration.py` 新增 `MigrationFFTPlan` 与 `build_fft_migration_plan`（依赖无关：解析 `Z`、去中心核 `K'`）；新增 `tests/test_spatial_fft_plan.py`。
+- 文档：`results/M4_routeA_productization_design.md` §9（S0–S4 计划 + S0 状态）、`Hex_model_recon.md` §5 M4。
+
+### 13.2 行为与原因
+- S0：启用 cuFFT 绑定（cudarc `cufft` feature，容器 `libcufft.so.12` 已备），隔离验证「cuFFT 线性卷积 = CPU 参照」；默认关闭（仅 `gpu` 构建）。
+- S1：为路线 A 提供**符合 CSR 语义**的前端计划（`g=rate·f/Z; f_new=f(1-rate)+K'⊛g`）；`Z` 用向量化偏移扫描（解析），与本仓库 CSR 的「丢界+邻域重归一化」一致。**未改公开 API、未接运行路径**（S2 才接线）。
+
+### 13.3 自测证据
+- `cargo test`（默认）= **67 passed**；`cargo test --features gpu` = **261 passed**（含 `gpu::cufft::tests::cufft_linear_conv_matches_cpu`）。
+- `scripts/phase0_baseline.py --check` = **all bit-identical，EXIT=0**。
+- `ruff check .` = **All checks passed**；`pytest tests/test_spatial_fft_plan.py` = **21 passed**。
+- `pyright` 对改动文件仅报**未改动**的 `normalize_migration_rate` 既有错误（新代码行无新增）；基线既有 1165 errors，本阶段未改任何既有 Python 源文件（除新增函数/文件）。
+- S1 测试内容：`Z` 与逐 deme `normalize_coord` 暴力参考一致（wrap False/True）；`K'` 中心置零；`K'/Z` 与 `fold_migration_csr` 的 dest/权重逐条一致（wrap False/True）；偶核报错。
+
+### 13.4 请 evaluator 核对点
+1. **S1 等价性**：`build_fft_migration_plan` 的 `Z` 与 `K'/Z` 是否严格等价 CSR（含 `wrap`、中心排除、边界）；测试是否足以发现偏差（是否需补 `adjust_on_edge`、非矩形掩膜）。
+2. **S0 特性启用**：给 `gpu` feature 加 `cudarc/cufft` 是否合规（无新 crate）、默认关闭、且**未影响非 gpu 构建与 `phase0`**。
+3. **阶段边界**：S1 仅前端构建块、未接运行路径——是否符合「默认关闭、不改 CSR 行为」。
+4. **pyright 基线判定**：改动文件仅报既有错误、无新增；该判定是否成立。
+
+### 13.5 残余（未做）
+- **S2**：Rust session/executor 接线（cuFFT 迁移内核 + 预算 + 参数传递）；**S3**：会话/`SpatialPopulation` 开关、中英文档、全量门禁。均未做、默认关闭。
+- `wrap=True` 下「重复目的地」与 conv 的严格处理、`include_center=True`、不规则掩膜、多类批处理未验。
 
 ---
 

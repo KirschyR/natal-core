@@ -30,6 +30,8 @@ from natal.frontend.spatial.topology import GridTopology
 
 __all__ = [
     "MigrationCSR",
+    "MigrationFFTPlan",
+    "build_fft_migration_plan",
     "csr_dense_row",
     "fold_migration_csr",
     "normalize_migration_rate",
@@ -457,3 +459,87 @@ def csr_dense_row(
     for pos in range(start, end):
         row[int(migration_csr.dest_idx[pos])] += float(migration_csr.weights[pos])
     return row
+
+
+class MigrationFFTPlan(NamedTuple):
+    """Route-A convolution-migration plan for one rectangular topology.
+
+    Replaces the explicit per-deme CSR with a shift-invariant stencil plus a
+    boundary normalization field, so a migration step is
+
+    ``g = rate * f / z`` then ``f_new = f * (1 - rate) + kernel' (*) g``
+
+    with a zero-outside linear convolution.  This is numerically equivalent to
+    the folded CSR's "drop out-of-grid neighbours, renormalize the rest"
+    semantics for ``include_center=False``.
+
+    Attributes:
+        rows: Grid rows.
+        cols: Grid columns.
+        kernel: ``(k, k)`` Gaussian with the center entry zeroed (``K'``).
+        z: ``(rows, cols)`` normalization field ``K' (*) m`` (``m`` = in-domain
+            indicator); constant in the interior, smaller along the border.
+    """
+
+    rows: int
+    cols: int
+    kernel: NDArray[np.float64]
+    z: NDArray[np.float64]
+
+
+def build_fft_migration_plan(
+    topology: GridTopology,
+    kernel: NDArray[np.float64],
+    *,
+    include_center: bool = False,
+) -> MigrationFFTPlan:
+    """Precompute the route-A convolution migration plan.
+
+    Only the exact, dependency-free construction is implemented here: an odd
+    square kernel over a (possibly wrapping) grid.  The boundary normalization
+    ``z`` sums ``K'`` over the valid offsets of each deme — the same
+    denominator :func:`fold_migration_csr` divides out — computed by a
+    vectorized offset sweep rather than a per-deme Python loop.
+
+    Args:
+        topology: Grid topology supplying ``rows``/``cols``/``wrap``.
+        kernel: Odd square Gaussian kernel (center entry ignored).
+        include_center: Whether the kernel center is a self-target.  The
+            default excludes it, matching the CSR fold.
+
+    Returns:
+        The :class:`MigrationFFTPlan`.
+
+    Raises:
+        ValueError: If ``kernel`` is not an odd square array.
+    """
+    rows = topology.rows
+    cols = topology.cols
+    k_rows, k_cols = kernel.shape
+    if k_rows != k_cols or k_rows % 2 == 0:
+        raise ValueError("kernel must be a square array with odd dimensions")
+    k = k_rows
+    center = k // 2
+    kp = np.array(kernel, dtype=np.float64, copy=True)
+    if not include_center:
+        kp[center, center] = 0.0
+    offsets = [
+        (r - center, c - center)
+        for r in range(k)
+        for c in range(k)
+        if kp[r, c] > 0.0 and (include_center or not (r == center and c == center))
+    ]
+
+    n = rows * cols
+    z = np.zeros(n, dtype=np.float64)
+    if topology.wrap:
+        z[:] = float(sum(kp[dr + center, dc + center] for dr, dc in offsets))
+    else:
+        rr = np.arange(n) // cols
+        cc = np.arange(n) % cols
+        for dr, dc in offsets:
+            valid = (
+                (rr + dr >= 0) & (rr + dr < rows) & (cc + dc >= 0) & (cc + dc < cols)
+            )
+            z += np.where(valid, kp[dr + center, dc + center], 0.0)
+    return MigrationFFTPlan(rows=rows, cols=cols, kernel=kp, z=z.reshape(rows, cols))

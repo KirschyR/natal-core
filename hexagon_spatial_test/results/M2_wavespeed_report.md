@@ -36,24 +36,22 @@
 natal 核与 MATLAB 参考核的**列镜像逐点相等**：`max|K_natal − K_matlab[:, ::-1]| ≤ 1.1e-16`（avd 0.5/1/2 全部成立）。
 另外，`HexGrid` 的 pointy-top 笛卡尔嵌入与核所用斜交度量一致：`max|dist²_embed − dist²_metric| = 1.14e-13`。
 
-### 3.2 波速（相对误差目标 <5%）
+### 3.2 波速（忠实性：natal 原语 vs MATLAB golden）
 
-| 口径 | avd | MATLAB | natal | 相对误差 |
-|---|---|---|---|---|
-| flat_paper | 0.5 | 0.490371 | 0.490444 | +0.015% |
-| flat_paper | 1.0 | 1.073656 | 1.073810 | +0.014% |
-| flat_paper | 2.0 | 2.125093 | 2.129177 | +0.192% |
-| flat_code | 0.5 | 0.488931 | 0.488975 | +0.009% |
-| flat_code | 1.0 | 1.068142 | 1.068341 | +0.019% |
-| flat_code | 2.0 | 2.105842 | 2.101577 | −0.203% |
-| junction_paper | 0.5 | 0.427633 | 0.427633 | ≈0 |
-| junction_paper | 1.0 | 0.931870 | 0.931870 | ≈0 |
-| junction_paper | 2.0 | 1.845530 | 1.845530 | ≈0 |
-| junction_code | 0.5 | 0.428500 | 0.428503 | +0.001% |
-| junction_code | 1.0 | 0.935455 | 0.934946 | −0.054% |
-| junction_code | 2.0 | 1.863452 | 1.862588 | −0.046% |
+> 修订（响应 evaluator §4）：首版 Python 翻译误把 MATLAB 的 **1-based** 下标当作 0-based
+> （初值条件、检查点/`mid` 取样），且 `round` 用了 banker's rounding，造成 1e-4–2e-3 的残余。
+> 已按 `main.m` 的 1-based 语义忠实翻译（初值 `(j+1) >= 2(i+1) − 0.4L`；取样 `cp−1`、`mid−1`；
+> `round` 改为 MATLAB 的 half-away-from-zero）。修正后**逐例匹配到机器精度**（下表相对误差以 `verify_m2.py` 计）。
 
-**12/12 通过**，最大 |相对误差| = 0.203% ≪ 5%。
+| 口径 | avd | MATLAB / natal | |rel| |
+|---|---|---|---|
+| flat_paper | 0.5 / 1.0 / 2.0 | 0.490371 / 1.073656 / 2.125093 | 2.5e-13 / 1.8e-13 / 4.8e-12 |
+| flat_code | 0.5 / 1.0 / 2.0 | 0.488931 / 1.068142 / 2.105842 | 3.4e-13 / 1.4e-13 / 3.4e-12 |
+| junction_paper | 0.5 / 1.0 / 2.0 | 0.427633 / 0.931870 / 1.845530 | 1.4e-13 / 2.3e-13 / 3.3e-12 |
+| junction_code | 0.5 / 1.0 / 2.0 | 0.428500 / 0.935455 / 1.863452 | 1.6e-13 / 1.2e-13 / 3.8e-12 |
+
+**12/12 与 golden 在机器精度内一致**（`verify_m2.py` EXIT=0，最大 |rel| = 4.8e-12），
+远优于 5% 验收带（`compare_m2.py` 12/12，EXIT=0）。
 
 ### 3.3 方向交叉核对（flat×√3/2 vs junction）
 
@@ -77,8 +75,9 @@ paper 规模下两方向在 <1% 内一致（M0 小规模时偏差达 7%，已随
 
 ### 3.5 波形
 
-- natal 复现的波形已导出：`results/m2_hex_waveshape.npz`（12 例的波前剖面）。
-- 归一化波前宽度（0.1→0.9）/域长：flat_paper 0.0067 / 0.0167 / 0.0301（avd 0.5/1/2），
+- natal 复现的波形已导出：`results/m2_hex_waveshape.npz`（12 例的波前剖面，已按忠实索引重生成）。
+- 归一化波前宽度（0.1→0.9）/域长：flat_paper 0.0067 / 0.0167 / 0.0301（avd 0.5/1/2）；flat_code
+  0.0151 / 0.0251 / 0.0503；junction_paper 0.0042 / 0.0085 / 0.0169；junction_code 0.0021 / 0.0042 / 0.0095，
   随扩散单调变宽。
 - 与 PDE 参考（`golden/pde_waveshape_reference.npz`）在 avd=0.5 的**绝对**波前宽度同量级：
   hex flat_paper ≈ 2.0 cells vs PDE homing ≈ 2.5 domain units。
@@ -92,17 +91,19 @@ paper 规模下两方向在 <1% 内一致（M0 小规模时偏差达 7%，已随
 /opt/matlab/bin/matlab -batch "addpath('.../hexagon_spatial_test/repro'); gen_golden_m2_wavespeed"
 # natal 原语复现（约 6 分钟）
 cd hexagon_spatial_test && ../.venv/bin/python repro/natal_hex_wavespeed.py
-# 对照（EXIT=0）
+# 验收带对照（EXIT=0）
 cd hexagon_spatial_test && ../.venv/bin/python repro/compare_m2.py
+# 忠实性回归（evaluator §4.6；EXIT=0）
+cd hexagon_spatial_test && ../.venv/bin/python repro/verify_m2.py
 ```
 
-- 波速 12/12 <5%（§3.2）；核列镜像 1e-16（§3.1）；方向 <1%（paper，§3.3）。
+- 波速 12/12 与 golden 机器精度内一致（§3.2）；核列镜像 1e-16（§3.1）；方向 <1%（paper，§3.3）。
 - 未改产品代码；`phase0` 不涉及。
 
 ## 5. 残余风险 / 差异
 
-1. **flat 与 junction 端点对齐不同**：junction 逐位相同，flat 差 ~0.01–0.2%（疑为检查点插值对
-   离散代对齐的敏感性）；远低于容差，不影响结论。
+1. **索引约定（已修复）**：首版残留 ~0.01–0.2% 源于 1-based/0-based 翻译缺陷（非插值敏感性）；
+   修正后 12/12 达机器精度（§3.2）。仍存的仅浮点噪声（≤4.8e-12）。
 2. **自写实现 vs 引擎**：M2 验证的是 natal **空间原语**（HexGrid + 高斯核）而非引擎生命周期；
    将通用 hex 模型接入引擎属 M4 决断范围。
 3. **波形**：hex 无独立 MATLAB golden；PDE 参考仅 avd=0.5/10。定性同量级，定量留 M8。

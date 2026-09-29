@@ -167,29 +167,40 @@ def _diffuse(data: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return out
 
 
+def mround(x: float) -> int:
+    """MATLAB ``round``: half away from zero (Python's round is half-to-even)."""
+    return int(np.floor(x + 0.5)) if x >= 0 else -int(np.floor(-x + 0.5))
+
+
 def run_flat(m, n, cp1, cp2, avd, kernel, mats, max_iters=20000, capture=True):
+    """Faithful port of the flat reference ``main.m``.
+
+    ``cp1``/``cp2`` are the 1-based checkpoint columns from ``mode_params``.
+    """
     x = np.zeros((GN, m, n))
-    border = 1 + round((n - 1) * BOUNDARY1)
+    # borderx = 1 + round((n-1)*0.2) (1-based); cols 1..borderx -> [:borderx]
+    border = 1 + mround((n - 1) * BOUNDARY1)
     x[0, :, :border] = 1.0
     x[2, :, border:] = 1.0
-    mid = round(m / 2)
-    return _run(x, cp1, cp2, avd, kernel, mats, max_iters, axis=2, mid=mid, capture=capture)
+    mid0 = mround(m / 2) - 1  # MATLAB round(m/2) is 1-based
+    return _run(x, cp1, cp2, avd, kernel, mats, max_iters, axis=2, mid=mid0, capture=capture)
 
 
 def run_junction(L, avd, kernel, mats, max_iters=20000, capture=True):
+    """Faithful port of the junction reference ``main.m`` (1-based)."""
     m = int(np.ceil(L * (1 + 1 / np.sqrt(3))))
     n = int(np.ceil(L * 2 / np.sqrt(3)))
     x = np.zeros((GN, m, n))
-    for i in range(m):
-        for j in range(n):
-            if j >= 2 * i - 2 / 5 * L:
+    for i in range(m):  # 0-based i -> MATLAB i+1
+        for j in range(n):  # 0-based j -> MATLAB j+1
+            if (j + 1) >= 2 * (i + 1) - 2 / 5 * L:
                 x[0, i, j] = 1.0
             else:
                 x[2, i, j] = 1.0
-    cp1 = round(L / (2 * np.sqrt(3)) + 0.45 * L)
-    cp2 = round(L / (2 * np.sqrt(3)) + 0.65 * L)
-    mid = round(n / 2)
-    return _run(x, cp1, cp2, avd, kernel, mats, max_iters, axis=1, mid=mid, capture=capture)
+    cp1 = mround(L / (2 * np.sqrt(3)) + 0.45 * L)
+    cp2 = mround(L / (2 * np.sqrt(3)) + 0.65 * L)
+    mid0 = mround(n / 2) - 1
+    return _run(x, cp1, cp2, avd, kernel, mats, max_iters, axis=1, mid=mid0, capture=capture)
 
 
 def _profile(x, axis, mid):
@@ -203,19 +214,19 @@ def _profile(x, axis, mid):
 
 
 def _run(x, cp1, cp2, avd, kernel, mats, max_iters, axis, mid, capture=False):
+    # cp1/cp2 are 1-based MATLAB indices; mid is already 0-based.
     distance = cp2 - cp1
     flag1 = flag2 = 0.0
     last = [np.nan, np.nan]
-    carrier_freq = None
     for t in range(max_iters):
         x = x + renew(x, mats)
         x = _diffuse(x, kernel)
 
         def freq(cp):
             if axis == 2:
-                col = x[:, mid, cp]
+                col = x[:, mid, cp - 1]
             else:
-                col = x[:, cp, mid]
+                col = x[:, cp - 1, mid]
             return float(col[CARRIER].sum() / col.sum())
 
         s1 = freq(cp1)
@@ -226,7 +237,6 @@ def _run(x, cp1, cp2, avd, kernel, mats, max_iters, axis, mid, capture=False):
         s2 = freq(cp2)
         if s2 > SPEED_CRITERION and flag2 == 0:
             flag2 = t - 1 + (SPEED_CRITERION - last[1]) / (s2 - last[1])
-            carrier_freq = s2
             res = {"speed": distance / (flag2 - flag1), "t": t + 1, "axis": axis}
             if capture:
                 res["profile"] = _profile(x, axis, mid)

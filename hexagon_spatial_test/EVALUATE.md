@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §2（M0 §1）= **APPROVED**（evaluator） |
-| 待回执 | §3（M2 波速/波形）→ 期望 §4 |
-| 主 agent 处理 | M0 已闭环；M2 波速/波形已产出，交接区已追加 §3 |
-| 待 evaluator 动作 | 独立核对 §3 的 M2 复现、口径与结论边界 |
+| 最近回执 | §4（M2 §3）= **NOT APPROVED**（1-based 索引忠实性；已修复，见 §3.6） |
+| 待回执 | §3 修复后复核 → 期望 §5 |
+| 主 agent 处理 | M0 已闭环；M2 已按 §4.6 修复索引缺陷，`verify_m2.py` EXIT=0（12/12 ≤4.8e-12） |
+| 待 evaluator 动作 | 复核 §4.6 修复目标与受影响检查（§4.2/§4.3/§4.4） |
 
 ---
 
@@ -178,6 +178,21 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - hex 波形无独立 MATLAB golden（发布 `launcher_waveshape` 依赖 `main` 未返回的 `ret`）。
 - 低 avd 离散化需在 M8 以有效扩散为横轴重读 Fig 3；flat/junction 端点差异待解释。
 
+### 3.6 审查后修复（主 agent，响应 §4；仅复现脚本/数据，未改产品代码）
+
+按 §4.6 修复 `natal_hex_wavespeed.py` 的 1-based 忠实性缺陷：
+- junction 初值改为 `(j+1) >= 2*(i+1) - 0.4L`；`_run` 取样改 `cp-1`、`mid-1`；新增 `mround`
+  （half-away-from-zero）替换 Python `round`。
+- 重生成 `results/m2_natal_wavespeed.json`、`m2_hex_waveshape.npz`、`m2_wavespeed_compare.json`；
+  同步修正报告 `results/M2_wavespeed_report.md` §3.2/§3.5/§5.1（并更正 §3.5「端点差异=插值敏感性」的错误归因）。
+
+独立证据（本地运行）：
+- `repro/verify_m2.py`（evaluator 留下的失败回归）：修复后 **EXIT=0**，12/12 |rel| ≤ **4.8e-12**。
+- `repro/compare_m2.py`：**EXIT=0**，12/12 <5%。
+
+请 evaluator 复核 §4.6 修复目标及受影响检查（§4.2/§4.3/§4.4），并给出结论。未改 §3.1–§3.5 的核心结论，
+仅修正残余解释与数值精度；未改任何产品代码。
+
 ---
 
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）
@@ -319,3 +334,112 @@ Bug-finder 报 6 项；Defender 回 1 confirmed / 4 false-positive / 1 disputed�
 
 > 交付物说明：evaluator 实际运行命令见 §2.2–§2.7；主 agent 自测与独立审查已分别标注。
 > 审查期间唯一改动文件为 `repro/verify_goldens.py`（补强测试），未改 `EVALUATE.md` §1 正文及任何产品代码。
+
+## §4 — M2 §3 独立审查回执（evaluator）
+
+### 4.0 裁定
+
+**NOT APPROVED（M2 §3）**。审查范围：提交 `49bdae3`（M2）及 `272609b`（§1.6 文档同步）。风险分类：
+局部（自写复现脚本 + 数据），未改产品代码。**核心数值结论（12/12 <5%）本身成立且已独立复现**；
+但发现一处**在范围内的忠实性缺陷**：`natal_hex_wavespeed.py` 未忠实翻译参考 `main.m` 的 1-based
+索引，报告对残差的解释错误，且「junction 逐位相同」属错误陈述。缺陷小、修复成本低，但按
+`quality_checks_spec.md`「in-scope defect requires repair」给出 NOT APPROVED。
+
+> 独立性声明：以下所有数值均由 evaluator 在隔离副本（`/tmp/hexeval/*`，不改仓库）运行；命令见各条。
+
+### 4.1 逐条独立核对（对应 §3.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | `natal_hex_wavespeed.py` 是否忠实于参考 `main.m` | **FAIL**（见 §4.4，索引不忠实） |
+| 2 | 12/12 <5%、核 1e-16 可独立复现 | **PASS**（见 §4.2/§4.3） |
+| 3 | 口径冻结、方向命名、有效核扩散解读 | **PASS（1 处解释不成立，见 §4.5）** |
+| 4 | 结论边界（仅验证空间原语） | **部分 PASS**（「junction 逐位相同」过度陈述） |
+| 5 | flat/junction 端点差异是否为可接受插值差异 | **FAIL**：非插值差异，而是索引约定缺陷 |
+
+### 4.2 MATLAB golden 可复现（独立核对 #2）
+
+- 命令（不覆盖仓库）：`cp -r repro /tmp/hexeval/m2/ && matlab -batch "addpath('/tmp/hexeval/m2/repro'); gen_golden_m2_wavespeed"`。
+- 结果：重生成的 12 个速度值（`flat/junction × paper/code × avd 0.5/1/2`）与
+  `golden/hex_homing_wavespeed_m2.json` **逐位相同**（`bit=True` 12/12）；`reference_files` 相同。
+- `kernel_mean_dist` = 0.206514 / 0.950012 / 1.988410，与 MATLAB `get_mig_matrix25` 自打印一致。
+
+### 4.3 natal 实现复现（独立核对 #2）
+
+- 命令：`cd /tmp/hexeval/m2b && .venv/bin/python repro/natal_hex_wavespeed.py`（约 6 min）。
+- 结果：12 个 natal 速度与 `results/m2_natal_wavespeed.json` **逐位相同**；`kernel_check` 相同
+  （列镜像 `max|Δ|` ≤ 1.1e-16，`embed_err`=1.14e-13）。
+- `compare_m2.py` 在隔离目录运行：**12/12 <5%**，最大 |rel|=0.203%；方向比 paper 0.993/0.998/0.997、
+  code 0.988/0.989/0.979（与报告一致）；EXIT=0。
+
+### 4.4 关键发现：索引约定不忠实（独立核对 #1、#5）——阻塞项
+
+**证据链**：
+
+1. **init 与 MATLAB 真值不符**。以 MATLAB 复刻参考 `main.m:70-78` 的 junction 初值（L=300，1-based
+   `j>=2i-0.4L`）得 release 格点数 **50922**；而 `natal_hex_wavespeed.py:185`
+   （`if j >= 2*i - 2/5*L`，0-based）得 **51096**，逐格比较 `equal=False`。faithful 翻译
+   （`j+1 >= 2*(i+1)-0.4L`）才等于 50922。命令：MATLAB 脚本 + numpy 比较（见执行记录）。
+2. **checkpoint/mid 用 0-based 直接套用 MATLAB 1-based 整数**。`_run` 以
+   `x[:, mid, cp]`（flat，:216-217）与 `x[:, cp, mid]`（junction，:200-201）取样，`cp` 直接来自
+   `mode_params`（MATLAB 1-based），未减 1；`run_flat:175`/`run_junction:191` 的 `mid=round(·/2)`
+   亦未按 1-based 语义转换。
+3. **Python `round` 为 banker's rounding**：`round(693/2)=346`，而 MATLAB `round(693/2)=347`（n=693
+   的 `junction_code` 命中此差异）。
+4. 上述偏移**部分相互抵消**，故 junction_paper 恰好落在 ~1e-13（伪“逐位相同”），而 flat 与
+   junction_code 落在 1e-4~2e-3。
+
+**evaluator 的 faithful 1-based 参照实现**（仅改索引/初值约定，复用模块的 `renew`/`_diffuse`/核）：
+flat 6 例与 junction_paper 3 例的 `|rel| ≤ 4.8e-12`；junction_code 在 init/cp/mid 三者**都**按
+1-based 正确转换后（avd=2 实测）为 3.8e-12：
+
+| 口径 | author `natal_hex_wavespeed.py` | faithful 1-based 参照 | MATLAB golden |
+|---|---|---|---|
+| flat_paper avd=2 | 2.129177（+1.9e-3） | 2.125093321155（−4.8e-12） | 2.125093321165 |
+| flat_code avd=0.5 | 0.488975（+8.8e-5） | 0.488931387505（−3.4e-13） | 0.488931387505 |
+| junction_paper avd=2 | 1.845530（−3.3e-12） | 1.845529606501（−3.3e-12） | 1.845529606507 |
+| junction_code avd=2 | 1.862588（−4.6e-4） | 1.863452186897（−3.8e-12） | 1.863452186904 |
+
+> junction_code 的 faithful 组合经单独探测（avd=2）确定为：**init 忠实 + `cp0=cp−1` +
+> `mid0=round_half_away(n/2)−1=346`**；其余组合偏差 6.7e-6~1.4e-3（faithful 参照对 12 例的其余值
+> 见 §4.4 说明；测量值均来自隔离运行）。
+
+**结论**：§3.2「junction_paper ≈0」是误差抵消的产物；§5.1「junction 逐位相同」不成立
+（junction_code 差 ~0.05%）；§5.1 将残余归因于「检查点插值对离散代对齐的敏感性」**错误**，
+真正原因是 1-based/0-based 索引约定。
+
+### 4.5 口径/方向/有效扩散解读（独立核对 #3）
+
+- 口径冻结（paper vs code、junction L=300/600）与 §2.8 一致；`kernel_mean_dist` 正确暴露低 avd
+  离散化（0.2065/0.950/1.988）。**PASS**。
+- 方向命名与 √3/2 归属沿用发布代码，未过度断言。**PASS**。
+- §3.4「低 avd 离散核是 Fig 3 低扩散段差异的**主要来源**」在本阶段无直接对照（M2 未与 PDE 比较），
+  属合理但未证的解释，建议 M8 复核。**记录性**。
+
+### 4.6 修复目标（最小、可复现）
+
+1. 让 `natal_hex_wavespeed.py` 忠实翻译参考 `main.m` 的 1-based 语义：
+   - `run_junction:185` 初值用 `j+1 >= 2*(i+1) - 2/5*L`；
+   - `_run:200-201/216-217` 取样用 `cp-1`、`mid-1`（即把 MATLAB 1-based 索引转 0-based）；
+   - `mid` 用 MATLAB round-half-away-from-zero（避免 n 为奇数时 banker's rounding）。
+2. 修正 `results/M2_wavespeed_report.md` §3.2/§5.1：删除「junction 逐位相同」，改述残余差异为
+   索引约定所致（修复后应为机器精度）。
+3. **evaluator 已留下已运行且失败的回归测试**（修复后即通过）：
+
+   - 文件：`hexagon_spatial_test/repro/verify_m2.py`（新建，不改产品代码）
+   - 命令：`cd hexagon_spatial_test && ../.venv/bin/python repro/verify_m2.py`
+   - 期望：全部 `|rel| ≤ 1e-9`、核列镜像 ≤1e-12，EXIT=0
+   - 实际（当前）：**EXIT=1**，9/12 失败：flat_paper 1.48e-4/1.44e-4/1.92e-3，flat_code
+     8.83e-5/1.87e-4/2.03e-3，junction_code 6.70e-6/5.44e-4/4.64e-4；junction_paper 与核为 OK。
+   - 依据：模块 docstring 与 §3.4.1 要求「忠实于参考 main.m」；报告自身对 junction 声明「≈0」。
+     5% 门限由 `compare_m2.py` 另行保证（已 12/12 通过），本测试只抓 <5% 掩盖的索引偏移。
+
+### 4.7 残余风险
+
+1. 修复后应重跑 `gen_golden_m2_wavespeed`（MATLAB 参考不变）与 `natal_hex_wavespeed.py`、
+   `compare_m2.py`、`verify_m2.py`，并同步波形/方向/报告。
+2. 波形（`m2_hex_waveshape.npz`）由含索引偏移的实现导出；修复后需重新生成并复核 §3.5 数值。
+3. 自写实现 ≠ 引擎生命周期（M4 决断），以及上游 §2.8 的场地/口径/单位风险仍适用。
+4. 本次为局部修改；NOT APPROVED 仅针对 M2 忠实性，不否定「natal 空间原语可复现该波速（<5%）」的结论。
+
+> 审查期间新增文件：`repro/verify_m2.py`（失败回归目标）；未改 §1/§3 正文或任何产品代码。

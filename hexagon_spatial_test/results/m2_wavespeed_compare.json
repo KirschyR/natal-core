@@ -13,8 +13,8 @@
       "avd": 0.5,
       "kernel_mean_dist": 0.20651402431812316,
       "matlab_speed": 0.4903714340782518,
-      "natal_speed": 0.4904441711845907,
-      "rel_err": 0.00014833063527782883,
+      "natal_speed": 0.4903714340781274,
+      "rel_err": -2.536862493694879e-13,
       "pass": true
     },
     {
@@ -23,8 +23,8 @@
       "avd": 1,
       "kernel_mean_dist": 0.9500120783424365,
       "matlab_speed": 1.0736557782979632,
-      "natal_speed": 1.0738100681500893,
-      "rel_err": 0.00014370513831784846,
+      "natal_speed": 1.0736557782977754,
+      "rel_err": -1.7496272042084985e-13,
       "pass": true
     },
     {
@@ -33,8 +33,8 @@
       "avd": 2,
       "kernel_mean_dist": 1.988409713093447,
       "matlab_speed": 2.125093321165126,
-      "natal_speed": 2.1291767471115413,
-      "rel_err": 0.0019215278245645535,
+      "natal_speed": 2.125093321154995,
+      "rel_err": -4.767323412768972e-12,
       "pass": true
     },
     {
@@ -43,8 +43,8 @@
       "avd": 0.5,
       "kernel_mean_dist": 0.20651402431812316,
       "matlab_speed": 0.48893138750491955,
-      "natal_speed": 0.48897455677004087,
-      "rel_err": 8.829309433706379e-05,
+      "natal_speed": 0.4889313875047544,
+      "rel_err": -3.3776860952975814e-13,
       "pass": true
     },
     {
@@ -53,8 +53,8 @@
       "avd": 1,
       "kernel_mean_dist": 0.9500120783424365,
       "matlab_speed": 1.0681417904840802,
-      "natal_speed": 1.0683413213092166,
-      "rel_err": 0.000186801814996794,
+      "natal_speed": 1.068141790483932,
+      "rel_err": -1.3865551634102387e-13,
       "pass": true
     },
     {
@@ -63,8 +63,8 @@
       "avd": 2,
       "kernel_mean_dist": 1.988409713093447,
       "matlab_speed": 2.105842431345382,
-      "natal_speed": 2.1015773632083974,
-      "rel_err": -0.0020253500800911373,
+      "natal_speed": 2.1058424313381963,
+      "rel_err": -3.4123196482430974e-12,
       "pass": true
     },
     {
@@ -73,8 +73,8 @@
       "avd": 0.5,
       "kernel_mean_dist": 0.20651402431812316,
       "matlab_speed": 0.4284999909356743,
-      "natal_speed": 0.42850285957217776,
-      "rel_err": 6.694601083155907e-06,
+      "natal_speed": 0.4284999909356074,
+      "rel_err": -1.561048743259069e-13,
       "pass": true
     },
     {
@@ -83,8 +83,8 @@
       "avd": 1,
       "kernel_mean_dist": 0.9500120783424365,
       "matlab_speed": 0.9354552272027651,
-      "natal_speed": 0.9349463099171955,
-      "rel_err": -0.0005440316872153786,
+      "natal_speed": 0.9354552272026575,
+      "rel_err": -1.1500348488924417e-13,
       "pass": true
     },
     {
@@ -93,8 +93,8 @@
       "avd": 2,
       "kernel_mean_dist": 1.988409713093447,
       "matlab_speed": 1.863452186904136,
-      "natal_speed": 1.8625880529924674,
-      "rel_err": -0.0004637274397172785,
+      "natal_speed": 1.8634521868970586,
+      "rel_err": -3.798031302932777e-12,
       "pass": true
     },
     {
@@ -193,14 +193,14 @@
       "front_width_frac": 0.0021141649048625794
     },
     "junction_code_1": {
-      "front_width": 5.0,
+      "front_width": 4.0,
       "span": 946.0,
-      "front_width_frac": 0.005285412262156448
+      "front_width_frac": 0.004228329809725159
     },
     "junction_code_2": {
-      "front_width": 8.0,
+      "front_width": 9.0,
       "span": 946.0,
-      "front_width_frac": 0.008456659619450317
+      "front_width_frac": 0.009513742071881607
     },
     "junction_paper_0.5": {
       "front_width": 2.0,

@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §7（M3 CPU 侧 §6）= **NOT APPROVED**（F1/F2/F3；已修复，见 §6.6） |
-| 待回执 | §6 修复后复核 → 期望 §8 |
-| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧按 §7.5 修复并重跑；GPU 侧待用户确认 |
-| 待 evaluator 动作 | 复核 §7.5 修复目标与受影响项（§7.2/§7.4） |
+| 最近回执 | §8（M3 CPU §6.6 修复复核）= **APPROVED**（M3 CPU 侧闭环；GPU 未审） |
+| 待回执 | —（GPU 侧确认后另立；或 M5/M8 交接） |
+| 主 agent 处理 | M0/M2 闭环；M3 CPU 侧闭环；GPU 侧待用户确认 |
+| 待 evaluator 动作 | —（GPU 侧交接后） |
 
 ---
 
@@ -244,6 +244,12 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 ~66 min/tick。结论方向（CPU 不可行、无预算守卫）不变。
 
 请 evaluator 复核 §7.5 修复目标与受影响项（§7.2/§7.4）；未改产品代码。
+
+### 6.7 M3 CPU 侧闭环（主 agent）
+
+§8 = **APPROVED**，M3 **CPU 侧完成**。按 §8.4 在 `results/M3_scale_report.md` §4 注明「2.7–3.0e-7 s/entry」
+为大核（`k≳21`）渐近带。M3 **整体仍为部分完成**：GPU 侧（deterministic `enable_gpu`/显存、随机行宽 ≤32 拒绝、
+`phase0`）按用户指示 NOT CHECKED，待确认后另立。状态已同步 `Hex_model_recon.md` §5 M3。
 
 ---
 
@@ -627,3 +633,51 @@ flat 6 例与 junction_paper 3 例的 `|rel| ≤ 4.8e-12`；junction_code 在 in
 3. APPROVED/NOT APPROVED 仅针对 CPU M3 的测量口径；不构成对 M4 迁移执行模型选型的认可。
 
 > 审查期间未改任何文件；仅新增本回执。
+
+## §8 — M3 §6.6 修复复核回执（evaluator）
+
+### 8.0 裁定
+
+**APPROVED（M3 CPU 侧 §7.5 修复目标达成）**。修复提交 `3cb6d43` 仅动复现脚本/数据/报告，未触产品
+代码；§7.5 三项修复全部完成并经独立复现。M3 CPU 侧的测量口径与结论现已自洽。GPU 侧仍按用户指示
+延后，**NOT CHECKED**。
+
+### 8.1 §7.5 修复目标核对
+
+| 目标 | 结果 | 独立证据 |
+|---|---|---|
+| F1：fold/builder 统一 `kernel_include_center=False` | **DONE** | size=30：k=3 fold nnz 7744→**6844 = builder 实际 nnz**；k=51 774400→**773500 = builder 实际 nnz**（逐位相等） |
+| F2：deterministic 标签与配置一致（`stochastic=False`） | **DONE** | probe `:79` 已改；tick 系数由 ~6e-7 降至 ~2.95e-7 s/entry（确定性无抽样成本），标签成立 |
+| F3：区分 underflow 与 `d≤25` 盘掩膜 | **DONE** | `M3_scale_report.md:52-54` 已改述 |
+| 重跑并同步数据/报告 | **DONE** | §8.2 |
+
+### 8.2 独立运行证据（隔离副本 `/tmp/hexeval/m3b`）
+
+- `python repro/m3_scale_probe.py`（6m32s，峰值 RSS 6.73 GB）：**20/20 组合 support/nnz/csr_bytes 与
+  提交 JSON 逐位相同**；论文核结构量一致；`nnz` 现等于 builder 实际 CSR（见 §8.1）。
+- 300²×51² = 2.145e8 nnz / 3.433 GB / fold 63.5 s（提交 63.3 s）；论文核 avd=1.0 = 1.948e8 / 3.118 GB /
+  58.8 s（提交 58.2 s）；300²×21² tick 11.44 s（提交 11.29 s）。
+- `tick_s` 复核/提交比 0.98–1.15、`fold_s` 0.85–1.09（机器负载差异）；时间量与 §2–§4 表一致。
+- `16·nnz+8(n+1)` 逐行成立；CPU 无预算守卫（`ensure_migration_budget` 仅 GPU）复核不变。
+
+### 8.3 结论复核
+
+- 内存墙（`CSR≈16·nnz`；300²×51²=3.43 GB；论文核 avd=1.0=3.12 GB）与海南外推（~211 GB / ~65 min 折叠）
+  **不受 F1 修复影响**（大核 n_demes 占比 <0.2%）。
+- tick 结论因 F2 修正而变化：确定性系数由 ~6e-7 降至 **~2.95e-7 s/entry**（300²×21²=11.3 s；
+  论文核外推 ~58 s/tick；海南 ~66 min/tick）。结论方向（CPU 不可行）不变，且现在标签与配置一致。
+
+### 8.4 非阻塞
+
+- `M3_scale_report.md:63`「大网格约 2.7–3.0e-7 s/entry」为**大核渐近带**；300² k=11 实测 3.8e-7、
+  小 k 更高（小核有固定 per-tick 开销）。用于外推的是大核系数，恰当；如需可在报告中注明该范围
+  对应 k≳21。仅表述，不影响结论。
+
+### 8.5 未完成 / 残余
+
+- **GPU 侧 NOT CHECKED**（§6.5）：deterministic `enable_gpu`/显存、随机行宽 ≤32 拒绝、`phase0`；
+  recon §5 M3 含 GPU 项，故 M3 整体仍为部分完成。
+- 外推为线性、未实测；age_structured 放大与月 K 开销未测（§7.7/§6.5）。
+- 本批准仅覆盖 CPU M3 测量口径，不构成 M4 迁移执行模型选型的认可。
+
+> 审查期间未改任何文件；仅新增本回执。§7 的 NOT APPROVED 已由本次修复解除。

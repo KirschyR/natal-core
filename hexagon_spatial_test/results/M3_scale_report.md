@@ -60,7 +60,8 @@
 2. **内存墙**：`CSR ≈ 16·nnz B`。300²×51² = 3.43 GB；论文核 avd=1.0 = 3.12 GB。外推海南
    `2599×2601`（6.76e6 demes、论文 r25 盘 ~1951 支持）→ `nnz ≈ 1.32e10`，`CSR ≈ 211 GB`，
    折叠 ≈ 65 min；若按 natal 全核（support 2601）则 ~281 GB——**CPU 侧不可行**（recon §4 预判被实测确认）。
-3. **确定性 CPU tick 亦随 nnz 线性且昂贵**：大网格约 **2.7–3.0e-7 s / CSR entry / tick**。
+3. **确定性 CPU tick 亦随 nnz 线性且昂贵**：大网格约 **2.7–3.0e-7 s / CSR entry / tick**（该带对应
+   `k≳21` 的大核渐近；300² k=11 实测 3.8e-7、更小核更高，含固定 per-tick 开销）。
    300²×21²（nnz 3.8e7）已 **11.3 s/tick**；外推论文核 avd=1.0（nnz 1.95e8）约 **58 s/tick**，
    海南规模约 **66 min/tick**——论文量级（数十–上百代）在 CPU 上不现实。
 4. **显式预算**：probe 对超 1.2 GB 的 CSR 显式标记 skipped；但 natal **CPU 路径本身无内存预算守卫**
@@ -85,6 +86,6 @@ cd hexagon_spatial_test && ../.venv/bin/python repro/m3_scale_probe.py
 ## 7. 独立审查状态
 
 - 主 agent 自测：见 §2–§4。
-- 独立审查（evaluator，`EVALUATE.md` §7）：**NOT APPROVED**（F1 fold/builder 口径、F2 标签、F3 措辞）；
-  本版已修复：fold 与 builder 均 `kernel_include_center=False`（F1）、tick 改 `stochastic=False`（F2）、
-  区分 underflow 与 `d≤25`（F3），并重跑全部数据。待 evaluator 复核。
+- 独立审查（evaluator）：§7 **NOT APPROVED**（F1 fold/builder 口径、F2 标签、F3 措辞）；修复后 §8 =
+  **APPROVED**（M3 CPU 侧闭环）。修复：fold 与 builder 均 `kernel_include_center=False`、tick 改
+  `stochastic=False`、区分 underflow 与 `d≤25`，并重跑全部数据。GPU 侧 **NOT CHECKED**（按用户指示待确认）。

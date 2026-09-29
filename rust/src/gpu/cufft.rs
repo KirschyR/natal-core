@@ -6,7 +6,7 @@
 //! No runtime migration path is wired here yet; that is S1/S2. Off by default
 //! (this module only compiles under the `gpu` feature).
 
-use cudarc::cufft::{CudaFft, sys::cufftType};
+use cudarc::cufft::{sys::cufftType, CudaFft};
 use cudarc::driver::CudaContext;
 
 /// Linear ('same' crop) 2-D convolution of a real `rows x cols` signal with a
@@ -56,8 +56,10 @@ pub fn fft_linear_conv_same(
     let mut ker_spec = stream
         .alloc_zeros::<cudarc::cufft::sys::float2>(spec_n)
         .map_err(|e| format!("{e}"))?;
-    r2c.exec_r2c(&sig_d, &mut sig_spec).map_err(|e| format!("r2c: {e}"))?;
-    r2c.exec_r2c(&ker_d, &mut ker_spec).map_err(|e| format!("r2c: {e}"))?;
+    r2c.exec_r2c(&sig_d, &mut sig_spec)
+        .map_err(|e| format!("r2c: {e}"))?;
+    r2c.exec_r2c(&ker_d, &mut ker_spec)
+        .map_err(|e| format!("r2c: {e}"))?;
 
     let sig_h = stream.clone_dtoh(&sig_spec).map_err(|e| format!("{e}"))?;
     let ker_h = stream.clone_dtoh(&ker_spec).map_err(|e| format!("{e}"))?;
@@ -70,8 +72,11 @@ pub fn fft_linear_conv_same(
         };
     }
     let mut prod_d = stream.clone_htod(&prod).map_err(|e| format!("{e}"))?;
-    let mut out_d = stream.alloc_zeros::<f32>(fr * fc).map_err(|e| format!("{e}"))?;
-    c2r.exec_c2r(&mut prod_d, &mut out_d).map_err(|e| format!("c2r: {e}"))?;
+    let mut out_d = stream
+        .alloc_zeros::<f32>(fr * fc)
+        .map_err(|e| format!("{e}"))?;
+    c2r.exec_c2r(&mut prod_d, &mut out_d)
+        .map_err(|e| format!("c2r: {e}"))?;
     let out = stream.clone_dtoh(&out_d).map_err(|e| format!("{e}"))?;
 
     let inv = 1.0f32 / (fr * fc) as f32;

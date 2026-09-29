@@ -96,7 +96,7 @@ def test_fft_plan_weights_match_csr(rows, cols, k, sigma, wrap):
         expected_w = []
         for kr in range(k):
             for kc in range(k):
-                if kr == center and kc == center:
+                if plan.kernel[kr, kc] <= 0.0:
                     continue
                 mapped = topo.normalize_coord(r + kr - center, c + kc - center)
                 if mapped is None:

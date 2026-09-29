@@ -27,9 +27,10 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §12（M4 路线 A §11）= **APPROVED**（仅原型/设计） |
-| 待回执 | §13（路线 A 引擎 S0+S1+S2a）→ 期望 §14 |
-| 主 agent 处理 | 路线 A 引擎分阶段：S0（cuFFT 绑定探针）+ S1（前端 FFT 计划）+ S2a（前端开关）完成，交接区追加 §13/§13.6 |
-| 待 evaluator 动作 | 独立核对 §13 的 S0 特性启用、S1 前端等价性与 S2a 开关边界 |
+| 最近回执 | §14/§15（路线 A S0+S1+S2a）= **NOT APPROVED**（F1 `cargo fmt`；已修，见 §13.7） |
+| 待回执 | §13（含 §13.7 修复）再复核 → 期望 §16 |
+| 主 agent 处理 | S0+S1+S2a + 修复 F1（`cargo fmt`）/F2（收敛导出）/F3（测试过滤）；`check_rust.py` EXIT=0 |
+| 待 evaluator 动作 | 复跑 `scripts/check_rust.py` 与受影响检查，确认 F1 闭环 |
 
 ---
 
@@ -370,6 +371,22 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - `tests/test_spatial_fft_plan.py` 增测：非法值报 `ValueError`；`"fft"` 报 `NotImplementedError`；默认 `"csr"` 正常构建。
 
 验证：`pytest -q` = **3658 passed**（含 GPU 测试，需 `LD_LIBRARY_PATH` 含 nvidia cu13 lib，否则 GPU 用例因缺 `libnvrtc` 失败——环境项，与本改动无关）；`ruff` 通过；`pyright` 改动行无新增错误。S2b（executor cuFFT 内核 + 会话接线 + 预算）未做。
+
+### 13.7 审查后修复（主 agent，响应 §14/§15；仅复现脚本/产品代码格式化与公开面收敛）
+
+§14/§15 = **NOT APPROVED**（阻断：`cargo fmt --check`）。逐条修复：
+- **F1（阻断，已修）**：`cd rust && cargo fmt` 仅格式化 `rust/src/gpu/cufft.rs`（10+5 行）。复跑
+  `cd rust && cargo fmt -- --check` → **EXIT=0**；`scripts/check_rust.py` → **EXIT=0**
+  （fmt/clippy/check/test --lib 67 全过；需 `PYO3_PYTHON/PYTHONHOME/PYTHONPATH` + `LD_LIBRARY_PATH` 含
+  `/opt/conda/lib` 以加载 `libpython3.11`）。
+- **F2（非阻断，已收敛）**：`migration.__all__` 不再导出 `MigrationFFTPlan`/`build_fft_migration_plan`
+  （保留模块内可导入供测试/S2b；公开文档与 `migration_execution` kwarg 文档随 S3 补）。
+- **F3（非阻断，已修）**：`test_fft_plan_weights_match_csr` 期望侧改为按 `plan.kernel>0` 过滤，与 CSR「跳过 0」一致。
+- **F4（探针，预期）**：`cufft.rs` 为 S0 正确性探针（host 侧谱乘、f32 容差 1e-4），非缺陷。
+
+复验：`pytest tests/test_spatial_fft_plan.py` = **24 passed**；`ruff` 通过；`pyright` 新行无报错（仅既有）；
+`cargo fmt --check` = EXIT=0；`scripts/check_rust.py` = EXIT=0。请 evaluator 复跑 `scripts/check_rust.py` 与
+受影响检查（预期转 APPROVED）。
 
 ---
 
@@ -1017,3 +1034,59 @@ violation」给出 NOT APPROVED。修复为一次性格式化，代价极低。
 - 修复 F1 后请 evaluator 复跑 `scripts/check_rust.py` 与受影响检查即可转 APPROVED。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。
+
+## §15 — M4 §13（含 §13.6 S2a）再复核回执（evaluator）
+
+### 15.0 裁定
+
+**NOT APPROVED（M4 §13 仍）**。本次复核对象：§13.6 追加的 S2a（`migration_execution` 前端开关）与
+其提交 `4194afa`（产品代码：`builder.py`/`population.py`/测试）。S2a 本身**合规**（默认关闭、显式失败、
+测试充分）；但 §14 的**阻断项 F1（`cargo fmt --check` 失败）仍未修复**——`4194afa` 未触及 Rust，
+`rust/src/gpu/cufft.rs` 依旧未格式化。故维持 NOT APPROVED。
+
+> 独立性声明：evaluator 在当前提交（`4194afa`，工作树干净）运行全部门禁；命令见下。
+
+### 15.1 §14 阻断项复核（F1：未闭环）
+
+- `cd rust && cargo fmt -- --check` → **EXIT=1**，仍在 `cufft.rs:6/56/70` 报 3 处 rustfmt 差异；
+  `python scripts/check_rust.py` 相应 `Rust hard gates failed: cargo fmt -- --check`。
+- 本次提交范围（`git show --stat 4194afa`）仅 EVALUATE/设计文档 + `builder.py`/`population.py`/测试，
+  **未改任何 Rust 文件**，故 F1 不会自行消失。修复仍同 §14.4：`cd rust && cargo fmt` 后复跑 `check_rust.py`。
+
+### 15.2 S2a 独立核对（§13.6）
+
+- **默认关闭/无行为变化**：`migration_execution: "csr"|"fft"` 默认 `"csr"`；`"csr"` 路径与既有 CSR 完全一致。
+- **显式失败、无静默回退**：`"fft"` 在 `SpatialPopulation.__init__`（`population.py:786-797`）抛
+  `NotImplementedError`；非法值在 builder（`builder.py:1593-1595`）与 population 均抛 `ValueError`。
+- **未接运行路径**：`"fft"` 不构建任何 FFT executor；S2b 才接线（§13.5/设计 §9）。
+- 测试：`tests/test_spatial_fft_plan.py` 新增 3 例（非法值 `ValueError`、`"fft"` `NotImplementedError`、
+  默认 `"csr"` 可构建）；独立运行该文件 = **24 passed**。
+- **stub/一致性**：运行 `scripts/generate_init_pyi.py` 后 `src/natal/__init__.pyi` **无 diff**（新 kwarg 属
+  方法签名，不在顶层 stub 面）；`tests/test_phase0_shims.py` 通过。
+
+### 15.3 门禁结果（当前提交）
+
+- `pytest -q`（设 `LD_LIBRARY_PATH` 含 `/opt/conda/lib` 与 cu13）= **3658 passed**（与 §13.6 声明一致；
+  不设该 env 时 `test_gpu_*_frontend` 因缺 `libnvrtc` 失败，属环境项）。
+- `tests/test_spatial_fft_plan.py` = 24 passed。
+- `ruff check src demos` = **All checks passed**。
+- `scripts/phase0_baseline.py --check` = **all bit-identical，EXIT=0**。
+- `pyright`（改动 4 文件）= 27 errors，全部位于**未改动的既有行**（`migration.py:45/46/78/79/113`、
+  `population.py` 既有 `RateDeclaration`/`normalize_migration_rate` 等行）；`builder.py`、新测试、
+  `migration.py:462+` 与 `population.py:700/786-797` **无报错** → 无新增，主 agent 判定成立。
+- **唯一失败门禁**：`cargo fmt --check`（Rust，S0 引入，§14-F1）。
+
+### 15.4 修复目标（不变）
+
+1. `cd rust && cargo fmt`（格式化 `cufft.rs`），复跑 `python scripts/check_rust.py` → 期望 EXIT=0。
+2. （§14-F2，非阻断）`migration.__all__` 新增导出的 `MigrationFFTPlan`/`build_fft_migration_plan`
+   与新增 `migration_execution` 公开 kwarg：在 S3 前补 `docs/{zh,en}` 或暂不导出。
+3. （§14-F3，非阻断）`test_fft_plan_weights_match_csr` 期望侧按 `>0` 过滤零权重项。
+
+### 15.5 残余
+
+- S2b（executor cuFFT 内核 + 会话接线 + 预算）未做；S3（文档/全量门禁）未做。
+- S2a 的 `migration_execution` 未进入 clone/definition 往返语义的专门测试（当前仅 `"csr"` 可用，暂无影响）——
+  S2b 接线时需补「restore→run」状态往返用例。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。§14 的 F1 修复后即可转 APPROVED。

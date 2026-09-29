@@ -30,13 +30,14 @@ from natal.frontend.spatial.topology import GridTopology
 
 __all__ = [
     "MigrationCSR",
-    "MigrationFFTPlan",
-    "build_fft_migration_plan",
     "csr_dense_row",
     "fold_migration_csr",
     "normalize_migration_rate",
     "resolve_migration_mode",
 ]
+# Route-A frontend builders (`MigrationFFTPlan`, `build_fft_migration_plan`) are
+# intentionally *not* re-exported yet: the public-surface docs land with the S3
+# wiring.  They stay importable by module path for tests and S2b.
 
 MigrationStrategy = Literal["auto", "adjacency", "kernel", "hybrid"]
 

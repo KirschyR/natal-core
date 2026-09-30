@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §22（S3 §21）= **NOT APPROVED**（默认构建静默 no-op；已修，见 §21.8） |
-| 待回执 | §21（含 §21.8 修复）再复核 → 期望 §23 |
-| 主 agent 处理 | 修复默认构建对 `"fft"` 的显式拒绝；默认构建 25 passed/2 skipped，gpu 构建全绿 |
-| 待 evaluator 动作 | 在**两种构建**复跑 `pytest`/`phase0`/`check_rust`，确认 F1 闭环 |
+| 最近回执 | §23（M4 路线 A S3 §21.8）= **APPROVED**（路线 A S0–S3 全部闭环） |
+| 待回执 | —（后续 M5/M7/M8 或 M2 论文规模另立交接 §24） |
+| 主 agent 处理 | M4 路线 A 完成并独立复核通过；可回到复现里程碑（M5 径向 / M8 图表 / 用 route A 跑论文规模波速） |
+| 待 evaluator 动作 | —（下一交接后） |
 
 ---
 
@@ -510,6 +510,13 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - **gpu 构建**：`pytest tests/test_spatial_fft_plan.py` = **27 passed**；`pytest -q` = 3661；`cargo test` 67 /
   `--features gpu` 263；`check_rust.py` EXIT=0；`phase0` bit-identical；`ruff` 通过；`pyright` 基线 1165。
 - 文档 §11.3b「未启用即运行会显式报错」现于**默认构建**亦成立。
+
+### 21.9 S3 / M4 路线 A 闭环（主 agent）
+
+§23 = **APPROVED**。M4 路线 A（S0–S3）全部闭环：默认关闭的 `migration_execution="fft"` GPU cuFFT 迁移路径可用，
+端到端与 CPU CSR 在 f32 容差内一致（~1.5e-7），消除 CSR 构建墙/内存墙，**默认（非 gpu）与 `--features gpu` 两种构建**
+门禁均通过。残余（非阻断）见 §21.4/§23.3：`fft` 下 hooks/history/`restore→run`/`wrap`/`include_center`/不规则掩膜/
+大域性能未测；`MigrationFFTPlan` 未公开导出。evaluator 建议 CI/交付同时覆盖两种构建。后续里程碑（M5/M7/M8）另立复核。
 
 ---
 
@@ -1454,3 +1461,50 @@ evaluator 复跑全部门禁 **全绿**。§14 的 NOT APPROVED 解除。S0/S1/S
   并确认 gpu 构建下 e2e 仍一致。
 
 > 审查期间未改任何仓库源码；evaluator 临时替换的 `_engine_rs` 扩展已还原为 gpu 构建。
+
+## §23 — M4 §21.8 修复复核回执（evaluator）
+
+### 23.0 裁定
+
+**APPROVED（M4 路线 A S3）**。修复提交 `38f80b6` 闭环 §22 阻断项：默认（非 gpu）构建现显式拒绝
+`migration_execution="fft"`，空 CSR 不再可能落到 CPU 静默运行；测试与构建能力对齐。evaluator 在
+**默认非 gpu 与 `--features gpu` 两种构建**分别复跑，全部门禁通过。§22 的 NOT APPROVED 解除。
+
+> 独立性声明：evaluator 先后 `maturin develop`（默认，无 gpu）与 `maturin develop --features
+> "gpu,extension-module"` 重建扩展，分别复跑；结束状态为 gpu 构建（103647136 B），`git status` 干净
+> （仅本回执改动）。
+
+### 23.1 修复目标核对
+
+| 项 | 结果 | 独立证据 |
+|---|---|---|
+| 非 gpu 构建显式拒绝 `fft` | **DONE** | `from_parts` 现 `return Err(PyValueError("... requires a gpu-enabled build"))`；实测 build → `ValueError` |
+| 测试与能力对齐 | **DONE** | `_gpu_unavailable()` + skip；`test_migration_execution_fft_requires_gpu_path` 接受构建或运行报错 |
+| 文档 §11.3b 承诺在默认构建亦成立 | **DONE** | 默认构建下 `fft` 构建即报错 |
+
+### 23.2 两构建门禁证据
+
+- **默认（非 gpu）构建** `maturin develop`：
+  - `migration_execution="fft"` 构建 → `ValueError: migration_execution='fft' requires a gpu-enabled build`；
+  - `pytest tests/test_spatial_fft_plan.py` = **25 passed, 2 skipped, 0 failed**（修复前为 1 failed）。
+- **gpu 构建** `maturin develop --features "gpu,extension-module"`：
+  - `pytest tests/test_spatial_fft_plan.py` = **27 passed**（含 `test_migration_execution_fft_matches_csr_on_device`
+    真实执行，非 skip；GPU-FFT vs CPU-CSR `max_rel ~1.5e-7`）；
+  - `pytest -q` = **3661 passed**；`ruff check src demos tests` = All passed；
+  - `scripts/phase0_baseline.py --check` = **all bit-identical, EXIT=0**；
+  - `scripts/check_rust.py` = **EXIT=0**（`test --lib` 67 passed）；`cargo test --features gpu` = **263 passed**。
+
+### 23.3 残余（非阻断）
+
+- §21.4 所列`fft` 下 hooks/history、`restore→run`、`wrap=True`、`include_center=True`、不规则掩膜、
+  大域/大核性能仍未测。
+- `MigrationFFTPlan`/`build_fft_migration_plan` 仍未入 `__all__`（公开面仅 `migration_execution`），
+  与 §13.7 的收敛一致；如后续要公开再补 docs。
+
+### 23.4 建议
+
+- 在 CI/交付脚本中**同时**覆盖默认与 `--features gpu` 两种构建的 `pytest`，避免此类「构建能力相关」
+  行为只在单构建被验证（本次缺口正是由此产生）。
+- M4 路线 A 的剩余里程碑（M5 径向/M6 海南接入、M7 GPU 正确性/性能）按计划另立复核。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。§22 的 NOT APPROVED 已由本次修复解除。

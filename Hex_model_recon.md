@@ -283,6 +283,7 @@
      - **实施（2026-09-29，用户确认 GPU cuFFT 路径）**：分阶段 S0–S4（见设计 §9）。
        **S0 已验**：cudarc 加 `cufft` feature + `rust/src/gpu/cufft.rs` 探针；`cargo test --features gpu gpu::cufft` = 1 passed（cuFFT 线性卷积 vs CPU 一致）；未改运行路径/契约。**S1（契约/前端）、S2（executor 接线）、S3（会话/文档/门禁）待做**；属高风险，需独立复核。
    3. 纳入根 `EVALUATE.md` 轮次。
+- **状态（2026-09-29）**：**路线 A 已选定并实现、独立复核通过**（复现通道 `EVALUATE.md` §17/§18/§19/§20/§21/§22/§23，最终 §23 = APPROVED）。产物：`migration_execution="fft"`（默认关闭，确定性 GPU）——GPU cuFFT 逐平面归一化卷积；模板/标签前端计划；`"fft"` 跳过 CSR 折叠；双构建门禁通过。设计/方案见 `results/M4_routeA_productization_design.md`。残余（非阻断）：`fft` 下 hooks/history/`restore→run`/`wrap`/`include_center`/不规则掩膜/大域性能未测；`MigrationFFTPlan` 未公开导出。
 
 ### M5 — 径向释放优化（中）
 - **目标**：以声明式钩子 `Op.add` 实现逐周/逐代释放；计算 ≥90% 覆盖面积与 efficiency；对照论文 Table 1 的**定性排序**（归巢驱动效率远高）。

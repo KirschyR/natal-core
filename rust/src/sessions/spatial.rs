@@ -384,6 +384,14 @@ impl SpatialSession {
                 "spatial GPU path needs one ecology column and variant id per deme",
             ));
         }
+        if self.migration_plan.is_some() && self.blueprint.stochastic {
+            // Route A is deterministic-only; fail loudly instead of silently
+            // running the CSR stochastic path with an unused FFT plan.
+            return Err(PyValueError::new_err(
+                "migration_execution='fft' supports deterministic models only \
+                 (stochastic spatial migration stays on the CSR path)",
+            ));
+        }
         let context = crate::gpu::context::GpuContext::new(0).map_err(map_lifecycle_error)?;
         let ind_host: Vec<f32> = self.state_ind.iter().map(|value| *value as f32).collect();
         let sperm_host: Vec<f32> = self.state_sperm.iter().map(|value| *value as f32).collect();

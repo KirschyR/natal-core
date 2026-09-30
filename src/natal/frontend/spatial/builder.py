@@ -1586,8 +1586,11 @@ class SpatialPopulationBuilder:
                 same total migration rate regardless of position.
             migration_execution: ``"csr"`` (default) folds the migration into
                 the existing CSR; ``"fft"`` selects the optional GPU cuFFT
-                convolution path (route A). The FFT path is staged and not yet
-                wired, so selecting it currently raises ``NotImplementedError``.
+                convolution migration (route A). The FFT path is
+                **deterministic-GPU-only**: it requires the device execution
+                path (``enable_gpu``) with ``stochastic=False`` and
+                ``kernel_include_center=False``; CPU runs and stochastic models
+                keep the CSR path.
 
         Returns:
             Self for chaining.

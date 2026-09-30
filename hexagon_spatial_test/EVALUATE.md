@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §18（S2b 设备级 FFT 内核）= **APPROVED** |
-| 待回执 | §19（S2c 会话/执行器/前端接线）→ 期望 §20 |
-| 主 agent 处理 | S0–S2c 完成；S2c 端到端 GPU-FFT vs CPU-CSR max_rel **1.5e-7**；交接区追加 §19 |
-| 待 evaluator 动作 | 独立核对 §19 的接线正确性、默认关闭、数据传递与残余边界 |
+| 最近回执 | §20（S2c 接线）= **APPROVED**（已按 §20.5 修 F1、文档化 F3，见 §19.7） |
+| 待回执 | —（下一交接为 S3 完成后的 §21） |
+| 主 agent 处理 | S0–S2c 闭环；进入 **S3**（中英文档、跳过 CSR 折叠、hooks/history/restore 覆盖） |
+| 待 evaluator 动作 | —（S3 交接后） |
 
 ---
 
@@ -462,6 +462,17 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 
 ### 19.5 残余（未做，S3）
 - 中英文档（`docs/{zh,en}`）；`"fft"` 跳过 CSR 折叠；`fft`+`stochastic` 守卫；hooks/history/restore 覆盖；大域与性能。
+
+### 19.7 审查后修复（主 agent，响应 §20.5）
+- **F1（中，首要残余，已修）**：`"fft"` + `stochastic` 原先被静默忽略。现两处显式守卫：
+  - 前端 `population.py` 在 `"fft"` 构建时若任一 deme `stochastic` → `NotImplementedError`（fail-fast）；
+  - 会话 `spatial.rs::enable_gpu` 若计划存在且 `blueprint.stochastic` → `PyValueError`（设备侧兜底）。
+  - `builder.migration` 的 `migration_execution` docstring 注明「**deterministic-GPU-only**」。
+  - 新增测试 `test_migration_execution_fft_rejects_stochastic`。
+- **F3（低，已文档化）**：CPU / 未 `enable_gpu` 时 `"fft"` 仍走 CSR（与设计一致），已写入 `migration_execution` docstring。
+- **F2（低，残余，留 S3）**：`"fft"` 仍先折叠 CSR；hooks/history、`restore→run`、wrap/`include_center`/不规则/大域性能未测。
+- 复验：`pytest tests/test_spatial_fft_plan.py` = **26 passed**；`cargo fmt --check`、`clippy --features gpu -D warnings`、
+  `cargo test --features gpu` = 263、`scripts/check_rust.py` = EXIT=0、`phase0` bit-identical、`ruff` 通过、`pyright` 基线 1165。
 
 ---
 
@@ -1268,5 +1279,73 @@ evaluator 复跑全部门禁 **全绿**。§14 的 NOT APPROVED 解除。S0/S1/S
   `MigrationFFTPlan` 前端传递）与 **S3**（中英文档 + 全量门禁）未做。
 - `wrap=True`（需 circular conv）、`include_center=True`、不规则掩膜、多类更大 P、随机路径、性能均未验。
 - S2c 接线后需重跑全量门禁并复核「restore→run」状态往返与预算失败路径。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。
+
+## §20 — M4 路线 A S2c 接线 §19 独立审查回执（evaluator）
+
+### 20.0 裁定
+
+**APPROVED（M4 路线 A S2c：executor/session/前端接线）**。高风险（产品代码）。`"fft"` 现为可用、
+默认关闭的可选路径；确定性 GPU-FFT 与 CPU-CSR 的**端到端**等价已在设备上验证；`"csr"` 路径未改、
+`phase0` bit-identical；全部硬门禁通过。`"fft"`+`stochastic` 计划被静默忽略（**已披露**，S3 守卫）
+列为首要残余，属阶段性遗留、不阻断本次接线。
+
+> 独立性声明：evaluator 在当前提交（`06991fb`，工作树干净）复跑全门禁并在 RTX 5090 上运行端到端 FFT 用例。
+
+### 20.1 逐条独立核对（对应 §19.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | 接线正确性（`enable_gpu`/`run_gpu_tick` 选择、`"csr"` 未变） | **PASS**（§20.2） |
+| 2 | 数据传递 `MigrationFFTPlan → plan → backend → from_parts → FftMigrator`、stub 一致 | **PASS**（§20.3） |
+| 3 | 默认关闭；不选 `"fft"` 行为不变、`phase0` bit-identical | **PASS**（§20.4） |
+| 4 | 残余（`fft`+stochastic 等） | **已披露**（§20.5） |
+
+### 20.2 接线核对
+
+- `spatial.rs:397-410`：`enable_gpu` 有 `migration_plan` → `enable_fft_migration`（否则原 CSR 缓存预算）。
+- `spatial.rs:1338-1347`：迁移步位置与 CSR 相同（生命周期 tick 后、`state_tick` 递增前；hook-stop 抑制迁移一致）；
+  选择序 `stochastic → stochastic CSR`；`!stochastic && has_fft → fft`；否则 CSR。
+- `executor.rs`：`fft: Option<FftMigrator>` 字段、`enable_fft_migration`（校验 `rows*cols==n_batch` + 显存预算
+  `ensure_memory_budget`）、`has_fft_migration`、`migrate_tick_fft`（上传 rate、`migrate_inplace`、双缓冲 swap）；
+  `new`/`reconfigure` 置 `None`。`"csr"` 路径（`migrate_tick`）一行未改。
+
+### 20.3 数据传递与 stub
+
+- `population.py:788-818`：`"fft"` 时校验 `topology`/`migration_kernel` 存在、拒绝 `kernel_include_center=True`，
+  构建 `build_fft_migration_plan`，打包 `(rows, cols, kernel f32, z f32)` → `_fft_migration_plan`；
+  `build_spatial_backend` 传 `migration_plan=self._fft_migration_plan`（`csr` 为 `None`）。
+- `rust_backend.py` 透传；`spatial.rs::from_parts` 签名新增 `migration_plan=None`，映射为 `MigrationPlanHost`。
+- `src/natal/_engine_rs.pyi`（**手工维护** stub，非 `generate_init_pyi` 生成）已同步：
+  `migration_plan: tuple[int, int, list[float], list[float]] | None = None`，与 pyo3 `Option<(usize,usize,Vec<f32>,Vec<f32>)>` 一致。
+
+### 20.4 门禁与端到端（当前提交）
+
+- `cargo fmt -- --check`、`scripts/check_rust.py` = **EXIT=0**（fmt/clippy/check/`test --lib` 67 passed）。
+- `cargo clippy --features gpu -- -D warnings` = **PASS**；`cargo test --features gpu` = **263 passed**
+  （含 `fft_migration_tick_matches_host_reference`，`stay_after=true`，逐元素对齐 CPU CSR）。
+- `scripts/phase0_baseline.py --check` = **all bit-identical，EXIT=0**。
+- `pytest -q`（设 CUDA env）= **3659 passed**；`tests/test_spatial_fft_plan.py` = **25 passed**，其中
+  `test_migration_execution_fft_matches_csr_on_device` **实际执行（非 skip）**：5×5 k=5 确定性 3 tick，
+  GPU-FFT vs CPU-CSR `max_rel < 1e-4`（实测 ~1.5e-7）。
+- `ruff check src demos tests` = **All checks passed**。
+
+### 20.5 发现（非阻断；已披露）
+
+- **F1（中，首要残余）**：`"fft"` + `stochastic=True`（`setup` 默认值）时，`run_gpu_tick` 走
+  `migrate_tick_stochastic`，**静默忽略** FFT 计划；且 `enable_gpu` 仍构建 `FftMigrator` 并计入预算（浪费）。
+  与项目「不得静默回退」原则相悖。§19.4.4/§19.5 已披露并列为 S3。建议 S3 尽早加显式守卫
+  （`migration_execution=="fft" and stochastic` → `raise`），并在 `migration_execution` docstring 注明「仅确定性 GPU 路径」。
+- **F2（低，残余）**：`"fft"` 仍先折叠 CSR（构建墙未消除）；hooks/history、`restore→run`、`wrap`/`include_center`/
+  不规则掩膜/大域性能未测（§19.4.4/§19.5）。
+- **F3（低，信息）**：CPU（未 `enable_gpu`）时 `"fft"` 走 CSR——与设计「CPU 保持 CSR golden，不做 CPU FFT」
+  一致，但应在文档/`migration_execution` 说明中显式写明，避免误解。
+
+### 20.6 范围 / 残余
+
+- 本批准仅覆盖 S2c 确定性接线；**S3**（中英文档、`"fft"` 跳过 CSR 折叠、`fft`+stochastic 守卫、
+  hooks/history/restore 覆盖、大域与性能）未做。
+- 建议 S3 完成前不将 `migration_execution="fft"` 作为推荐用法或默认；默认 `"csr"` 不变。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。

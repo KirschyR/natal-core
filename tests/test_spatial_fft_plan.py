@@ -158,6 +158,42 @@ def test_migration_execution_default_csr_builds():
     assert _builder("csr").build() is not None
 
 
+def test_migration_execution_fft_rejects_stochastic():
+    import natal as nt
+
+    species = nt.Species.from_dict(
+        name="SpatialFFTstoch", structure={"chr1": {"loc": ["WT", "Dr"]}}
+    )
+    builder = (
+        nt.SpatialPopulation.builder(
+            species,
+            n_demes=9,
+            topology=HexGrid(rows=3, cols=3, wrap=False),
+            pop_type="discrete_generation",
+        )
+        .setup(name="d", stochastic=True)
+        .initial_state(
+            individual_count={
+                "female": {"WT|WT": 500.0},
+                "male": {"WT|Dr": 500.0},
+            }
+        )
+        .reproduction(eggs_per_female=50.0)
+        .competition(
+            juvenile_growth_mode="beverton_holt",
+            carrying_capacity=1000,
+            low_density_growth_rate=6,
+        )
+        .migration(
+            kernel=build_gaussian_kernel(HexGrid, size=3, sigma=1.5),
+            migration_rate=0.5,
+            migration_execution="fft",
+        )
+    )
+    with pytest.raises(NotImplementedError):
+        builder.build()
+
+
 def test_migration_execution_fft_builds_with_plan():
     pop = _builder("fft").build()
     assert pop is not None

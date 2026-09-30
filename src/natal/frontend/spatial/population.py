@@ -803,6 +803,12 @@ class SpatialPopulation:
                     "migration_execution='fft' does not support "
                     "kernel_include_center=True"
                 )
+            if any(
+                bool(getattr(deme.config, "stochastic", False)) for deme in self._demes
+            ):
+                raise NotImplementedError(
+                    "migration_execution='fft' supports deterministic models only"
+                )
             from natal.frontend.spatial.migration import build_fft_migration_plan
 
             plan = build_fft_migration_plan(

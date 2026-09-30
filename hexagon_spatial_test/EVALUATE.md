@@ -27,10 +27,10 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §12（M4 路线 A §11）= **APPROVED**（仅原型/设计） |
-| 最近回执 | §14/§15（路线 A S0+S1+S2a）= **NOT APPROVED**（F1 `cargo fmt`；已修，见 §13.7） |
-| 待回执 | §13（含 §13.7 修复）再复核 → 期望 §16 |
-| 主 agent 处理 | S0+S1+S2a + 修复 F1（`cargo fmt`）/F2（收敛导出）/F3（测试过滤）；`check_rust.py` EXIT=0 |
-| 待 evaluator 动作 | 复跑 `scripts/check_rust.py` 与受影响检查，确认 F1 闭环 |
+| 最近回执 | §16（路线 A S0+S1+S2a）= **APPROVED** |
+| 待回执 | §17（S2b 设备级 FFT 迁移内核）→ 期望 §18 |
+| 主 agent 处理 | S0+S1+S2a 闭环；S2b 设备级内核完成，交接区追加 §17 |
+| 待 evaluator 动作 | 独立核对 §17 的 `gpu_fft_migrate` 与 CPU CSR 等价性、默认关闭 |
 
 ---
 
@@ -387,6 +387,46 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 复验：`pytest tests/test_spatial_fft_plan.py` = **24 passed**；`ruff` 通过；`pyright` 新行无报错（仅既有）；
 `cargo fmt --check` = EXIT=0；`scripts/check_rust.py` = EXIT=0。请 evaluator 复跑 `scripts/check_rust.py` 与
 受影响检查（预期转 APPROVED）。
+
+### 13.8 S0+S1+S2a 闭环（主 agent）
+
+§16 = **APPROVED**（M4 路线 A S0+S1+S2a 全部闭环；S2b/S3 不在范围）。后续进入 **S2b**（executor cuFFT
+内核 + 会话接线 + 预算），再提交接送评。
+
+## §17 — M4 路线 A：S2b 设备级 FFT 迁移内核（请复核）
+
+### 17.1 改动清单（产品代码，`gpu` feature 内、默认不启用）
+- 新增 `rust/src/gpu/fft_migrate.rs`：`gpu_fft_migrate(...)` —— 确定性空间迁移的**逐平面归一化卷积**（cuFFT）：
+  NVRTC `scatter_g`（`g = rate·plane/Z`，零填充到 `(fr,fc)`）、`complex_mul`（乘预算核谱并折叠 `1/(fr·fc)`）、
+  `combine`（`plane·(1−rate) + 裁剪后的卷积`）；外加单测 `fft_migrate_matches_csr`。
+- `rust/src/gpu/mod.rs`：导出 `pub mod fft_migrate;`。
+- 设计文档 `M4_routeA_productization_design.md` §10（S2b 方案 + 状态）、§9。
+- **未接任何运行路径/会话/契约**；`migration_execution="fft"` 仍显式 `NotImplementedError`。
+
+### 17.2 行为与依据
+- 依据 §3.2c：确定性迁移 = 逐平面归一化卷积（ind0/ind1/sperm 各按性别·年龄 rate；virgin/stored 记账对 ind 平面抵消）。
+- 布局：输入 batch-minor `(2,A,Z,B)`/`(A,Z,Z,B)`；`rate` deme-major `(n,2,A)`；`Z` 为 `K'⊛m`。
+- 正确性对齐：与 `crate::kernels::spatial::migrate_csr_deterministic`（既有 CPU CSR 算子）逐元素比较。
+
+### 17.3 自测证据（本机 RTX 5090）
+- `cargo test --features gpu gpu::fft_migrate` → **1 passed**（`fft vs csr max relative error < 1e-4`）。
+  调试中修正两处：信号不该被 `R` 偏移（否则与裁剪相消）、上传核须去中心（`K'`，中心由 `(1−rate)` 承担）。
+- `cargo test`（默认）= **67 passed**；`cargo test --features gpu` = **262 passed**。
+- `cargo clippy --features gpu -- -D warnings` = **PASS**；`cargo fmt -- --check` = **EXIT=0**；
+  `scripts/check_rust.py` = **EXIT=0**；`scripts/phase0_baseline.py --check` = **bit-identical，EXIT=0**。
+
+### 17.4 请 evaluator 核对点
+1. **等价性**：`gpu_fft_migrate` 是否严格等价 `migrate_csr_deterministic`（确定性、含边界；布局/索引：ind 平面
+   `(sex·A+age)·Z+z`、sperm 平面 `(age·Z+fz)·Z+mz`、`rate` 索引 `sex·A+age`）。
+2. **数值对齐**：信号置左上 + 裁剪取 `R` 是否正确 'same'；核去中心、`Z` 口径是否与 CSR 一致；
+   `1/(fr·fc)` 折叠是否恰当。
+3. **边界与默认关闭**：该模块编译于 `gpu` feature、未被任何运行路径引用（grep 应无调用者）。
+4. **未覆盖面**：随机路径、`wrap=True` 重复目的地、`include_center=True`、不规则掩膜、多类=更大 P、性能。
+
+### 17.5 残余（未做）
+- **S2c**：`GpuExecutor`/`SpatialSession`/`schema` 接线（复用 executor 的 stream/缓冲、预算、`enable_gpu` 选择）、
+  `SpatialPopulation` 把 `MigrationFFTPlan` 传到 backend；**S3**：中英文档 + 全量门禁。均未做，默认关闭。
+- `gpu_fft_migrate` 当前自建 context/stream（便于隔离测试），S2c 重构为复用执行器上下文。
 
 ---
 
@@ -1090,3 +1130,45 @@ violation」给出 NOT APPROVED。修复为一次性格式化，代价极低。
   S2b 接线时需补「restore→run」状态往返用例。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。§14 的 F1 修复后即可转 APPROVED。
+
+## §16 — M4 §13.7 修复复核回执（evaluator）
+
+### 16.0 裁定
+
+**APPROVED（M4 路线 A S0+S1+S2a）**。修复提交 `24bbcc7` 全部闭环 §14/§15 阻断与非阻断项；
+evaluator 复跑全部门禁 **全绿**。§14 的 NOT APPROVED 解除。S0/S1/S2a 均**默认关闭、未接运行路径**，
+未改 CPU 数值语义（`phase0` bit-identical）。S2b/S3 仍未做，不在范围。
+
+> 独立性声明：evaluator 在当前提交（`24bbcc7`，工作树干净）重跑全部硬门禁；命令见 §16.2。
+
+### 16.1 修复目标核对
+
+| 项 | 结果 | 独立证据 |
+|---|---|---|
+| F1 `cargo fmt --check`（阻断） | **DONE** | `cd rust && cargo fmt -- --check` → **EXIT=0**；`scripts/check_rust.py` → **EXIT=0** |
+| F2 公开面收敛（不导出 FFT 构件） | **DONE** | `migration.__all__` 已移除 `MigrationFFTPlan`/`build_fft_migration_plan`，仍可按模块路径导入 |
+| F3 测试期望按 `>0` 过滤零权重 | **DONE** | `test_fft_plan_weights_match_csr` 改为 `if plan.kernel[kr,kc] <= 0.0: continue` |
+
+### 16.2 全门禁结果（当前提交）
+
+- `cargo fmt -- --check` = **EXIT=0**；`scripts/check_rust.py` = **EXIT=0**（fmt/clippy/check/`test --lib`
+  **67 passed**；rust-analyzer 可选门禁未安装，按规范跳过）。
+- `cargo clippy --features gpu -- -D warnings` = **PASS**；`cargo test --features gpu` = **261 passed**。
+- `pytest -q`（设 `LD_LIBRARY_PATH` 含 `/opt/conda/lib` 与 cu13）= **3658 passed**；
+  `tests/test_spatial_fft_plan.py` = **24 passed**。
+- `ruff check src demos` = **All checks passed**。
+- `scripts/phase0_baseline.py --check` = **all scenarios bit-identical，EXIT=0**。
+- `pyright`（改动文件）= 7 errors，全部落在**未改动的既有行**（`migration.py:45/46/78/79/114`），
+  新代码（`:465+`、S2a `population.py:700/786-797`）**无报错**；`builder.py`、新测试无报错。
+- `generate_init_pyi.py` 无 diff；`tests/test_phase0_shims.py` 通过。
+
+### 16.3 残余（非阻断）
+
+1. `migration_execution`（默认 `"csr"`）为**新增公开 kwarg**，`docs/{zh,en}` 与
+   `MigrationFFTPlan`/`build_fft_migration_plan` 文档按 §13.7 随 **S3** 补齐——S3 前该 kwarg 仅 `"csr"`
+   可用（`"fft"` 显式 `NotImplementedError`），属分阶段占位。
+2. **S2b**（executor cuFFT 内核 + 会话接线 + 预算）、**S3**（会话开关文档/全量门禁）未做；
+   `migration_execution` 的 clone/definition 往返语义未专门测试（当前仅 csr 可用，暂无影响）。
+3. `wrap=True` 重复目的地、`include_center=True`、不规则掩膜、多类批处理未验（§13.5）。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。

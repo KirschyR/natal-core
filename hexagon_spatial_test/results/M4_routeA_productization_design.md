@@ -114,6 +114,33 @@ sperm_new = sperm·(1−rate_f) + K'⊛(rate_f·sperm/Z)  # sperm plane（每 A�
 - 缓存持久化格式与失效策略。
 - 是否将路线 A 纳入 M5/M6（径向/海南）的默认执行。
 
+## 10. S2b 实现方案：设备级 FFT 迁移（GPU cuFFT）
+
+依据 §3.2c（确定性迁移 = 逐平面归一化卷积）。设备态 batch-minor：`ind (2,A,Z,B)`、`sperm (A,Z,Z,B)`；
+平面数 `P = 2·A·Z + A·Z·Z`。新增模块 `rust/src/gpu/fft_migrate.rs`（`gpu` feature 内），供 `GpuExecutor` 调用。
+
+**预计算（每拓扑一次）**：`R=(k-1)/2`、`fr=rows+k-1`、`fc=cols+k-1`、`spec_n=fr·(fc/2+1)`；
+主机端 `Kpad`（`(fr,fc)`，把 `K'` 放左上角）→ 其 r2c 谱 `KS`（`(spec_n,)` complex），并对 `KS` **乘 `1/(fr·fc)`**（逆变换归一）。
+
+**每 tick（每平面）四步**：
+1. `scatter_g`（NVRTC）：`pad[i*fr*fc + r*fc + c] = rate_p(deme)·plane[deme] / Z[deme]`（`r<rows,c<cols`，其余 0）；
+   `rate_p` 由紧凑 `rate(deme,2,A)` 与平面描述（sex,age）索引。
+2. `r2c`（cuFFT `plan_many`：`batch=P`，`idist=fr*fc`，`n={fc,fr}`）→ `sig_spec (P,spec_n)`。
+3. 复数逐点乘（NVRTC）：`spec *= KS`。
+4. `c2r` → `padded_real (P,fr,fc)`；`combine_crop`（NVRTC）：`plain_out[d] = plane[d]·(1-rate_p(d)) + padded_real[deme at (R+r,R+c)]`。
+
+**预算/内存**：不再需要 CSR 迁移缓存 `4·nnz·A·Z²`；改为 `O(P·fr·fc)`（padded 输入 + 谱 + padded 输出）
+≈ `O(P·(rows+2R)·(cols+2R)·(2 实数 + fit)`——与 `nnz` 解耦。`ensure_migration_budget` 的 FFT 分支按此量估算，
+超预算**显式报错**。
+
+**验证（S2b 单测，隔离）**：小网格 fixture（如 `rows=4,cols=3,A=1,Z=2`），`ind`/`sperm` 随机；
+CPU 参照 = `crate::kernels::spatial::migrate_csr_deterministic`（用同核折叠的 CSR，deme-major↔batch-minor 转换）；
+GPU-FFT 结果与之逐元素相对误差 ≤ f32 档（~1e-5）。
+
+**接线（S2c）**：`GpuExecutor` 增 `migration_plan` 字段与 `migrate_tick_fft`；`SpatialSession::enable_gpu`
+在计划存在时构建 FFT 执行器；`SpatialPopulation` 在 `migration_execution="fft"` 时把 `MigrationFFTPlan` 传到 backend →
+session → executor；默认 `"csr"` 路径一行不改。
+
 ## 9. 实施决定与分阶段计划（2026-09-29，用户确认）
 
 **决定**：路线 A **GPU FFT 路径 = cuFFT，经 `cudarc` 绑定**（cudarc 0.19.9 已有 `cufft` feature；容器内 `libcufft.so.12` 就位；**不新增 crate**）。CPU 保持 CSR golden，不做 CPU FFT。设备态为 batch-minor `(2,A,Z,B)`，每个（性别,年龄,ztype）平面在 B 上连续，适合逐平面 2D FFT。
@@ -136,4 +163,8 @@ sperm_new = sperm·(1−rate_f) + K'⊛(rate_f·sperm/Z)  # sperm plane（每 A�
 
 **S2a 状态（2026-09-29，已验）**：`builder.py`/`population.py` 新增 `migration_execution: "csr"|"fft"`（默认 `csr`），纳入归一化 migration 关键字；`"fft"` 暂显式 `NotImplementedError`（S2b 接线）。全量 `pytest -q` = 3658 passed。
 
-**S2b（executor cuFFT 内核 + 会话接线 + 预算）与 S3 待做。** 关键简化见 §3.2c：确定性迁移 = 逐平面归一化卷积，GPU kernel 无需复刻 virgin/stored 记账。
+**S2b 状态（2026-09-29，已验）**：新增 `rust/src/gpu/fft_migrate.rs`（`gpu` feature）——设备级「逐平面归一化卷积」：NVRTC `scatter_g`/`complex_mul`/`combine` + cuFFT r2c/c2r，自建 context/stream、host 切片进出。单测 `fft_migrate_matches_csr` 对 `crate::kernels::spatial::migrate_csr_deterministic` 逐元素对齐（f32 相对误差 <1e-4）。**未接线**（S2c）；默认不启用。门禁：`cargo test` 67 / `--features gpu` 262、`clippy --features gpu -D warnings`、`cargo fmt --check`、`scripts/check_rust.py` EXIT=0、`phase0` bit-identical。
+
+**S2c（executor 接线 + 预算 + 会话/前端传递）与 S3 待做。**
+
+**S2c 设计要点**：`gpu_fft_migrate` 目前自建 context/stream（便于隔离测试），接线时重构为接收 executor 的 stream/设备缓冲；`GpuExecutor` 增 `migration_plan` 与 `migrate_tick_fft`，`SpatialSession::enable_gpu` 在计划存在时构建 FFT 执行器，预算按 `O(P·(rows+2R)(cols+2R))` 估算。

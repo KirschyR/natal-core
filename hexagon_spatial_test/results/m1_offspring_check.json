@@ -1,0 +1,45 @@
+{
+  "cases": [
+    {
+      "dc": 1.0,
+      "gcr": 0.0,
+      "herr": 0.0,
+      "max_abs_diff": 0.0,
+      "max_rel_diff": 0.0,
+      "natal_full_row_sums_ok": true,
+      "paper_col_sums_are_1": false
+    },
+    {
+      "dc": 0.9,
+      "gcr": 0.0,
+      "herr": 0.0,
+      "max_abs_diff": 0.0,
+      "max_rel_diff": 0.0,
+      "natal_full_row_sums_ok": true,
+      "paper_col_sums_are_1": false
+    },
+    {
+      "dc": 0.5,
+      "gcr": 0.0,
+      "herr": 0.0,
+      "max_abs_diff": 0.0,
+      "max_rel_diff": 0.0,
+      "natal_full_row_sums_ok": true,
+      "paper_col_sums_are_1": false
+    }
+  ],
+  "natal_index": {
+    "dd": 3,
+    "dr": 4,
+    "dw": 1,
+    "rw": 2,
+    "ww": 0
+  },
+  "paper_order": [
+    "dd",
+    "dw",
+    "ww",
+    "rw",
+    "dr"
+  ]
+}

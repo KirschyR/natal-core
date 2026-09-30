@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §23（M4 路线 A S3 §21.8）= **APPROVED**（路线 A S0–S3 全部闭环） |
-| 待回执 | —（后续 M5/M7/M8 或 M2 论文规模另立交接 §24） |
-| 主 agent 处理 | M4 路线 A 完成并独立复核通过；可回到复现里程碑（M5 径向 / M8 图表 / 用 route A 跑论文规模波速） |
-| 待 evaluator 动作 | —（下一交接后） |
+| 待回执 | §24（M1 遗传一步对照）→ 期望 §25 |
+| 主 agent 处理 | M1 homing 一步对照（natal `offspring_tensor` == 论文 `mats`，max_abs=0）；M5 勘察完成，待实施 |
+| 待 evaluator 动作 | 独立核对 §24 的映射与等价性 |
 
 ---
 
@@ -517,6 +517,30 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 端到端与 CPU CSR 在 f32 容差内一致（~1.5e-7），消除 CSR 构建墙/内存墙，**默认（非 gpu）与 `--features gpu` 两种构建**
 门禁均通过。残余（非阻断）见 §21.4/§23.3：`fft` 下 hooks/history/`restore→run`/`wrap`/`include_center`/不规则掩膜/
 大域性能未测；`MigrationFFTPlan` 未公开导出。evaluator 建议 CI/交付同时覆盖两种构建。后续里程碑（M5/M7/M8）另立复核。
+
+## §24 — M1：遗传系统一步后代对照（natal `offspring_tensor` vs 论文 `mats`）
+
+### 24.1 改动清单（复现脚本/数据，未改产品代码）
+- `repro/m1_offspring_check.py`；`results/M1_genetics_report.md`；`results/m1_offspring_check.json`。
+
+### 24.2 行为与依据
+- 论文 `drive_generator.m`（homing）把驱动烘焙成单张 `mats (gn², gn)`：`M[k,i,j]=mats[k*5+i,j]`。
+- natal 编译后的 `offspring_tensor P[mother,father,offspring]`（驱动已入减数分裂/融合表，实测应用 `HomingDrive` 后
+  表变化）。映射：`dd→Drive|Drive, dw→WT|Drive, ww→WT|WT, rw→WT|Res, dr→Drive|Res`（natal 另有 `Res|Res`，论文未用）。
+- 比较 natal `P` 的 5 型子张量 `S[i,j,k]` 与 `M[k,i,j]`。
+
+### 24.3 自测证据
+- `python repro/m1_offspring_check.py`：dc=1.0 / 0.9 / 0.5 → **max_abs 差 = 0.0**（逐元素完全相等）；natal 全表行和=1。
+- 即 natal 的分层遗传表示（meiosis + 修饰器 + `(Z,Z,Z)`）**精确表达论文 homing 驱动的一步后代算子**。
+
+### 24.4 请 evaluator 核对点
+1. `paper_homing_mats` 是否忠实翻译 `drive_generator.m`（含转置与 fitness cost）；基因型映射与 natal ztype 序是否正确。
+2. 「精确相等」是否可信：natal `offspring_tensor` 是否确已烘焙 dc；5 型子集外（`Res|Res`）与列和不为 1 的说明是否恰当。
+3. natal 应用 presets 的构建路径是否与论文同参（`dc`，无 resistance 形成、无 fitness cost）。
+
+### 24.5 残余
+- 仅 homing（一基因座 5 型）；TARE/TADE/CifAB/2-locus(25)/Wolbachia(2) 未逐一映射；`ddfitness`/性别特异未扫。
+- 未做 natal `run` 一步新生儿分布 vs 论文 `renew_function` 的端到端对照（本阶段在**表级**验证等价）。
 
 ---
 

@@ -169,6 +169,7 @@ fn make_session(
         checkpoints: Vec::<SpatialTickCheckpoint>::new(),
         history_store: None,
         gpu: None,
+        migration_plan: None,
     }
 }
 
@@ -1043,6 +1044,7 @@ fn make_discrete_session(
         checkpoints: Vec::<SpatialTickCheckpoint>::new(),
         history_store: None,
         gpu: None,
+        migration_plan: None,
     }
 }
 

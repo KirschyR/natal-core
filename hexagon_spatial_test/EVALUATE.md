@@ -26,11 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §12（M4 路线 A §11）= **APPROVED**（仅原型/设计） |
-| 最近回执 | §18（S2b 设备级 FFT 内核）= **APPROVED**（已吸收 §18.4 的 F1–F3，见 §17.6） |
-| 待回执 | —（下一交接为 S2c 完成后的 §19） |
-| 主 agent 处理 | S0+S1+S2a+S2b 闭环；进入 **S2c**（executor/session/前端接线 + 预算） |
-| 待 evaluator 动作 | —（S2c 交接后） |
+| 最近回执 | §18（S2b 设备级 FFT 内核）= **APPROVED** |
+| 待回执 | §19（S2c 会话/执行器/前端接线）→ 期望 §20 |
+| 主 agent 处理 | S0–S2c 完成；S2c 端到端 GPU-FFT vs CPU-CSR max_rel **1.5e-7**；交接区追加 §19 |
+| 待 evaluator 动作 | 独立核对 §19 的接线正确性、默认关闭、数据传递与残余边界 |
 
 ---
 
@@ -434,6 +433,35 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - **F3**：设计 §10 已标注「S2b 隔离版（逐平面 host 迭代 + 自建 context） vs S2c 目标版（`plan_many` batch=P + 设备谱乘 + 复用 executor）」。
 - 复验：`cargo test --features gpu gpu::fft_migrate` = **1 passed**（多 fixture × 两种 `stay_after`）；
   `cargo fmt --check`、`clippy --features gpu -D warnings`、`scripts/check_rust.py` = EXIT=0；`phase0` bit-identical。
+
+## §19 — M4 路线 A：S2c 会话/执行器/前端接线（请复核）
+
+### 19.1 改动清单（产品代码；默认关闭，`"fft"` 需显式选择）
+- `rust/src/gpu/fft_migrate.rs`：新增 `FftMigrator`（复用调用方 stream、双缓冲、`plane_base` 偏移）与 `MigrationPlanHost`；kernels 加 `plane_base`；`gpu_fft_migrate` 改为其 host 包装（测试用）。
+- `rust/src/gpu/executor.rs`：新增 `fft: Option<FftMigrator>` 字段、`enable_fft_migration`（含显存预算）、`has_fft_migration`、`migrate_tick_fft`；`new`/`reconfigure` 置 `None`。
+- `rust/src/sessions/spatial.rs`：`SpatialSession` 增 `migration_plan` 字段与 `from_parts` 可选参数；`enable_gpu` 有计划时构建 FFT 迁移器（否则原 CSR 预算）；`run_gpu_tick` 在「确定性且 FFT 就绪」时走 `migrate_tick_fft`。
+- `src/natal/backends/rust/rust_backend.py`：`migration_plan` 透传；`src/natal/_engine_rs.pyi`：构造签名补该参数。
+- `src/natal/frontend/spatial/population.py`：`migration_execution="fft"` 时构建 `MigrationFFTPlan` 并传 backend（**移除占位 `NotImplementedError`**）。
+- 测试：`rust/tests/unit/gpu/executor.rs` 增 `fft_migration_tick_matches_host_reference`；`rust/tests/unit/gpu/spatial_session.rs` fixture 补 `migration_plan: None`；`tests/test_spatial_fft_plan.py` 增端到端用例。
+
+### 19.2 行为与依据
+- 依据 §3.2c（确定性迁移 = 逐平面归一化卷积）。`"fft"` 时 `GpuExecutor` 用 cuFFT 迁移器；`"csr"` 路径一行未改。
+- 预算：有 FFT 计划时按 `O(P·(rows+2R)(cols+2R))` 量级计（`FftMigrator::footprint_bytes`），跳过 CSR 迁移缓存预算。
+
+### 19.3 自测证据（本机 RTX 5090）
+- `cargo test` 67；`cargo test --features gpu` **263 passed**（含 executor 级 `fft_migration_tick_matches_host_reference`）。
+- Python 端到端（5×5,k=5,deterministic,3 ticks）GPU-FFT vs CPU-CSR：**max_rel 1.5e-7**；`tests/test_spatial_fft_plan.py` = **25 passed**。
+- `cargo fmt --check`、`clippy --features gpu -D warnings`、`scripts/check_rust.py` = EXIT=0；`phase0` bit-identical。
+- `pytest -q` = **3659 passed**；`ruff check src demos tests` = All checks passed；`pyright` = 基线 1165（**无新增**；`_engine_rs.pyi` 已同步签名）。
+
+### 19.4 请 evaluator 核对点
+1. **接线正确性**：`enable_gpu` 有计划时建 FFT 迁移器、`run_gpu_tick` 选择逻辑；`"csr"` 路径未变。
+2. **数据传递**：Python `MigrationFFTPlan` → `(rows, cols, kernel, z)` → backend → `from_parts` → `MigrationPlanHost` → `FftMigrator`；类型/stub 一致。
+3. **默认关闭**：不选 `"fft"` 时行为不变；`phase0` bit-identical。
+4. **残余**：`"fft"` 仍折叠 CSR（构建墙仍在）；`fft`+`stochastic` 计划被忽略（未守卫）；hooks/history、`restore→run`、wrap/`include_center`/不规则/大域性能未测。
+
+### 19.5 残余（未做，S3）
+- 中英文档（`docs/{zh,en}`）；`"fft"` 跳过 CSR 折叠；`fft`+`stochastic` 守卫；hooks/history/restore 覆盖；大域与性能。
 
 ---
 

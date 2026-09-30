@@ -168,6 +168,8 @@ session → executor；默认 `"csr"` 路径一行不改。
 
 **S2b 状态（2026-09-29，已验）**：新增 `rust/src/gpu/fft_migrate.rs`（`gpu` feature）——设备级「逐平面归一化卷积」：NVRTC `scatter_g`/`complex_mul`/`combine` + cuFFT r2c/c2r，自建 context/stream、host 切片进出。单测 `fft_migrate_matches_csr` 对 `crate::kernels::spatial::migrate_csr_deterministic` 逐元素对齐（f32 相对误差 <1e-4）。**未接线**（S2c）；默认不启用。门禁：`cargo test` 67 / `--features gpu` 262、`clippy --features gpu -D warnings`、`cargo fmt --check`、`scripts/check_rust.py` EXIT=0、`phase0` bit-identical。
 
-**S2c（executor 接线 + 预算 + 会话/前端传递）与 S3 待做。**
+**S2c 状态（2026-09-29，已验）**：接线完成（默认关闭、`"fft"` 需显式选择）——`GpuExecutor` 增 `fft: Option<FftMigrator>`、`enable_fft_migration`（含预算）、`has_fft_migration`、`migrate_tick_fft`；`SpatialSession` 增 `migration_plan` 构造参数与 `enable_gpu` 接线、`run_gpu_tick` 在确定性 + FFT 就绪时走 `migrate_tick_fft`；Python `SpatialPopulation` 在 `migration_execution="fft"` 时构建 `MigrationFFTPlan` 并透传（移除占位异常），backend/`_engine_rs.pyi` 同步。端到端（5×5,k=5,deterministic,3 ticks）GPU-FFT vs CPU-CSR：max_rel **1.5e-7**（f32 档）。门禁：`cargo test` 67 / `--features gpu` 263、`check_rust.py` EXIT=0、`phase0` bit-identical、`pytest` 3659、`ruff` 通过、`pyright` 基线 1165（无新增）。
+
+**S3（中英文档 + 全量门禁 + 残余）待做。** 残余：`"fft"` 仍会折叠 CSR（构建墙仍在，S3 可跳过）；`fft`+`stochastic` 未接（计划忽略，需守卫/文档）；hooks/history、`restore→run`、wrap/`include_center`、不规则掩膜、大域性能未测。
 
 **S2c 设计要点**：`gpu_fft_migrate` 目前自建 context/stream（便于隔离测试），接线时重构为接收 executor 的 stream/设备缓冲；`GpuExecutor` 增 `migration_plan` 与 `migrate_tick_fft`，`SpatialSession::enable_gpu` 在计划存在时构建 FFT 执行器，预算按 `O(P·(rows+2R)(cols+2R))` 估算。

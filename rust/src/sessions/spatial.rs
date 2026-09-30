@@ -89,6 +89,9 @@ pub struct SpatialSession {
     /// models. `None` keeps the CPU path authoritative.
     #[cfg(feature = "gpu")]
     gpu: Option<crate::gpu::executor::GpuExecutor>,
+    /// Optional route-A FFT migration plan (host), consumed by `enable_gpu`.
+    #[cfg(feature = "gpu")]
+    migration_plan: Option<crate::gpu::fft_migrate::MigrationPlanHost>,
 }
 
 #[pymethods]
@@ -240,7 +243,7 @@ impl SpatialSession {
     /// match the blueprint dimensions, contains non-finite or negative
     /// values, or has a negative tick.
     #[new]
-    #[pyo3(signature = (blueprint, ecology_columns, tensor_bank, deme_variant_ids, individual_count_all, sperm_storage_all, tick, model=String::from("age_structured"), stay_after_send=false, seed=0))]
+    #[pyo3(signature = (blueprint, ecology_columns, tensor_bank, deme_variant_ids, individual_count_all, sperm_storage_all, tick, model=String::from("age_structured"), stay_after_send=false, seed=0, migration_plan=None))]
     #[allow(clippy::too_many_arguments)] // One-time build handoff of the owned run data.
     fn from_parts(
         blueprint: &Bound<'_, PyAny>,
@@ -253,6 +256,7 @@ impl SpatialSession {
         model: String,
         stay_after_send: bool,
         seed: u64,
+        migration_plan: Option<(usize, usize, Vec<f32>, Vec<f32>)>,
     ) -> PyResult<Self> {
         validate_state_tick(tick)?;
         let bp = Blueprint::from_python(blueprint)?;
@@ -315,6 +319,17 @@ impl SpatialSession {
         let rngs = (0..deme_variants.len())
             .map(|deme| new_rng(crate::kernels::rng::stream_seed(seed, deme as i64)))
             .collect();
+        #[cfg(feature = "gpu")]
+        let migration_plan = migration_plan.map(|(rows, cols, kernel, z)| {
+            crate::gpu::fft_migrate::MigrationPlanHost {
+                rows,
+                cols,
+                kernel,
+                z,
+            }
+        });
+        #[cfg(not(feature = "gpu"))]
+        let _ = migration_plan;
         Ok(Self {
             blueprint: bp,
             ecology,
@@ -335,6 +350,8 @@ impl SpatialSession {
             history_store: None,
             #[cfg(feature = "gpu")]
             gpu: None,
+            #[cfg(feature = "gpu")]
+            migration_plan,
         })
     }
 
@@ -380,11 +397,19 @@ impl SpatialSession {
         )
         .map_err(map_lifecycle_error)?;
         executor.set_seed(self.seed);
-        // Reserve the lazily-built migration cache up front so an over-budget
-        // CSR fails at enable time, not mid-run.
-        executor
-            .ensure_migration_budget(&self.blueprint)
-            .map_err(map_lifecycle_error)?;
+        if let Some(plan) = &self.migration_plan {
+            // Route A: build the FFT migrator and charge its footprint instead
+            // of the CSR migration cache.
+            executor
+                .enable_fft_migration(plan.rows, plan.cols, &plan.kernel, &plan.z)
+                .map_err(map_lifecycle_error)?;
+        } else {
+            // Reserve the lazily-built migration cache up front so an over-budget
+            // CSR fails at enable time, not mid-run.
+            executor
+                .ensure_migration_budget(&self.blueprint)
+                .map_err(map_lifecycle_error)?;
+        }
         executor
             .configure_hooks(&self.hooks, false)
             .map_err(map_lifecycle_error)?;
@@ -1314,6 +1339,8 @@ impl SpatialSession {
         if !all_zero {
             if blueprint.stochastic {
                 gpu.migrate_tick_stochastic(blueprint, ecology)?;
+            } else if gpu.has_fft_migration() {
+                gpu.migrate_tick_fft(ecology)?;
             } else {
                 gpu.migrate_tick(blueprint, ecology, stay_after_send)?;
             }

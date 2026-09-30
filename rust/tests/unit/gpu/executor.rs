@@ -3521,3 +3521,144 @@ fn migration_cache_budget_is_checked_at_enable() {
         .ensure_migration_budget(&mismatched)
         .expect("a CSR that does not match the batch is skipped");
 }
+
+/// Hex-metric Gaussian kernel (`sum = 1`) for the FFT executor test.
+fn fft_hex_kernel(k: usize, sigma: f64) -> Vec<f64> {
+    let c = (k / 2) as f64;
+    let mut ker = vec![0f64; k * k];
+    let mut total = 0f64;
+    for kr in 0..k {
+        for kc in 0..k {
+            let dr = kr as f64 - c;
+            let dc = kc as f64 - c;
+            let d2 = dr * dr + dc * dc + dr * dc;
+            ker[kr * k + kc] = (-d2 / (2.0 * sigma * sigma)).exp();
+            total += ker[kr * k + kc];
+        }
+    }
+    for w in ker.iter_mut() {
+        *w /= total;
+    }
+    ker
+}
+
+/// Row-normalized CSR matching `fft_migrate`'s kernel semantics (`wrap=false`,
+/// center excluded).
+fn fft_build_csr(
+    rows: usize,
+    cols: usize,
+    k: usize,
+    ker: &[f64],
+) -> (Vec<i64>, Vec<i64>, Vec<f64>) {
+    let c = k / 2;
+    let mut indptr = vec![0i64];
+    let mut dest = Vec::new();
+    let mut weights = Vec::new();
+    for s in 0..rows * cols {
+        let (r, cc) = (s / cols, s % cols);
+        let mut offs: Vec<(i64, i64, f64)> = Vec::new();
+        let mut sum = 0f64;
+        for kr in 0..k {
+            for kc in 0..k {
+                if kr == c && kc == c {
+                    continue;
+                }
+                let w = ker[kr * k + kc];
+                if w <= 0.0 {
+                    continue;
+                }
+                let (dr, dc) = (kr as i64 - c as i64, kc as i64 - c as i64);
+                let (nr, nc) = (r as i64 + dr, cc as i64 + dc);
+                if nr < 0 || nr >= rows as i64 || nc < 0 || nc >= cols as i64 {
+                    continue;
+                }
+                offs.push((dr, dc, w));
+                sum += w;
+            }
+        }
+        for (dr, dc, w) in offs {
+            dest.push((r as i64 + dr) * cols as i64 + (cc as i64 + dc));
+            weights.push(w / sum);
+        }
+        indptr.push(dest.len() as i64);
+    }
+    (indptr, dest, weights)
+}
+
+/// `Z(s) = sum of K' over valid offsets` (matches `build_fft_migration_plan`).
+fn fft_brute_z(rows: usize, cols: usize, k: usize, ker: &[f64]) -> Vec<f64> {
+    let c = k / 2;
+    let mut z = vec![0f64; rows * cols];
+    for s in 0..rows * cols {
+        let (r, cc) = (s / cols, s % cols);
+        for kr in 0..k {
+            for kc in 0..k {
+                if kr == c && kc == c {
+                    continue;
+                }
+                let (dr, dc) = (kr as i64 - c as i64, kc as i64 - c as i64);
+                let (nr, nc) = (r as i64 + dr, cc as i64 + dc);
+                if nr >= 0 && nr < rows as i64 && nc >= 0 && nc < cols as i64 {
+                    z[s] += ker[kr * k + kc];
+                }
+            }
+        }
+    }
+    z
+}
+
+#[test]
+fn fft_migration_tick_matches_host_reference() {
+    if !hardware_required() {
+        eprintln!("SKIP: NATAL_GPU_REQUIRE=0 disables the hardware gate");
+        return;
+    }
+    let (rows, cols) = (2usize, 2usize);
+    let n_batch = rows * cols;
+    let n_ages = 4usize;
+    let n_ztypes = 2usize;
+    let k = 3usize;
+    let ker = fft_hex_kernel(k, 1.0);
+    let (indptr, dest, weights) = fft_build_csr(rows, cols, k, &ker);
+    let z = fft_brute_z(rows, cols, k, &ker);
+    let (_, mut ecology) = density_fixture();
+    let rate: Vec<f64> = (0..n_batch * 2 * n_ages)
+        .map(|i| 0.1 + 0.02 * (i % 7) as f64)
+        .collect();
+    ecology.migration_rate = rate.clone();
+    let (ind, sperm) = populated_state(n_batch, n_ages, n_ztypes);
+    let ind_f64: Vec<f64> = ind.iter().map(|v| f64::from(*v)).collect();
+    let sperm_f64: Vec<f64> = sperm.iter().map(|v| f64::from(*v)).collect();
+    let (cpu_ind, cpu_sperm) = migrate_csr_deterministic(
+        &ind_f64, &sperm_f64, &indptr, &dest, &weights, &rate, true, n_batch, n_ages, n_ztypes,
+    )
+    .expect("host migration");
+
+    let context = GpuContext::new(0).expect("device 0 context");
+    let mut executor = GpuExecutor::new(context, n_batch, n_ages, n_ztypes, &ind, &sperm)
+        .expect("executor uploads and compiles");
+    let ker_f32: Vec<f32> = ker.iter().map(|v| *v as f32).collect();
+    let z_f32: Vec<f32> = z.iter().map(|v| *v as f32).collect();
+    executor
+        .enable_fft_migration(rows, cols, &ker_f32, &z_f32)
+        .expect("enable fft migration");
+    assert!(executor.has_fft_migration());
+    executor
+        .migrate_tick_fft(&ecology)
+        .expect("device fft migration");
+    let gpu_ind = executor.download_ind().expect("download individuals");
+    let gpu_sperm = executor.download_sperm().expect("download sperm");
+    for (label, got, want) in [
+        ("fft ind", &gpu_ind, &cpu_ind),
+        ("fft sperm", &gpu_sperm, &cpu_sperm),
+    ] {
+        for (index, (got, want)) in got.iter().zip(want.iter()).enumerate() {
+            let want = *want as f32;
+            let tolerance = 1e-4f32 * want.abs().max(1.0);
+            assert!(
+                (got - want).abs() <= tolerance,
+                "{label}[{index}]: device {got} vs host {want}"
+            );
+        }
+    }
+}

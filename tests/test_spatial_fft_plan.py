@@ -154,12 +154,64 @@ def test_migration_execution_rejects_unknown():
         _builder("bogus")
 
 
-def test_migration_execution_fft_is_staged():
-    # The GPU cuFFT path is staged: selecting it must fail loudly, not silently
-    # fall back to CSR.
-    with pytest.raises(NotImplementedError):
-        _builder("fft").build()
-
-
 def test_migration_execution_default_csr_builds():
     assert _builder("csr").build() is not None
+
+
+def test_migration_execution_fft_builds_with_plan():
+    pop = _builder("fft").build()
+    assert pop is not None
+    assert pop._fft_migration_plan is not None  # noqa: SLF001 - test inspects the plan
+
+
+def _spatial_population(execution: str, name: str):
+    import natal as nt
+
+    species = nt.Species.from_dict(
+        name=name, structure={"chr1": {"loc": ["WT", "Dr"]}}
+    )
+    kernel = build_gaussian_kernel(HexGrid, size=5, sigma=1.3)
+    return (
+        nt.SpatialPopulation.builder(
+            species,
+            n_demes=25,
+            topology=HexGrid(rows=5, cols=5, wrap=False),
+            pop_type="discrete_generation",
+        )
+        .setup(name="d", stochastic=False)
+        .initial_state(
+            individual_count={
+                "female": {"WT|WT": 500.0, "Dr|WT": 0.0},
+                "male": {"WT|WT": 0.0, "Dr|WT": 500.0},
+            }
+        )
+        .reproduction(eggs_per_female=50.0)
+        .competition(
+            juvenile_growth_mode="beverton_holt",
+            carrying_capacity=1000,
+            low_density_growth_rate=6,
+        )
+        .migration(kernel=kernel, migration_rate=0.5, migration_execution=execution)
+        .build()
+    )
+
+
+def test_migration_execution_fft_matches_csr_on_device():
+    csr = _spatial_population("csr", "SpatialFFTE2Ecsr")
+    csr.run(3, record_every=0)
+    reference = np.array([np.asarray(d.state.individual_count) for d in csr.demes])
+
+    fft = _spatial_population("fft", "SpatialFFTE2Efft")
+    backend = fft._rust_spatial_backend  # noqa: SLF001 - existing session API
+    try:
+        backend.enable_gpu()
+    except Exception as exc:  # noqa: BLE001 - no usable CUDA device
+        pytest.skip(f"GPU unavailable: {exc}")
+    assert backend.gpu_status() == "enabled"
+    fft.run(3, record_every=0)
+    got = np.array([np.asarray(d.state.individual_count) for d in fft.demes])
+
+    assert got.shape == reference.shape
+    denom = np.maximum(np.abs(reference), 1.0)
+    max_rel = float((np.abs(got - reference) / denom).max())
+    assert max_rel < 1e-4, f"fft vs csr max relative error {max_rel}"

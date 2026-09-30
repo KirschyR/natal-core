@@ -1035,6 +1035,7 @@ class RustHeterogeneousSpatialLifecycleBackend:
         stay_after_send: bool = False,
         hook_program: HookProgram | None = None,
         seed: int = 0,
+        migration_plan: tuple[int, int, list[float], list[float]] | None = None,
     ) -> None:
         """Create a Rust heterogeneous spatial backend.
 
@@ -1095,6 +1096,7 @@ class RustHeterogeneousSpatialLifecycleBackend:
             model,
             bool(stay_after_send),
             seed,
+            migration_plan,
         )
         if hook_program is not None:
             self._session.set_hook_program(hook_program)

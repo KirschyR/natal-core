@@ -6,14 +6,19 @@
 //!
 //! `plane' = plane·(1−rate) + K' ⊛ (rate·plane / Z)`
 //!
-//! where `⊛` is a zero-outside linear convolution computed with cuFFT.  This is
-//! the isolated S2b device kernel: it owns its context/stream and takes host
-//! slices so it can be unit-tested against the CPU CSR operator before the
-//! executor/session wiring (S2c).  Compiled only under the `gpu` feature.
+//! where `⊛` is a zero-outside linear convolution computed with cuFFT.
+//! [`FftMigrator`] owns the plan buffers, compiled kernels and cuFFT plans and
+//! reuses a caller-provided stream, so the executor (S2c) can wire it into its
+//! existing double-buffered state.  [`gpu_fft_migrate`] is a host-slice wrapper
+//! used by the tests.  Compiled only under the `gpu` feature.
+
+use std::sync::Arc;
 
 use cudarc::cufft::sys::{cufftType, float2};
 use cudarc::cufft::CudaFft;
-use cudarc::driver::{CudaContext, CudaFunction, CudaSlice, LaunchConfig, PushKernelArg};
+use cudarc::driver::{
+    CudaContext, CudaFunction, CudaSlice, CudaStream, LaunchConfig, PushKernelArg,
+};
 use cudarc::nvrtc::{compile_ptx_with_opts, CompileOptions};
 
 const FFT_MIGRATE_SOURCE: &str = r#"
@@ -22,7 +27,7 @@ struct cf2 { float x; float y; };
 extern "C" __global__ void scatter_g(
     const float* plane, const float* rate, const float* zs, float* pad,
     unsigned long long total, int rows, int cols, int fr, int fc, int R,
-    int rate_stride, int rate_off)
+    int rate_stride, int rate_off, unsigned long long plane_base)
 {
     unsigned long long i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= total) return;
@@ -31,7 +36,7 @@ extern "C" __global__ void scatter_g(
     if (r < rows && c < cols) {
         unsigned long long idx = (unsigned long long)r * cols + c;
         float rr = rate[idx * (unsigned long long)rate_stride + (unsigned long long)rate_off];
-        pad[i] = plane[idx] * rr / zs[idx];
+        pad[i] = plane[plane_base + idx] * rr / zs[idx];
     } else {
         pad[i] = 0.0f;
     }
@@ -49,48 +54,313 @@ extern "C" __global__ void complex_mul(cf2* spec, const cf2* ks, unsigned long l
 
 extern "C" __global__ void combine(
     const float* plane, const float* rate, const float* padded, float* out,
-    unsigned long long n, int cols, int fr, int fc, int R, int rate_stride, int rate_off)
+    unsigned long long n, int cols, int fr, int fc, int R, int rate_stride, int rate_off,
+    unsigned long long plane_base)
 {
     unsigned long long i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
     int r = (int)(i / (unsigned long long)cols);
     int c = (int)(i % (unsigned long long)cols);
     float rr = rate[i * (unsigned long long)rate_stride + (unsigned long long)rate_off];
-    float retain = plane[i] * (1.0f - rr);
-    out[i] = retain + padded[(unsigned long long)(r + R) * (unsigned long long)fc + (c + R)];
+    float retain = plane[plane_base + i] * (1.0f - rr);
+    out[plane_base + i] = retain + padded[(unsigned long long)(r + R) * (unsigned long long)fc + (c + R)];
 }
 "#;
 
-/// Compiled launchers for the route-A device kernels.
-struct FftKernels {
+/// Host-side route-A plan handed from Python to the session at construction.
+#[derive(Clone)]
+pub struct MigrationPlanHost {
+    /// Grid rows.
+    pub rows: usize,
+    /// Grid columns.
+    pub cols: usize,
+    /// Row-major `k*k` kernel (odd `k`).
+    pub kernel: Vec<f32>,
+    /// `(rows*cols,)` normalization field `K' ⊛ m`.
+    pub z: Vec<f32>,
+}
+
+/// Reusable route-A device migrator for one rectangular topology and kernel.
+pub struct FftMigrator {
+    rows: usize,
+    cols: usize,
+    n_ages: usize,
+    n_ztypes: usize,
+    r: usize,
+    fr: usize,
+    fc: usize,
+    spec_n: usize,
+    rate_stride: i32,
+    inv: f32,
     scatter_g: CudaFunction,
     complex_mul: CudaFunction,
     combine: CudaFunction,
-}
-
-struct Scratch {
+    r2c: CudaFft,
+    c2r: CudaFft,
+    ks: CudaSlice<float2>,
+    z: CudaSlice<f32>,
     pad: CudaSlice<f32>,
     spec: CudaSlice<float2>,
     padded: CudaSlice<f32>,
-    out: CudaSlice<f32>,
 }
 
-/// Run one deterministic FFT migration tick for a spatial model.
-///
-/// ## Parameters
-/// - `rows`, `cols`: grid dimensions; `n_demes = rows * cols`.
-/// - `n_ages`, `n_ztypes`: model dimensions.
-/// - `kernel`: `k*k` row-major Gaussian kernel (odd `k`).
-/// - `z`: `(n_demes,)` normalization field `K' ⊛ m`.
-/// - `rate`: `(n_demes, 2, n_ages)` migration rate, deme-major.
-/// - `ind`: batch-minor `(2, A, Z, n_demes)`; `sperm`: `(A, Z, Z, n_demes)`.
-///
-/// ## Returns
-/// `(ind', sperm')` in the same batch-minor layout.
+fn kernel_pad(rows: usize, cols: usize, k: usize, kernel: &[f32]) -> (usize, usize, Vec<f32>) {
+    let fr = rows + k - 1;
+    let fc = cols + k - 1;
+    let center = k / 2;
+    let mut pad = vec![0f32; fr * fc];
+    for kr in 0..k {
+        for kc in 0..k {
+            if kr == center && kc == center {
+                continue; // K' excludes the center; retention covers it.
+            }
+            pad[kr * fc + kc] = kernel[kr * k + kc];
+        }
+    }
+    (fr, fc, pad)
+}
+
+impl FftMigrator {
+    /// Build the migrator for `rows x cols` with an odd `k x k` kernel and the
+    /// `(n_demes,)` normalization field `z`.
+    ///
+    /// ## Errors
+    /// Returns a description on kernel shape / NVRTC / plan failures.
+    #[allow(clippy::too_many_arguments)] // flat plan parameters
+    pub fn new(
+        context: &Arc<CudaContext>,
+        rows: usize,
+        cols: usize,
+        n_ages: usize,
+        n_ztypes: usize,
+        kernel: &[f32],
+        z: &[f32],
+    ) -> Result<Self, String> {
+        let k = (kernel.len() as f64).sqrt() as usize;
+        if kernel.len() != k * k || k % 2 == 0 {
+            return Err("kernel must be odd and square".to_owned());
+        }
+        let n_demes = rows * cols;
+        if z.len() != n_demes {
+            return Err("z length mismatch".to_owned());
+        }
+        let r = (k - 1) / 2;
+        let (fr, fc, pad_host) = kernel_pad(rows, cols, k, kernel);
+        let spec_n = fr * (fc / 2 + 1);
+
+        let (major, minor) = context
+            .compute_capability()
+            .map_err(|e| format!("compute capability: {e}"))?;
+        let opts = CompileOptions {
+            options: vec![format!("--gpu-architecture=compute_{major}{minor}")],
+            ..Default::default()
+        };
+        let ptx =
+            compile_ptx_with_opts(FFT_MIGRATE_SOURCE, opts).map_err(|e| format!("nvrtc: {e}"))?;
+        let module = context.load_module(ptx).map_err(|e| format!("load: {e}"))?;
+        let stream = context.default_stream();
+        let scatter_g = module
+            .load_function("scatter_g")
+            .map_err(|e| format!("load scatter_g: {e}"))?;
+        let complex_mul = module
+            .load_function("complex_mul")
+            .map_err(|e| format!("load complex_mul: {e}"))?;
+        let combine = module
+            .load_function("combine")
+            .map_err(|e| format!("load combine: {e}"))?;
+        let r2c = CudaFft::plan_2d(fr as i32, fc as i32, cufftType::CUFFT_R2C, stream.clone())
+            .map_err(|e| format!("r2c plan: {e}"))?;
+        let c2r = CudaFft::plan_2d(fr as i32, fc as i32, cufftType::CUFFT_C2R, stream.clone())
+            .map_err(|e| format!("c2r plan: {e}"))?;
+
+        let kp_d = stream.clone_htod(&pad_host).map_err(|e| format!("{e}"))?;
+        let mut ks = stream
+            .alloc_zeros::<float2>(spec_n)
+            .map_err(|e| format!("{e}"))?;
+        r2c.exec_r2c(&kp_d, &mut ks)
+            .map_err(|e| format!("kernel r2c: {e}"))?;
+
+        Ok(Self {
+            rows,
+            cols,
+            n_ages,
+            n_ztypes,
+            r,
+            fr,
+            fc,
+            spec_n,
+            rate_stride: (2 * n_ages) as i32,
+            inv: 1.0f32 / (fr * fc) as f32,
+            scatter_g,
+            complex_mul,
+            combine,
+            r2c,
+            c2r,
+            ks,
+            z: stream.clone_htod(z).map_err(|e| format!("{e}"))?,
+            pad: stream
+                .alloc_zeros::<f32>(fr * fc)
+                .map_err(|e| format!("{e}"))?,
+            spec: stream
+                .alloc_zeros::<float2>(spec_n)
+                .map_err(|e| format!("{e}"))?,
+            padded: stream
+                .alloc_zeros::<f32>(fr * fc)
+                .map_err(|e| format!("{e}"))?,
+        })
+    }
+
+    /// Number of `(2,A,Z,B)` + `(A,Z,Z,B)` planes the migrator expects.
+    pub fn plane_count(&self) -> usize {
+        2 * self.n_ages * self.n_ztypes + self.n_ages * self.n_ztypes * self.n_ztypes
+    }
+
+    /// Estimate the resident FFT footprint in bytes (plan buffers only).
+    pub fn footprint_bytes(&self) -> usize {
+        let f32b = std::mem::size_of::<f32>();
+        let cplx = std::mem::size_of::<float2>();
+        self.pad.len() * f32b
+            + self.padded.len() * f32b
+            + self.spec.len() * cplx
+            + self.ks.len() * cplx
+            + self.z.len() * f32b
+    }
+
+    fn run_plane(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        plane: &CudaSlice<f32>,
+        rate: &CudaSlice<f32>,
+        rate_off: i32,
+        out: &mut CudaSlice<f32>,
+        plane_base: u64,
+    ) -> Result<(), String> {
+        let total = (self.fr * self.fc) as u64;
+        let n = (self.rows * self.cols) as u64;
+        let spec_n_u = self.spec_n as u64;
+        let (rows_i, cols_i, fr_i, fc_i, r_i) = (
+            self.rows as i32,
+            self.cols as i32,
+            self.fr as i32,
+            self.fc as i32,
+            self.r as i32,
+        );
+        {
+            let cfg = LaunchConfig::for_num_elems(total as u32);
+            let mut lb = stream.launch_builder(&self.scatter_g);
+            lb.arg(plane);
+            lb.arg(rate);
+            lb.arg(&self.z);
+            lb.arg(&mut self.pad);
+            lb.arg(&total);
+            lb.arg(&rows_i);
+            lb.arg(&cols_i);
+            lb.arg(&fr_i);
+            lb.arg(&fc_i);
+            lb.arg(&r_i);
+            lb.arg(&self.rate_stride);
+            lb.arg(&rate_off);
+            lb.arg(&plane_base);
+            unsafe { lb.launch(cfg) }.map_err(|e| format!("scatter_g: {e}"))?;
+        }
+        self.r2c
+            .exec_r2c(&self.pad, &mut self.spec)
+            .map_err(|e| format!("plane r2c: {e}"))?;
+        {
+            let cfg = LaunchConfig::for_num_elems(self.spec_n as u32);
+            let mut lb = stream.launch_builder(&self.complex_mul);
+            lb.arg(&mut self.spec);
+            lb.arg(&self.ks);
+            lb.arg(&spec_n_u);
+            lb.arg(&self.inv);
+            unsafe { lb.launch(cfg) }.map_err(|e| format!("complex_mul: {e}"))?;
+        }
+        self.c2r
+            .exec_c2r(&mut self.spec, &mut self.padded)
+            .map_err(|e| format!("plane c2r: {e}"))?;
+        {
+            let cfg = LaunchConfig::for_num_elems(n as u32);
+            let mut lb = stream.launch_builder(&self.combine);
+            lb.arg(plane);
+            lb.arg(rate);
+            lb.arg(&self.padded);
+            lb.arg(out);
+            lb.arg(&n);
+            lb.arg(&cols_i);
+            lb.arg(&fr_i);
+            lb.arg(&fc_i);
+            lb.arg(&r_i);
+            lb.arg(&self.rate_stride);
+            lb.arg(&rate_off);
+            lb.arg(&plane_base);
+            unsafe { lb.launch(cfg) }.map_err(|e| format!("combine: {e}"))?;
+        }
+        Ok(())
+    }
+
+    /// Advance the whole batch-minor state one tick, writing into `ind_out` and
+    /// `sperm_out` (double-buffered by the caller).
+    ///
+    /// ## Errors
+    /// Returns a description on launch failures or length mismatch.
+    pub fn migrate_inplace(
+        &mut self,
+        stream: &Arc<CudaStream>,
+        ind: &CudaSlice<f32>,
+        ind_out: &mut CudaSlice<f32>,
+        sperm: &CudaSlice<f32>,
+        sperm_out: &mut CudaSlice<f32>,
+        rate: &CudaSlice<f32>,
+    ) -> Result<(), String> {
+        let n_demes = self.rows * self.cols;
+        let ind_stride = 2 * self.n_ages * self.n_ztypes;
+        let sperm_stride = self.n_ages * self.n_ztypes * self.n_ztypes;
+        if ind.len() != n_demes * ind_stride
+            || ind_out.len() != ind.len()
+            || sperm.len() != n_demes * sperm_stride
+            || sperm_out.len() != sperm.len()
+        {
+            return Err("state length mismatch".to_owned());
+        }
+        for sex in 0..2usize {
+            for age in 0..self.n_ages {
+                for zt in 0..self.n_ztypes {
+                    let p = (sex * self.n_ages + age) * self.n_ztypes + zt;
+                    self.run_plane(
+                        stream,
+                        ind,
+                        rate,
+                        (sex * self.n_ages + age) as i32,
+                        ind_out,
+                        (p * n_demes) as u64,
+                    )?;
+                }
+            }
+        }
+        for age in 0..self.n_ages {
+            for fz in 0..self.n_ztypes {
+                for mz in 0..self.n_ztypes {
+                    let p = (age * self.n_ztypes + fz) * self.n_ztypes + mz;
+                    self.run_plane(
+                        stream,
+                        sperm,
+                        rate,
+                        age as i32,
+                        sperm_out,
+                        (p * n_demes) as u64,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Host-slice convenience wrapper (tests, and a faithful reference).
 ///
 /// ## Errors
 /// Returns a description on CUDA/plan/launch failure or shape mismatch.
-#[allow(clippy::too_many_arguments)] // mirrors the kernel's flat argument list
+#[allow(clippy::too_many_arguments)] // mirrors the flat kernel argument list
 pub fn gpu_fft_migrate(
     rows: usize,
     cols: usize,
@@ -103,168 +373,36 @@ pub fn gpu_fft_migrate(
     sperm: &[f32],
 ) -> Result<(Vec<f32>, Vec<f32>), String> {
     let n_demes = rows * cols;
-    let k = (kernel.len() as f64).sqrt() as usize;
-    if kernel.len() != k * k || k % 2 == 0 {
-        return Err("kernel must be odd and square".to_owned());
+    let ind_stride = 2 * n_ages * n_ztypes;
+    let sperm_stride = n_ages * n_ztypes * n_ztypes;
+    if rate.len() != n_demes * 2 * n_ages
+        || ind.len() != n_demes * ind_stride
+        || sperm.len() != n_demes * sperm_stride
+    {
+        return Err("state/rate length mismatch".to_owned());
     }
-    let r = (k - 1) / 2;
-    let fr = rows + k - 1;
-    let fc = cols + k - 1;
-    let spec_n = fr * (fc / 2 + 1);
-    let ind_planes = 2 * n_ages * n_ztypes;
-    let sperm_planes = n_ages * n_ztypes * n_ztypes;
-    if z.len() != n_demes || rate.len() != n_demes * 2 * n_ages {
-        return Err("z/rate length mismatch".to_owned());
-    }
-    if ind.len() != n_demes * ind_planes || sperm.len() != n_demes * sperm_planes {
-        return Err("state length mismatch".to_owned());
-    }
-    let rate_stride = 2 * n_ages;
-
     let context = CudaContext::new(0).map_err(|e| format!("cuda context: {e}"))?;
     let stream = context.default_stream();
-    let (major, minor) = context
-        .compute_capability()
-        .map_err(|e| format!("compute capability: {e}"))?;
-    let opts = CompileOptions {
-        options: vec![format!("--gpu-architecture=compute_{major}{minor}")],
-        ..Default::default()
-    };
-    let ptx = compile_ptx_with_opts(FFT_MIGRATE_SOURCE, opts).map_err(|e| format!("nvrtc: {e}"))?;
-    let module = context.load_module(ptx).map_err(|e| format!("load: {e}"))?;
-    let kernels = FftKernels {
-        scatter_g: module
-            .load_function("scatter_g")
-            .map_err(|e| format!("load scatter_g: {e}"))?,
-        complex_mul: module
-            .load_function("complex_mul")
-            .map_err(|e| format!("load complex_mul: {e}"))?,
-        combine: module
-            .load_function("combine")
-            .map_err(|e| format!("load combine: {e}"))?,
-    };
-
-    let r2c = CudaFft::plan_2d(fr as i32, fc as i32, cufftType::CUFFT_R2C, stream.clone())
-        .map_err(|e| format!("r2c plan: {e}"))?;
-    let c2r = CudaFft::plan_2d(fr as i32, fc as i32, cufftType::CUFFT_C2R, stream.clone())
-        .map_err(|e| format!("c2r plan: {e}"))?;
-
-    let z_d = stream.clone_htod(z).map_err(|e| format!("{e}"))?;
+    let mut migrator = FftMigrator::new(&context, rows, cols, n_ages, n_ztypes, kernel, z)?;
+    let ind_d = stream.clone_htod(ind).map_err(|e| format!("{e}"))?;
+    let sperm_d = stream.clone_htod(sperm).map_err(|e| format!("{e}"))?;
     let rate_d = stream.clone_htod(rate).map_err(|e| format!("{e}"))?;
-
-    // Kernel spectrum (zero-padded kernel, r2c) computed once.
-    let mut kernel_pad = vec![0f32; fr * fc];
-    let center = k / 2;
-    for kr in 0..k {
-        for kc in 0..k {
-            if kr == center && kc == center {
-                continue; // K' excludes the center; retention (1-rate) covers it.
-            }
-            kernel_pad[kr * fc + kc] = kernel[kr * k + kc];
-        }
-    }
-    let kp_d = stream.clone_htod(&kernel_pad).map_err(|e| format!("{e}"))?;
-    let mut ks_d = stream
-        .alloc_zeros::<float2>(spec_n)
+    let mut ind_out = stream
+        .alloc_zeros::<f32>(ind.len())
         .map_err(|e| format!("{e}"))?;
-    r2c.exec_r2c(&kp_d, &mut ks_d)
-        .map_err(|e| format!("kernel r2c: {e}"))?;
-
-    let mut scratch = Scratch {
-        pad: stream
-            .alloc_zeros::<f32>(fr * fc)
-            .map_err(|e| format!("{e}"))?,
-        spec: stream
-            .alloc_zeros::<float2>(spec_n)
-            .map_err(|e| format!("{e}"))?,
-        padded: stream
-            .alloc_zeros::<f32>(fr * fc)
-            .map_err(|e| format!("{e}"))?,
-        out: stream
-            .alloc_zeros::<f32>(n_demes)
-            .map_err(|e| format!("{e}"))?,
-    };
-    let inv = 1.0f32 / (fr * fc) as f32;
-    let total_pad = (fr * fc) as u64;
-    let total_n = n_demes as u64;
-    let (rows_i, cols_i, fr_i, fc_i, r_i) =
-        (rows as i32, cols as i32, fr as i32, fc as i32, r as i32);
-    let spec_n_u = spec_n as u64;
-    let rate_stride_i = rate_stride as i32;
-
-    let mut run_plane = |plane: &[f32], rate_off: i32| -> Result<Vec<f32>, String> {
-        let plane_d = stream.clone_htod(plane).map_err(|e| format!("{e}"))?;
-        {
-            let cfg = LaunchConfig::for_num_elems(total_pad as u32);
-            let mut lb = stream.launch_builder(&kernels.scatter_g);
-            lb.arg(&plane_d);
-            lb.arg(&rate_d);
-            lb.arg(&z_d);
-            lb.arg(&mut scratch.pad);
-            lb.arg(&total_pad);
-            lb.arg(&rows_i);
-            lb.arg(&cols_i);
-            lb.arg(&fr_i);
-            lb.arg(&fc_i);
-            lb.arg(&r_i);
-            lb.arg(&rate_stride_i);
-            lb.arg(&rate_off);
-            unsafe { lb.launch(cfg) }.map_err(|e| format!("scatter_g: {e}"))?;
-        }
-        r2c.exec_r2c(&scratch.pad, &mut scratch.spec)
-            .map_err(|e| format!("plane r2c: {e}"))?;
-        {
-            let cfg = LaunchConfig::for_num_elems(spec_n as u32);
-            let mut lb = stream.launch_builder(&kernels.complex_mul);
-            lb.arg(&mut scratch.spec);
-            lb.arg(&ks_d);
-            lb.arg(&spec_n_u);
-            lb.arg(&inv);
-            unsafe { lb.launch(cfg) }.map_err(|e| format!("complex_mul: {e}"))?;
-        }
-        c2r.exec_c2r(&mut scratch.spec, &mut scratch.padded)
-            .map_err(|e| format!("plane c2r: {e}"))?;
-        {
-            let cfg = LaunchConfig::for_num_elems(total_n as u32);
-            let mut lb = stream.launch_builder(&kernels.combine);
-            lb.arg(&plane_d);
-            lb.arg(&rate_d);
-            lb.arg(&scratch.padded);
-            lb.arg(&mut scratch.out);
-            lb.arg(&total_n);
-            lb.arg(&cols_i);
-            lb.arg(&fr_i);
-            lb.arg(&fc_i);
-            lb.arg(&r_i);
-            lb.arg(&rate_stride_i);
-            lb.arg(&rate_off);
-            unsafe { lb.launch(cfg) }.map_err(|e| format!("combine: {e}"))?;
-        }
-        stream.clone_dtoh(&scratch.out).map_err(|e| format!("{e}"))
-    };
-
-    let mut out_ind = vec![0f32; ind.len()];
-    for sex in 0..2usize {
-        for age in 0..n_ages {
-            for zt in 0..n_ztypes {
-                let p = (sex * n_ages + age) * n_ztypes + zt;
-                let plane = &ind[p * n_demes..(p + 1) * n_demes];
-                let out = run_plane(plane, (sex * n_ages + age) as i32)?;
-                out_ind[p * n_demes..(p + 1) * n_demes].copy_from_slice(&out);
-            }
-        }
-    }
-    let mut out_sperm = vec![0f32; sperm.len()];
-    for age in 0..n_ages {
-        for fz in 0..n_ztypes {
-            for mz in 0..n_ztypes {
-                let p = (age * n_ztypes + fz) * n_ztypes + mz;
-                let plane = &sperm[p * n_demes..(p + 1) * n_demes];
-                let out = run_plane(plane, age as i32)?;
-                out_sperm[p * n_demes..(p + 1) * n_demes].copy_from_slice(&out);
-            }
-        }
-    }
+    let mut sperm_out = stream
+        .alloc_zeros::<f32>(sperm.len())
+        .map_err(|e| format!("{e}"))?;
+    migrator.migrate_inplace(
+        &stream,
+        &ind_d,
+        &mut ind_out,
+        &sperm_d,
+        &mut sperm_out,
+        &rate_d,
+    )?;
+    let out_ind = stream.clone_dtoh(&ind_out).map_err(|e| format!("{e}"))?;
+    let out_sperm = stream.clone_dtoh(&sperm_out).map_err(|e| format!("{e}"))?;
     Ok((out_ind, out_sperm))
 }
 
@@ -396,7 +534,6 @@ mod tests {
         )
         .expect("cpu csr migration");
 
-        // Convert deme-major -> batch-minor (2,A,Z,B) / (A,Z,Z,B).
         let mut ind_bm = vec![0f32; ind_dm.len()];
         for d in 0..n {
             for p in 0..ind_planes {
@@ -436,8 +573,6 @@ mod tests {
 
     #[test]
     fn fft_migrate_matches_csr() {
-        // Cover both CSR bookkeeping orders (the runtime folds `stay_after=true`)
-        // and a few shapes, including a boundary-dominated tiny grid.
         for &(rows, cols, a, zt, k, sigma) in &[
             (4usize, 3usize, 2usize, 2usize, 3usize, 1.0f64),
             (7usize, 5usize, 1usize, 2usize, 5usize, 1.4f64),

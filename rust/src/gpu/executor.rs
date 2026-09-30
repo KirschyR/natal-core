@@ -26,6 +26,7 @@ use cudarc::driver::CudaStream;
 
 use crate::gpu::buffers::DeviceBuffer;
 use crate::gpu::context::GpuContext;
+use crate::gpu::fft_migrate::FftMigrator;
 use crate::gpu::kernels::{DensityBuffers, Kernels, ReproductionBuffers, MAX_CSR_ROW};
 use crate::gpu::layout::{batch_to_inner, batch_to_outer};
 use crate::model::blueprint::Blueprint;
@@ -68,6 +69,8 @@ pub struct GpuExecutor {
     saved_mask: Vec<bool>,
     /// Cached static migration buffers for the current CSR, if any.
     migration_cache: Option<MigrationCache>,
+    /// Route-A FFT migrator, when the session selected the FFT execution path.
+    fft: Option<FftMigrator>,
     /// Device-staged observation history rows for the current run, if any.
     history: Option<DeviceHistory>,
     /// Device-uploaded declarative hook program, if any (P7.1).
@@ -863,6 +866,7 @@ impl GpuExecutor {
             saved_sperm: None,
             saved_mask: vec![false; n_batch],
             migration_cache: None,
+            fft: None,
             history: None,
             hooks: None,
             active_mask: DeviceBuffer::from_host(&stream, &vec![1i32; n_batch])?,
@@ -950,6 +954,7 @@ impl GpuExecutor {
         self.saved_sperm = None;
         self.saved_mask = vec![false; n_batch];
         self.migration_cache = None;
+        self.fft = None;
         self.history = None;
         self.hooks = None;
         self.stage_masking = false;
@@ -2338,6 +2343,82 @@ impl GpuExecutor {
         })();
         self.migration_cache = Some(cache);
         result?;
+        std::mem::swap(&mut self.ind, &mut self.ind_scratch);
+        std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
+        Ok(())
+    }
+
+    /// Enable the route-A FFT migration path (deterministic models).
+    ///
+    /// Builds the cuFFT migrator for a `rows x cols` grid whose product equals
+    /// `n_batch` and charges its resident footprint against the device budget.
+    ///
+    /// ## Errors
+    /// Returns a description on a shape mismatch or an over-budget plan.
+    pub fn enable_fft_migration(
+        &mut self,
+        rows: usize,
+        cols: usize,
+        kernel: &[f32],
+        z: &[f32],
+    ) -> Result<(), String> {
+        if rows * cols != self.n_batch {
+            return Err(format!(
+                "fft migration grid {rows}x{cols} does not match n_batch {}",
+                self.n_batch
+            ));
+        }
+        let migrator = FftMigrator::new(
+            &self.context.context(),
+            rows,
+            cols,
+            self.n_ages,
+            self.n_ztypes,
+            kernel,
+            z,
+        )?;
+        let required = migrator.footprint_bytes();
+        let (free, _total) = self.context.memory_info()?;
+        ensure_memory_budget(free, required)?;
+        self.fft = Some(migrator);
+        Ok(())
+    }
+
+    /// Whether the route-A FFT migration path is active.
+    pub fn has_fft_migration(&self) -> bool {
+        self.fft.is_some()
+    }
+
+    /// Run one deterministic FFT migration step across the batch (demes).
+    ///
+    /// ## Errors
+    /// Returns a description when the FFT path is not enabled, the rate column
+    /// has the wrong length, or a launch fails.
+    pub fn migrate_tick_fft(&mut self, ecology: &EcologyParams) -> Result<(), String> {
+        let n_batch = self.n_batch;
+        let n_ages = self.n_ages;
+        if ecology.migration_rate.is_empty() {
+            return Ok(());
+        }
+        expect_len(
+            "migration_rate",
+            ecology.migration_rate.len(),
+            n_batch * 2 * n_ages,
+        )?;
+        let stream = self.context.stream();
+        let rate = upload_f64(&stream, &ecology.migration_rate)?;
+        let migrator = self
+            .fft
+            .as_mut()
+            .ok_or_else(|| "fft migration is not enabled".to_owned())?;
+        migrator.migrate_inplace(
+            &stream,
+            self.ind.slice(),
+            self.ind_scratch.slice_mut(),
+            self.sperm.slice(),
+            self.sperm_scratch.slice_mut(),
+            rate.slice(),
+        )?;
         std::mem::swap(&mut self.ind, &mut self.ind_scratch);
         std::mem::swap(&mut self.sperm, &mut self.sperm_scratch);
         Ok(())

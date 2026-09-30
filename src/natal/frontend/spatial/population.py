@@ -788,15 +788,35 @@ class SpatialPopulation:
             )
         if migration_execution not in {"csr", "fft"}:
             raise ValueError("migration_execution must be one of: csr, fft")
+        fft_migration_plan: tuple[int, int, list[float], list[float]] | None = None
         if migration_execution == "fft":
-            # Route A (GPU cuFFT convolution migration) is staged: the frontend
-            # plan builder exists (`migration.build_fft_migration_plan`) and the
-            # cuFFT binding is in place, but the executor/session wiring lands in
-            # a later stage.  Fail loudly rather than silently using CSR.
-            raise NotImplementedError(
-                "migration_execution='fft' (GPU cuFFT migration, route A) is "
-                "staged and not yet wired; use 'csr'."
+            # Route A: hand the GPU cuFFT convolution plan to the engine.  Only
+            # the single shared kernel (no bank) and `kernel_include_center=False`
+            # are supported by the device kernels.
+            if topology is None or migration_kernel is None:
+                raise ValueError(
+                    "migration_execution='fft' requires both topology and "
+                    "migration_kernel"
+                )
+            if kernel_include_center:
+                raise NotImplementedError(
+                    "migration_execution='fft' does not support "
+                    "kernel_include_center=True"
+                )
+            from natal.frontend.spatial.migration import build_fft_migration_plan
+
+            plan = build_fft_migration_plan(
+                topology,
+                np.asarray(migration_kernel, dtype=np.float64),
+                include_center=bool(kernel_include_center),
             )
+            fft_migration_plan = (
+                plan.rows,
+                plan.cols,
+                plan.kernel.astype(np.float32).reshape(-1).tolist(),
+                plan.z.astype(np.float32).reshape(-1).tolist(),
+            )
+        self._fft_migration_plan = fft_migration_plan
 
         # Resolve strategy-level policy into one concrete backend mode.  The
         # strategy is a build-time materialization choice only — it is
@@ -2400,6 +2420,7 @@ class SpatialPopulation:
             stay_after_send=bool(self._migration_csr.stay_after_send),
             hook_program=hook_program,
             seed=seed,
+            migration_plan=self._fft_migration_plan,
         )
         from natal.backends.rust.rust_backend import RustDemeParameters
 

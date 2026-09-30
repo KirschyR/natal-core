@@ -352,6 +352,22 @@ deterministic mutations, `sample`, `stop_if_*`, `set_param`, and `convert`; a
 other demes still complete their lifecycle — matching the CPU scheduler. Python
 callbacks are rejected.
 
+### 11.3b Route A: FFT migration (optional, deterministic GPU)
+
+For wide kernels or large grids the explicit CSR migration is infeasible (its
+memory is `~16·nnz` and folding it is expensive). The optional route A replaces
+the CSR with a **per-plane normalized convolution** computed by cuFFT:
+`.migration(..., migration_execution="fft")`.
+
+- Deterministic models only, `kernel_include_center=False`, a single shared kernel;
+- Must run on the device path (`enable_gpu()`); running on CPU raises explicitly
+  rather than silently skipping migration;
+- Selecting `"fft"` **skips the CSR fold** (removing the build wall); migration
+  runs on the device via cuFFT and the migration-cache budget is charged for the
+  FFT workspace instead;
+- Results match the CSR semantics within f32 tolerance (not bit-identical); the
+  default remains `"csr"` and the CPU golden is unchanged.
+
 ### 11.4 GPU particles (per-particle parameters)
 
 `AgeStructuredPopulation.enable_gpu_particles(param_sets, n_replicates=1)`

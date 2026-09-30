@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §20（S2c 接线）= **APPROVED**（已按 §20.5 修 F1、文档化 F3，见 §19.7） |
-| 待回执 | —（下一交接为 S3 完成后的 §21） |
-| 主 agent 处理 | S0–S2c 闭环；进入 **S3**（中英文档、跳过 CSR 折叠、hooks/history/restore 覆盖） |
-| 待 evaluator 动作 | —（S3 交接后） |
+| 最近回执 | §20（S2c 接线）= **APPROVED** |
+| 待回执 | §21（S3 文档/消除构建墙/CPU 守卫）→ 期望 §22 |
+| 主 agent 处理 | S0–S3 完成（默认关闭的 `"fft"` 路径端到端可用）；交接区追加 §21 |
+| 待 evaluator 动作 | 独立核对 §21 的跳过折叠、CPU 守卫与文档同步 |
 
 ---
 
@@ -473,6 +473,30 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - **F2（低，残余，留 S3）**：`"fft"` 仍先折叠 CSR；hooks/history、`restore→run`、wrap/`include_center`/不规则/大域性能未测。
 - 复验：`pytest tests/test_spatial_fft_plan.py` = **26 passed**；`cargo fmt --check`、`clippy --features gpu -D warnings`、
   `cargo test --features gpu` = 263、`scripts/check_rust.py` = EXIT=0、`phase0` bit-identical、`ruff` 通过、`pyright` 基线 1165。
+
+## §21 — M4 路线 A：S3 文档 / 消除构建墙 / CPU 守卫（请复核）
+
+### 21.1 改动清单
+- **文档（zh+en 同步）**：`docs/zh/4_simulation_engine.md` 与 `docs/en/4_simulation_engine.md` 新增 §11.3b「路线 A：FFT 迁移」（确定性 GPU、`enable_gpu` 必需、跳过 CSR 折叠、f32 容差、默认 `csr`）。
+- **消除构建墙**：`src/natal/frontend/spatial/population.py` 在 `migration_execution="fft"` 时**不折叠 CSR**，改传空 CSR（满足冻结契约）。
+- **CPU 守卫**：`rust/src/sessions/spatial.rs::run_inner` 在「有计划但未 `enable_gpu`」时显式 `PyValueError`（避免静默跳过迁移）。
+- **测试**：`tests/test_spatial_fft_plan.py` 增「`fft` 构建后 `_migration_csr.dest_idx.size==0`」与「`fft` CPU 运行需 GPU」。
+
+### 21.2 自测证据（本机 RTX 5090）
+- e2e（5×5,k=5,deterministic,3 ticks）：GPU-FFT vs CPU-CSR **max_rel 1.5e-7**；`"fft"` 种群 `_migration_csr.dest_idx.size == 0`（CSR 已跳过）。
+- `"fft"` 未 `enable_gpu()` 运行 → **显式报错**（`ValueError`）。
+- `cargo test` 67 / `--features gpu` **263**；`cargo fmt --check`、`clippy --features gpu -D warnings`、`scripts/check_rust.py` = **EXIT=0**；`phase0` **bit-identical**。
+- `pytest -q` = **3661 passed**；`tests/test_spatial_fft_plan.py` = **27 passed**；`ruff` 通过；`pyright` 基线 1165（无新增）。
+
+### 21.3 请 evaluator 核对点
+1. **跳过折叠**：空 CSR 是否满足冻结契约、`csr` 默认路径未变、`phase0` bit-identical；`"fft"` e2e 仍与 CSR 一致。
+2. **CPU 守卫**：`run_inner` 在计划存在且无设备执行器时报错；不误伤 `"csr"`。
+3. **文档**：zh/en §11.3b 是否同步、准确（确定性/`enable_gpu`/跳过折叠/容差/默认）。
+4. **默认关闭**：不选 `"fft"` 行为不变。
+
+### 21.4 残余
+- `"fft"` 下 hooks/history、`restore→run`、`wrap=True`、`include_center=True`、不规则掩膜、大域/大核性能未测。
+- `MigrationFFTPlan`/`build_fft_migration_plan` 仍非 `__all__` 导出，公开文档仅 `migration_execution`。
 
 ---
 

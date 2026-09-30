@@ -328,6 +328,16 @@ tick, individual_count, sperm_storage = pop.run_gpu_ensemble(n_ticks=100)
 更低层的 `RustLifecycleBackend.enable_gpu` / `gpu_status` / `enable_gpu_ensemble` /
 `run_gpu_ensemble` 提供同一条路径。
 
+### 11.3b 路线 A：FFT 迁移（可选，确定性 GPU）
+
+宽核/大场地下显式 CSR 迁移的内存（`~16·nnz`）与构建成本不可承受。可选「路线 A」用**逐平面归一化卷积**
+（cuFFT）替代 CSR：`.migration(..., migration_execution="fft")`。
+
+- 仅支持**确定性**模型、`kernel_include_center=False`、单一共享核；
+- 需在设备路径（`enable_gpu()`）运行；未启用即运行会**显式报错**，不会静默跳过迁移；
+- 选 `"fft"` 时**不折叠 CSR**（消除构建墙），迁移由设备 cuFFT 完成；迁移缓存预算按 FFT 工作区计；
+- 与 CSR 语义在 f32 容差内一致（非逐位）；默认 `"csr"` 不变，CPU golden 不受影响。
+
 ### 11.4 GPU particle（每个 particle 独立参数）
 
 `AgeStructuredPopulation.enable_gpu_particles(param_sets, n_replicates=1)` 让 `B` 个 particle **在设备 batch 轴上一起推进，

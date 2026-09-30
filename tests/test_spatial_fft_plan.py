@@ -198,6 +198,14 @@ def test_migration_execution_fft_builds_with_plan():
     pop = _builder("fft").build()
     assert pop is not None
     assert pop._fft_migration_plan is not None  # noqa: SLF001 - test inspects the plan
+    # Route A skips the CSR fold entirely.
+    assert pop._migration_csr.dest_idx.size == 0  # noqa: SLF001
+
+
+def test_migration_execution_fft_cpu_run_requires_gpu():
+    pop = _builder("fft").build()
+    with pytest.raises(Exception):  # noqa: B017,PT011 - the session rejects the CPU run
+        pop.run(1, record_every=0)
 
 
 def _spatial_population(execution: str, name: str):

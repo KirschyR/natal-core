@@ -1686,6 +1686,14 @@ impl SpatialSession {
             outcome.map_err(map_lifecycle_error)?;
             return Ok(self.state_tick);
         }
+        #[cfg(feature = "gpu")]
+        if self.migration_plan.is_some() {
+            // Route A folded no CSR, so a CPU run would silently skip migration.
+            return Err(PyValueError::new_err(
+                "migration_execution='fft' requires the GPU device path; call \
+                 enable_gpu() before running",
+            ));
+        }
         let n_demes = self.deme_variants.len();
         // Per-deme ECO scratch rows for OP_SET_PARAM; written back into
         // the ecology columns after all demes ticked.

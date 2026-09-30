@@ -170,6 +170,12 @@ session → executor；默认 `"csr"` 路径一行不改。
 
 **S2c 状态（2026-09-29，已验）**：接线完成（默认关闭、`"fft"` 需显式选择）——`GpuExecutor` 增 `fft: Option<FftMigrator>`、`enable_fft_migration`（含预算）、`has_fft_migration`、`migrate_tick_fft`；`SpatialSession` 增 `migration_plan` 构造参数与 `enable_gpu` 接线、`run_gpu_tick` 在确定性 + FFT 就绪时走 `migrate_tick_fft`；Python `SpatialPopulation` 在 `migration_execution="fft"` 时构建 `MigrationFFTPlan` 并透传（移除占位异常），backend/`_engine_rs.pyi` 同步。端到端（5×5,k=5,deterministic,3 ticks）GPU-FFT vs CPU-CSR：max_rel **1.5e-7**（f32 档）。门禁：`cargo test` 67 / `--features gpu` 263、`check_rust.py` EXIT=0、`phase0` bit-identical、`pytest` 3659、`ruff` 通过、`pyright` 基线 1165（无新增）。
 
-**S3（中英文档 + 全量门禁 + 残余）待做。** 残余：`"fft"` 仍会折叠 CSR（构建墙仍在，S3 可跳过）；`fft`+`stochastic` 未接（计划忽略，需守卫/文档）；hooks/history、`restore→run`、wrap/`include_center`、不规则掩膜、大域性能未测。
+**S3 状态（2026-09-29，已验）**：
+- **文档**：`docs/{zh,en}/4_simulation_engine.md` §11.3b「路线 A：FFT 迁移」；`migration_execution` docstring 注明确定性 GPU 限制。
+- **消除构建墙**：`migration_execution="fft"` 时**不再折叠 CSR**（改用空 CSR 满足冻结契约），运行时由设备 cuFFT 完成迁移；e2e `_migration_csr.dest_idx.size == 0`。
+- **CPU 守卫**：`"fft"` 未 `enable_gpu()` 即运行 → 会话显式 `PyValueError`（不会静默跳过迁移）；`stochastic` 与 `include_center=True` 均显式拒绝。
+- **门禁**：`cargo test` 67 / `--features gpu` 263、`check_rust.py` EXIT=0、`phase0` bit-identical、`pytest` 3661、`ruff` 通过、`pyright` 基线 1165。
+
+**残余（未覆盖）**：`"fft"` 下的 hooks/history、`restore→run`、`wrap=True`、`include_center=True`、不规则掩膜、大域/大核性能未测；`MigrationFFTPlan`/`build_fft_migration_plan` 仍为模块内（未入 `__all__`），公开文档仅覆盖 `migration_execution`。
 
 **S2c 设计要点**：`gpu_fft_migrate` 目前自建 context/stream（便于隔离测试），接线时重构为接收 executor 的 stream/设备缓冲；`GpuExecutor` 增 `migration_plan` 与 `migrate_tick_fft`，`SpatialSession::enable_gpu` 在计划存在时构建 FFT 执行器，预算按 `O(P·(rows+2R)(cols+2R))` 估算。

@@ -933,17 +933,30 @@ class SpatialPopulation:
         rate_2d = normalize_migration_rate(
             migration_rate, n_sexes, n_ages, adult_start_age
         )
-        migration_csr = fold_migration_csr(
-            n_demes=n_demes,
-            topology=topology,
-            adjacency_dense=adjacency_dense,
-            migration_kernel=migration_kernel,
-            kernel_bank=normalized_kernel_bank,
-            deme_kernel_ids=normalized_deme_kernel_ids,
-            kernel_include_center=bool(kernel_include_center),
-            adjust_on_edge=bool(adjust_migration_on_edge),
-            mode=migration_mode,
-        )
+        if self._fft_migration_plan is not None:
+            # Route A: the device FFT plan replaces the CSR, so skip the
+            # O(n_demes * kernel^2) fold entirely (the M3 build wall) and hand
+            # the engine an empty no-edge CSR that still satisfies the frozen
+            # contract.  CPU runs are rejected at the session boundary
+            # (migration_execution='fft' requires enable_gpu).
+            migration_csr = MigrationCSR(
+                indptr=np.zeros(n_demes + 1, dtype=np.int64),
+                dest_idx=np.zeros(0, dtype=np.int64),
+                weights=np.zeros(0, dtype=np.float64),
+                stay_after_send=True,
+            )
+        else:
+            migration_csr = fold_migration_csr(
+                n_demes=n_demes,
+                topology=topology,
+                adjacency_dense=adjacency_dense,
+                migration_kernel=migration_kernel,
+                kernel_bank=normalized_kernel_bank,
+                deme_kernel_ids=normalized_deme_kernel_ids,
+                kernel_include_center=bool(kernel_include_center),
+                adjust_on_edge=bool(adjust_migration_on_edge),
+                mode=migration_mode,
+            )
         self._migration_csr = migration_csr
         rate3d = np.tile(rate_2d, (n_demes, 1, 1))
         self._blueprint, self._params = materialize(

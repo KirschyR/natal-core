@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §23（M4 路线 A S3 §21.8）= **APPROVED**（路线 A S0–S3 全部闭环） |
-| 待回执 | §24（M1 遗传一步对照）→ 期望 §25 |
-| 主 agent 处理 | M1 homing 一步对照（natal `offspring_tensor` == 论文 `mats`，max_abs=0）；M5 勘察完成，待实施 |
-| 待 evaluator 动作 | 独立核对 §24 的映射与等价性 |
+| 最近回执 | §25（M1 遗传一步对照）= **APPROVED** |
+| 待回执 | —（下一交接为 M5 完成后的 §26） |
+| 主 agent 处理 | M0–M4（含 route A）与 M1 均闭环并复核通过；**M5（径向/线性释放）勘察完成，待实施** |
+| 待 evaluator 动作 | —（M5 交接后） |
 
 ---
 
@@ -541,6 +541,11 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 ### 24.5 残余
 - 仅 homing（一基因座 5 型）；TARE/TADE/CifAB/2-locus(25)/Wolbachia(2) 未逐一映射；`ddfitness`/性别特异未扫。
 - 未做 natal `run` 一步新生儿分布 vs 论文 `renew_function` 的端到端对照（本阶段在**表级**验证等价）。
+
+### 24.6 M1 闭环（主 agent）
+
+§25 = **APPROVED**。M1（homing 一步算子）闭环。非阻断建议：F1 补 `herr≠0`（或不对称性别率）用例以钉住母/父轴序；
+F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径。后续进入 **M5**。
 
 ---
 
@@ -1532,3 +1537,50 @@ evaluator 复跑全部门禁 **全绿**。§14 的 NOT APPROVED 解除。S0/S1/S
 - M4 路线 A 的剩余里程碑（M5 径向/M6 海南接入、M7 GPU 正确性/性能）按计划另立复核。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。§22 的 NOT APPROVED 已由本次修复解除。
+
+## §25 — M1 遗传一步对照 §24 独立审查回执（evaluator）
+
+### 25.0 裁定
+
+**APPROVED（M1 §24）**。风险分类：局部（复现脚本 + 数据），未改产品代码。「natal `offspring_tensor`
+与论文 homing `mats` 逐元素相等」经 evaluator 独立复现（含 MATLAB 参考交叉核对）确认；两处小限制见
+§25.3，均不影响结论。
+
+### 25.1 逐条独立核对（对应 §24.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | `paper_homing_mats` 忠实翻译 `drive_generator.m`（转置 + fitness cost） | **PASS**（MATLAB 逐位相等） |
+| 2 | 「精确相等」可信；基因型映射/`Res\|Res` 说明恰当 | **PASS**（映射正确；见 §25.3 小限制） |
+| 3 | natal preset 与论文同参（dc、无 resistance、无 fitness cost） | **PASS**（由精确相等反证） |
+
+### 25.2 独立证据
+
+- `python repro/m1_offspring_check.py`：dc=1.0/0.9/0.5 → `max_abs=0.0`，全表行和=1（复现提交 JSON）。
+- **MATLAB 交叉核对**（`addpath repro/ref/flat/homing; [~,dp]=drive_generator(0,dc,0,1)`）：
+  对 dc=1.0/0.9/0.5，MATLAB `dp.mats(25×5)` 与 Python `paper_homing_mats` **max|diff|=0.0**；
+  `carrier_index=[1 2 5]`。→ 翻译忠实。
+- **独立张量比较**：natal `P[np.ix_(idx,idx,idx)]` 与 `transpose(mats.reshape(5,5,5),(1,2,0))` **max|diff|=0.0**；
+  natal 全表 `P.sum(axis=2)==1`。
+- natal 侧参数：`HomingDrive(drive_conversion_rate=dc, late_germline_resistance_formation_rate=0.0)`，
+  其余默认 `embryo_resistance_formation_rate=0.0`、`functional_resistance_ratio=0.0`、无 fitness cost；
+  与 `gcr=0, herr=0, ddfitness=1` 同参（由与 MATLAB 的精确相等佐证）。
+
+### 25.3 小限制（非阻断）
+
+- **F1（低，轴序不可辨）**：本组参数（herr=0）下，论文 5×5 块在 `(i,j)` 上**严格对称**
+  （实测 `max|ref−refᵀ|ᵀ=0`）；故等价性测试**不能区分** `[mother,father]` 与 `[father,mother]` 轴序。
+  取 herr=0.3 时参考块非对称（实测 0.51），可作判别用例。建议：若要钉住「母 i × 父 j」的方向，
+  补一例 `herr≠0`（natal preset 用 `late_germline_resistance_formation_rate` 或不对称性别率）。
+  注：对称情形下该轴序不影响算子等价结论。
+- **F2（低，术语）**：报告 §3「论文 `mats` 列和不为 1（属构造如此）」与 §2「行和」并列易混；natal 是
+  `offspring_tensor` 行和=1，论文 `mats` 作为「父×子」算子其列和/行和口径不同——建议在报告中统一标注
+  其各自轴含义（natal `(M,F,O)` 对 P.sum(O)；论文 `mats[(k,i),j]`）。仅表述。
+
+### 25.4 残余
+
+- 仅 homing（一基因座 5 型）；TARE/TADE/CifAB/2-locus(25)/Wolbachia(2) 未逐一映射（§24.5）。
+- 仅**表级**一步算子等价；未做 natal `run` 一步新生儿分布 vs 论文 `renew_function` 的端到端对照（§24.5）。
+- `ddfitness`/性别特异未扫（§24.5）。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。

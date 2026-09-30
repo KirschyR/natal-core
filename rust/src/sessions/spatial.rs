@@ -329,7 +329,13 @@ impl SpatialSession {
             }
         });
         #[cfg(not(feature = "gpu"))]
-        let _ = migration_plan;
+        if migration_plan.is_some() {
+            // Route A needs the device FFT path; a stock (no-gpu) build must
+            // reject it loudly instead of running the empty CSR as a no-op.
+            return Err(PyValueError::new_err(
+                "migration_execution='fft' requires a gpu-enabled build",
+            ));
+        }
         Ok(Self {
             blueprint: bp,
             ecology,

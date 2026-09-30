@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §20（S2c 接线）= **APPROVED** |
-| 待回执 | §21（S3 文档/消除构建墙/CPU 守卫）→ 期望 §22 |
-| 主 agent 处理 | S0–S3 完成（默认关闭的 `"fft"` 路径端到端可用）；交接区追加 §21 |
-| 待 evaluator 动作 | 独立核对 §21 的跳过折叠、CPU 守卫与文档同步 |
+| 最近回执 | §22（S3 §21）= **NOT APPROVED**（默认构建静默 no-op；已修，见 §21.8） |
+| 待回执 | §21（含 §21.8 修复）再复核 → 期望 §23 |
+| 主 agent 处理 | 修复默认构建对 `"fft"` 的显式拒绝；默认构建 25 passed/2 skipped，gpu 构建全绿 |
+| 待 evaluator 动作 | 在**两种构建**复跑 `pytest`/`phase0`/`check_rust`，确认 F1 闭环 |
 
 ---
 
@@ -497,6 +497,19 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 ### 21.4 残余
 - `"fft"` 下 hooks/history、`restore→run`、`wrap=True`、`include_center=True`、不规则掩膜、大域/大核性能未测。
 - `MigrationFFTPlan`/`build_fft_migration_plan` 仍非 `__all__` 导出，公开文档仅 `migration_execution`。
+
+### 21.8 审查后修复（主 agent，响应 §22；默认构建显式拒绝）
+- **根因**：CPU 守卫被 `#[cfg(feature="gpu")]` 门控，而默认构建无 `gpu` → `"fft"` 以空 CSR 在 CPU 静默 no-op。
+- **修复 1**：`rust/src/sessions/spatial.rs::from_parts` 的 `#[cfg(not(feature="gpu"))]` 分支现当 `migration_plan.is_some()`
+  → `PyValueError("migration_execution='fft' requires a gpu-enabled build")`。空 CSR 不再可能落到 CPU 静默运行。
+- **修复 2（测试与能力对齐）**：`tests/test_spatial_fft_plan.py` 增 `_gpu_unavailable()`；`fft` 构建/e2e 用例在无 gpu
+  扩展时 `skip`；`test_migration_execution_fft_requires_gpu_path` 接受「构建或运行」显式报错。
+- **独立复现（默认构建）**：`unset PYTHONHOME PYO3_PYTHON PYTHONPATH && .venv/bin/maturin develop`（无 gpu）后：
+  `migration_execution="fft"` 构建 → `ValueError: migration_execution='fft' requires a gpu-enabled build`；
+  `pytest tests/test_spatial_fft_plan.py` = **25 passed, 2 skipped**（非 failed）。随后**已还原 gpu 构建**。
+- **gpu 构建**：`pytest tests/test_spatial_fft_plan.py` = **27 passed**；`pytest -q` = 3661；`cargo test` 67 /
+  `--features gpu` 263；`check_rust.py` EXIT=0；`phase0` bit-identical；`ruff` 通过；`pyright` 基线 1165。
+- 文档 §11.3b「未启用即运行会显式报错」现于**默认构建**亦成立。
 
 ---
 
@@ -1373,3 +1386,71 @@ evaluator 复跑全部门禁 **全绿**。§14 的 NOT APPROVED 解除。S0/S1/S
 - 建议 S3 完成前不将 `migration_execution="fft"` 作为推荐用法或默认；默认 `"csr"` 不变。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。
+
+## §22 — M4 路线 A S3 §21 独立审查回执（evaluator）
+
+### 22.0 裁定
+
+**NOT APPROVED（M4 §21 / S3）**。高风险（产品代码）。S3 的文档同步、跳过 CSR 折叠、stochastic 拒绝在
+`gpu` 构建下**均正确且门禁全绿**；但 **CPU 守卫被 `#[cfg(feature="gpu")]` 门控**，而**默认构建是
+`gpu` 关闭**——故在默认（非 gpu）构建下：`migration_execution="fft"` **静默跳过迁移**（空 CSR，无报错），
+且主 agent 新增的 `test_migration_execution_fft_cpu_run_requires_gpu` **在该构建下失败**（未 skip）。
+这违反文档 §11.3b「未启用即运行会显式报错，不会静默跳过迁移」的承诺，并使规范 `pytest` 门禁在默认
+配置失败。evaluator 已实际构建默认扩展复现。
+
+> 独立性声明：evaluator 备份并临时替换 `_engine_rs` 扩展为**默认（非 gpu）构建**复现失败，随后**已还原**
+> gpu 扩展（103647136 B）；`git status` 干净，未改任何 tracked 文件。
+
+### 22.1 逐条独立核对（对应 §21.3）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | 跳过折叠：空 CSR 满足契约、`csr` 默认未变、`phase0` bit-identical、`fft` e2e 一致 | **PASS（gpu 构建）** |
+| 2 | CPU 守卫：有计划且无设备执行器时报错；不误伤 `csr` | **FAIL（默认非 gpu 构建）**（§22.2） |
+| 3 | 文档 zh/en §11.3b 同步、准确 | **部分 FAIL**：承诺在默认构建不成立（§22.3） |
+| 4 | 默认关闭、`"csr"` 行为不变 | **PASS** |
+
+### 22.2 独立复现证据
+
+- **gpu 构建（当前安装）**：全门禁绿——`scripts/check_rust.py` EXIT=0；`cargo test --features gpu` 263 passed；
+  `phase0` bit-identical；`pytest -q` 3661 passed；`tests/test_spatial_fft_plan.py` 27 passed（含
+  `test_migration_execution_fft_matches_csr_on_device` 真实执行，GPU-FFT vs CPU-CSR `max_rel ~1.5e-7`）；
+  `ruff` 通过。
+- **默认（非 gpu）构建**（`unset PYTHONHOME PYO3_PYTHON PYTHONPATH; .venv/bin/maturin develop`，pyproject
+  `features=["extension-module"]`，即无 `gpu`）：
+  - `gpu_status() == "unavailable"`；
+  - `migration_execution="fft"` 建出的种群 `_migration_csr.dest_idx.size == 0`；
+  - `sp.run(1)` **正常返回、无异常**（对比 e2e：种群总量前后不变 → 迁移被静默跳过）；
+  - `pytest tests/test_spatial_fft_plan.py` → **1 failed, 25 passed, 1 skipped**：
+    `test_migration_execution_fft_cpu_run_requires_gpu`：`Failed: DID NOT RAISE Exception`。
+  - 复核后已 `cp` 还原 gpu 扩展，重跑该文件 27 passed。
+
+### 22.3 根因
+
+- `rust/src/sessions/spatial.rs`：`migration_plan` 字段与 `run_inner` 的 CPU 守卫均为 `#[cfg(feature="gpu")]`；
+  `from_parts` 在 `#[cfg(not(feature="gpu"))]` 分支 `let _ = migration_plan;` **静默丢弃**（`:331-332`）。
+- `pyproject.toml:123 features=["extension-module"]` + `Cargo.toml` `[features]` 默认无 `gpu` →
+  规范（默认）构建即非 gpu；此时前端 `population.py` 仍无条件构建并传递 `MigrationFFTPlan`，CPU 路径以
+  空 CSR 运行 → **静默 no-op 迁移**。
+- 新增测试 `test_migration_execution_fft_cpu_run_requires_gpu` 未按构建能力 skip，故在默认构建失败。
+
+### 22.4 修复目标（最小、可复现）
+
+1. **非 gpu 构建显式拒绝**：在 `spatial.rs::from_parts` 的 `#[cfg(not(feature="gpu"))]` 分支，若
+   `migration_plan.is_some()` 返回 `PyValueError`（例如 "migration_execution='fft' requires a gpu-enabled
+   build"）；或等效地在前端按 backend 能力（`gpu_status()=="unavailable"`）拒绝。**空 CSR 绝不能再落到
+   CPU 路径静默运行。**
+2. **测试与构建能力对齐**：`test_migration_execution_fft_cpu_run_requires_gpu` 在扩展无 `gpu` 时应断言
+   「构建/运行显式报错」并在无 gpu 时同样期望异常（修复 1 后自然成立）；避免仅在 gpu 构建通过。
+3. **文档核对**：§11.3b 的「未启用即运行会显式报错」需在默认构建亦成立（修复 1 后应重跑默认构建验证）。
+   回归命令（默认构建）：
+   `unset PYTHONHOME PYO3_PYTHON PYTHONPATH && .venv/bin/maturin develop && .venv/bin/python -m pytest tests/test_spatial_fft_plan.py -q`
+   期望 EXIT=0（修复前实测 1 failed）。
+
+### 22.5 残余
+
+- §21.4 所列（`fft` 下 hooks/history、`restore→run`、`wrap`、`include_center`、不规则掩膜、大域/大核性能）不变。
+- 修复 1 后需在**两种构建**（默认非 gpu 与 `--features gpu`）分别复跑 `pytest`/`phase0`/`check_rust`，
+  并确认 gpu 构建下 e2e 仍一致。
+
+> 审查期间未改任何仓库源码；evaluator 临时替换的 `_engine_rs` 扩展已还原为 gpu 构建。

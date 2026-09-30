@@ -122,6 +122,9 @@ sperm_new = sperm·(1−rate_f) + K'⊛(rate_f·sperm/Z)  # sperm plane（每 A�
 **预计算（每拓扑一次）**：`R=(k-1)/2`、`fr=rows+k-1`、`fc=cols+k-1`、`spec_n=fr·(fc/2+1)`；
 主机端 `Kpad`（`(fr,fc)`，把 `K'` 放左上角）→ 其 r2c 谱 `KS`（`(spec_n,)` complex），并对 `KS` **乘 `1/(fr·fc)`**（逆变换归一）。
 
+> 阶段差异：**S2b 隔离版**为「逐平面 host 迭代 + host 侧谱乘 + 自建 context/stream」（便于单测）；
+> **S2c 目标版**为「`plan_many` batch=P + 设备侧谱乘 + 复用 executor 的 stream/缓冲」。下述四步为目标版形态。
+
 **每 tick（每平面）四步**：
 1. `scatter_g`（NVRTC）：`pad[i*fr*fc + r*fc + c] = rate_p(deme)·plane[deme] / Z[deme]`（`r<rows,c<cols`，其余 0）；
    `rate_p` 由紧凑 `rate(deme,2,A)` 与平面描述（sex,age）索引。

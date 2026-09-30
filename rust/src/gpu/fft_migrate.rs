@@ -355,9 +355,15 @@ mod tests {
         z
     }
 
-    #[test]
-    fn fft_migrate_matches_csr() {
-        let (rows, cols, a, ztypes, k, sigma) = (4usize, 3usize, 2usize, 2usize, 3usize, 1.0f64);
+    fn check_fixture(
+        rows: usize,
+        cols: usize,
+        a: usize,
+        ztypes: usize,
+        k: usize,
+        sigma: f64,
+        stay_after: bool,
+    ) {
         let n = rows * cols;
         let ker = hex_kernel(k, sigma);
         let (indptr, dest, weights) = build_csr(rows, cols, k, &ker);
@@ -386,7 +392,7 @@ mod tests {
         }
 
         let (cpu_ind, cpu_sperm) = migrate_csr_deterministic(
-            &ind_dm, &sperm_dm, &indptr, &dest, &weights, &rate, false, n, a, ztypes,
+            &ind_dm, &sperm_dm, &indptr, &dest, &weights, &rate, stay_after, n, a, ztypes,
         )
         .expect("cpu csr migration");
 
@@ -426,5 +432,19 @@ mod tests {
             }
         }
         assert!(max_rel < 1e-4, "fft vs csr max relative error {max_rel}");
+    }
+
+    #[test]
+    fn fft_migrate_matches_csr() {
+        // Cover both CSR bookkeeping orders (the runtime folds `stay_after=true`)
+        // and a few shapes, including a boundary-dominated tiny grid.
+        for &(rows, cols, a, zt, k, sigma) in &[
+            (4usize, 3usize, 2usize, 2usize, 3usize, 1.0f64),
+            (7usize, 5usize, 1usize, 2usize, 5usize, 1.4f64),
+            (3usize, 3usize, 1usize, 1usize, 3usize, 0.9f64),
+        ] {
+            check_fixture(rows, cols, a, zt, k, sigma, false);
+            check_fixture(rows, cols, a, zt, k, sigma, true);
+        }
     }
 }

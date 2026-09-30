@@ -27,10 +27,10 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §12（M4 路线 A §11）= **APPROVED**（仅原型/设计） |
-| 最近回执 | §16（路线 A S0+S1+S2a）= **APPROVED** |
-| 待回执 | §17（S2b 设备级 FFT 迁移内核）→ 期望 §18 |
-| 主 agent 处理 | S0+S1+S2a 闭环；S2b 设备级内核完成，交接区追加 §17 |
-| 待 evaluator 动作 | 独立核对 §17 的 `gpu_fft_migrate` 与 CPU CSR 等价性、默认关闭 |
+| 最近回执 | §18（S2b 设备级 FFT 内核）= **APPROVED**（已吸收 §18.4 的 F1–F3，见 §17.6） |
+| 待回执 | —（下一交接为 S2c 完成后的 §19） |
+| 主 agent 处理 | S0+S1+S2a+S2b 闭环；进入 **S2c**（executor/session/前端接线 + 预算） |
+| 待 evaluator 动作 | —（S2c 交接后） |
 
 ---
 
@@ -427,6 +427,13 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 - **S2c**：`GpuExecutor`/`SpatialSession`/`schema` 接线（复用 executor 的 stream/缓冲、预算、`enable_gpu` 选择）、
   `SpatialPopulation` 把 `MigrationFFTPlan` 传到 backend；**S3**：中英文档 + 全量门禁。均未做，默认关闭。
 - `gpu_fft_migrate` 当前自建 context/stream（便于隔离测试），S2c 重构为复用执行器上下文。
+
+### 17.6 审查后测试/文档补强（主 agent，响应 §18.4；仅测试/文档）
+- **F1**：`fft_migrate_matches_csr` 现对每个 fixture 覆盖 `stay_after` **true 与 false**（运行时为 `true`）。
+- **F2**：参数化多 fixture：`4×3 k=3`、`7×5 k=5`、`3×3 k=3`（边界主导）。
+- **F3**：设计 §10 已标注「S2b 隔离版（逐平面 host 迭代 + 自建 context） vs S2c 目标版（`plan_many` batch=P + 设备谱乘 + 复用 executor）」。
+- 复验：`cargo test --features gpu gpu::fft_migrate` = **1 passed**（多 fixture × 两种 `stay_after`）；
+  `cargo fmt --check`、`clippy --features gpu -D warnings`、`scripts/check_rust.py` = EXIT=0；`phase0` bit-identical。
 
 ---
 
@@ -1170,5 +1177,68 @@ evaluator 复跑全部门禁 **全绿**。§14 的 NOT APPROVED 解除。S0/S1/S
 2. **S2b**（executor cuFFT 内核 + 会话接线 + 预算）、**S3**（会话开关文档/全量门禁）未做；
    `migration_execution` 的 clone/definition 往返语义未专门测试（当前仅 csr 可用，暂无影响）。
 3. `wrap=True` 重复目的地、`include_center=True`、不规则掩膜、多类批处理未验（§13.5）。
+
+> 审查期间未改任何仓库源码或数据；仅新增本回执。
+
+## §18 — M4 路线 A S2b 设备级 FFT 内核 §17 独立审查回执（evaluator）
+
+### 18.0 裁定
+
+**APPROVED（M4 路线 A S2b：隔离设备内核）**。高风险（产品代码，`gpu` feature 内）。`gpu_fft_migrate`
+与既有 CPU `migrate_csr_deterministic` 的等价性经推导与单测确认；该模块**未接运行路径、默认不启用**，
+`migration_execution="fft"` 仍显式 `NotImplementedError`，CPU 数值语义与 `phase0` 不受影响。S2c/S3 未做，不在范围。
+
+> 独立性声明：evaluator 在当前提交（`16fcd6f`，工作树干净）复跑全部硬门禁并自行核验等价性推导。
+
+### 18.1 逐条独立核对（对应 §17.4）
+
+| # | 核对点 | 结论 |
+|---|---|---|
+| 1 | `gpu_fft_migrate` 等价 `migrate_csr_deterministic`（布局/索引/边界） | **PASS**（§18.2） |
+| 2 | 数值对齐：`'same'` 裁剪、核去中心、`Z` 口径、`1/(fr·fc)` | **PASS**（§18.2） |
+| 3 | `gpu` feature 内、无运行路径引用 | **PASS**（§18.3） |
+| 4 | 未覆盖面（随机/wrap/include_center/掩膜/多类/性能） | **已知残余**（§18.4） |
+
+### 18.2 等价性推导核对（evaluator 独立推演）
+
+- **布局/索引**：`scatter_g` 以 `rate[deme·(2A) + sex·A+age]` 索引 compact rate（deme-major `(n,2,A)`）；
+  ind 平面 `(sex·A+age)·Z+z`、sperm 平面 `(age·Z+fz)·Z+mz`，与 CPU 函数一致；sperm 用 `rate_off=age`
+  （sex 0 = female rate），与 CPU「stored sperm 随 female rate」一致。
+- **`'same'` 裁剪**：信号与去中心核 `K'` 均零填充到 `(fr,fc)=(rows+k−1,cols+k−1)`，`r2c·c2r` 即**线性卷积**
+  （无 circular wrap）；`out_full[r+R,c+R]=Σ_o K'[o]·g(d−o)`，与 CSR `weight(s→d)=K'[o]/Z(s)` 的
+  `Σ_o rate·K'[o]·plane(d−o)/Z(d−o)` 逐项相同（推导确认，无需核对称性）。
+- **`Z`/去中心**：`K'` 排除中心（`:160-161`），`Z=K'⊛m` 与 fold 每行分母一致；中心由 `plane·(1−rate)` 保留。
+- **归一化**：`complex_mul` 折叠 `1/(fr·fc)`，补偿 cuFFT C2R 未归一化。
+- **virgin/stored 记账**：CPR ind 平面的 virgin+stored 均按 female rate 迁移，净效果 = 对 `ind` 平面整体做
+  归一化卷积，故设备内核逐平面作用即等价（与 §17.2 一致）。
+- **独立运行新单测**：`cargo test --features gpu gpu::fft_migrate::tests::fft_migrate_matches_csr` → **1 passed**
+  （`max_rel < 1e-4`）。
+
+### 18.3 隔离性与门禁（当前提交）
+
+- **未接线**：`grep -rn "gpu_fft_migrate" rust/src` 除定义/测试外**无调用者**；`migration_execution="fft"`
+  仍抛 `NotImplementedError`（`population.py:796`）。
+- `cargo fmt -- --check` = **EXIT=0**；`scripts/check_rust.py` = **EXIT=0**（fmt/clippy/check/`test --lib` 67）。
+- `cargo clippy --features gpu -- -D warnings` = **PASS**；`cargo test --features gpu` = **262 passed**（含新单测）。
+- `scripts/phase0_baseline.py --check` = **all bit-identical，EXIT=0**。
+- `pytest -q` = **3658 passed**；`ruff check src demos` = All checks passed（本次仅 Rust+文档改动，Python 面未变）。
+
+### 18.4 非阻塞发现
+
+- **F1（低，测试口径）**：`fft_migrate_matches_csr` 给 CPU 参照传 `stay_after=false`，而 CSR fold 的实际
+  运行时为 `stay_after_send=True`。二者在**行权重和=1** 时数值等价（本测试 `build_csr` 每行除以自身和），
+  且 `false` 分支的保留量 `value−rate·value` 恰与 conv 的 `plane·(1−rate)` 同式；故不清除风险。建议补一例
+  `stay_after=true` 以覆盖真实路径。
+- **F2（低，覆盖广度）**：等价性仅 1 个 fixture（`4×3, k=3, A=2, Z=2, σ=1`）。建议加一例异形/异 `k`（如
+  `7×5,k=5`）与一个边界主导的小网格，提升对索引/裁剪的回归力。§17.4.4/§17.5 已列其余未覆盖面。
+- **F3（低，文档一致性）**：设计 §10 描述的目标形态是 `plan_many` batch=P + 设备侧谱乘；当前 S2b 为
+  逐平面 host 迭代 + host 侧谱乘（§17.1/§17.5 已说明 S2c 重构）。属阶段差异，建议 §10 标注「S2b 隔离版 vs S2c 目标版」。
+
+### 18.5 范围 / 残余
+
+- 本批准仅覆盖 S2b 隔离设备内核；**S2c**（executor/session/schema 接线、复用 stream/缓冲、预算、
+  `MigrationFFTPlan` 前端传递）与 **S3**（中英文档 + 全量门禁）未做。
+- `wrap=True`（需 circular conv）、`include_center=True`、不规则掩膜、多类更大 P、随机路径、性能均未验。
+- S2c 接线后需重跑全量门禁并复核「restore→run」状态往返与预算失败路径。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。

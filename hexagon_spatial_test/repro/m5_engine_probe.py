@@ -199,7 +199,7 @@ def main() -> int:
         backend.enable_gpu()
         print("gpu status:", backend.gpu_status())
 
-    pop.run(n_steps=args.weeks)
+    pop.run(n_steps=args.weeks, record_every=0)
     s = carrier_frequency_grid(pop, m, n, carrier_idx, adult)
     cov = coverage(s, ref._mround(m / 2.0) - 1)
     print(f"engine {m}x{n} (t={args.t},h={args.h},r={args.r}) exec={args.execution}")

@@ -1,0 +1,31 @@
+{
+  "arena": 500,
+  "t": 1,
+  "h": 10.0,
+  "r": 0.0,
+  "weeks": 104,
+  "engine_overwritten_age0_per_deme": 40.00000000000001,
+  "reference_ages0": 40.0,
+  "variants": {
+    "original(40)": {
+      "0.5": {
+        "diameter": 500.0,
+        "area": 200738.0
+      },
+      "0.9": {
+        "diameter": 420.0,
+        "area": 166434.0
+      }
+    },
+    "age0=0": {
+      "0.5": {
+        "diameter": 500.0,
+        "area": 203476.0
+      },
+      "0.9": {
+        "diameter": 436.0,
+        "area": 172978.0
+      }
+    }
+  }
+}

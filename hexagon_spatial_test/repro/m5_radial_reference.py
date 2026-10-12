@@ -149,11 +149,18 @@ def run(
     collect_weeks: tuple[int, ...] = (104, 261),
     max_ticks: int = 261,
     capture_maps: bool = False,
+    initial_age0: float | None = None,
 ) -> RadialResult:
-    """Run one radial-release configuration (reference semantics)."""
+    """Run one radial-release configuration (reference semantics).
+
+    ``initial_age0`` optionally overrides the age-0 (egg pool) initial value
+    for the WT genotype; ``None`` keeps the reference ``ages[0] = eggs``.
+    """
     age = model_ages()
     data = np.zeros((N_Z, AGES, m, n))
     data[CORD_PURE_W, :, :, :] = age[:, None, None]
+    if initial_age0 is not None:
+        data[CORD_PURE_W, 0, :, :] = initial_age0
 
     release_mat = np.zeros_like(data)
     mask = release_geometry(m, n, r)

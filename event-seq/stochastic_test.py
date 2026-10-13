@@ -27,19 +27,26 @@ import age_model as m  # noqa: E402
 
 IMG = HERE / "img"
 ORDERS = ["R-S-A", "S-A-R"]
+# Initial-population scaling factor: every per-group count is multiplied by this
+# (the density reference scales too, so normalized dynamics are unchanged).
+SCALING_FACTOR = 10.0
 
 
-def run_replicates(order: str, runs: int, ticks: int, dc: float) -> dict[str, np.ndarray]:
+def run_replicates(order: str, runs: int, ticks: int, dc: float,
+                   scaling_factor: float) -> dict[str, np.ndarray]:
     """Return ``{category: (runs, ticks+1)}`` trajectories."""
     series = {key: np.zeros((runs, ticks + 1)) for key in m.CATEGORIES}
     for r in range(runs):
-        history = m.Simulation(dc=dc, stochastic=True, seed=r).run(order, ticks)
+        history = m.Simulation(
+            dc=dc, stochastic=True, seed=r, scale=scaling_factor
+        ).run(order, ticks)
         for key in m.CATEGORIES:
             series[key][r] = [h[key] for h in history]
     return series
 
 
-def plot_order(order: str, series: dict[str, np.ndarray], runs: int, dc: float) -> Path:
+def plot_order(order: str, series: dict[str, np.ndarray], runs: int, dc: float,
+               scaling_factor: float) -> Path:
     x = np.arange(series[m.CATEGORIES[0]].shape[1])
     fig, axes = plt.subplots(4, 2, figsize=(11, 13), sharex=True)
     for ax, key in zip(axes.ravel(), m.CATEGORIES):
@@ -55,10 +62,13 @@ def plot_order(order: str, series: dict[str, np.ndarray], runs: int, dc: float) 
     axes[0, 0].legend(loc="upper right", fontsize=8)
     for ax in axes[-1]:
         ax.set_xlabel("tick")
-    fig.suptitle(f"event order: {order} | stochastic (n={runs}) | dc={dc}", fontsize=14)
+    fig.suptitle(
+        f"event order: {order} | stochastic (n={runs}) | dc={dc} | sf={scaling_factor:g}",
+        fontsize=13,
+    )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
 
-    out = IMG / f"order_{order.replace('-', '')}_stoch.png"
+    out = IMG / f"order_{order.replace('-', '')}_stoch_sf{scaling_factor:g}.png"
     fig.savefig(out, dpi=150)
     plt.close(fig)
     return out
@@ -69,12 +79,13 @@ def main() -> int:
     ap.add_argument("--runs", type=int, default=100)
     ap.add_argument("--ticks", type=int, default=60)
     ap.add_argument("--dc", type=float, default=0.8)
+    ap.add_argument("--scaling-factor", type=float, default=SCALING_FACTOR)
     args = ap.parse_args()
 
     IMG.mkdir(parents=True, exist_ok=True)
     for order in ORDERS:
-        series = run_replicates(order, args.runs, args.ticks, args.dc)
-        out = plot_order(order, series, args.runs, args.dc)
+        series = run_replicates(order, args.runs, args.ticks, args.dc, args.scaling_factor)
+        out = plot_order(order, series, args.runs, args.dc, args.scaling_factor)
         final = series["A_F_D"] + series["A_M_D"]
         adult = final + series["A_F_W"] + series["A_M_W"]
         frac = final[:, -1] / np.where(adult[:, -1] > 0, adult[:, -1], np.nan)

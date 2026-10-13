@@ -61,6 +61,12 @@ INITIAL_MALE = np.array(
 )
 DRIVE_FRACTION_OF_AGE2 = 0.1
 
+# Equilibrium juvenile density in the density ratio ``r = (j0 + 5*j1) / D``:
+# age-0 total (= eggs = 40) + 5 * age-1 total (= 4/(F+1)).  Scaling the initial
+# state by ``s`` scales this reference by ``s`` too, keeping the normalized
+# dynamics unchanged while the population size grows.
+DENSITY_REF = EGGS + 5.0 * (4.0 / (F + 1))
+
 # category labels in the 4x2 plotting order
 CATEGORIES = ["A_F_W", "A_F_D", "A_M_W", "A_M_D", "J_F_W", "J_F_D", "J_M_W", "J_M_D"]
 
@@ -118,13 +124,18 @@ def homing_mats(dc: float = 1.0, gcr: float = 0.0, herr: float = 0.0,
 DEFAULT_MATS = homing_mats()
 
 
-def initial_state() -> np.ndarray:
-    """Return the ``(N_Z, N_SEX, N_AGES)`` initial state."""
+def initial_state(scale: float = 1.0) -> np.ndarray:
+    """Return the ``(N_Z, N_SEX, N_AGES)`` initial state, times ``scale``.
+
+    ``scale`` multiplies every per-group count uniformly (a larger population
+    with the same age/genotype composition); the density reference scales with
+    it, so the normalized dynamics are unchanged.
+    """
     data = np.zeros((N_Z, N_SEX, N_AGES))
-    data[CORD_PURE_W, 0, :] = INITIAL_FEMALE
-    data[CORD_PURE_W, 1, :] = INITIAL_MALE
+    data[CORD_PURE_W, 0, :] = scale * INITIAL_FEMALE
+    data[CORD_PURE_W, 1, :] = scale * INITIAL_MALE
     data[CORD_RELEASE_GENOTYPE, 1, NEW_ADULT_AGE] = (
-        DRIVE_FRACTION_OF_AGE2 * INITIAL_MALE[NEW_ADULT_AGE]
+        scale * DRIVE_FRACTION_OF_AGE2 * INITIAL_MALE[NEW_ADULT_AGE]
     )
     return data
 
@@ -150,11 +161,11 @@ def event_R(data: np.ndarray, newborns: np.ndarray) -> None:
     data[:, 1, 0] = (1.0 - SEX_RATIO) * newborns
 
 
-def event_S(data: np.ndarray) -> None:
+def event_S(data: np.ndarray, density_ref: float = DENSITY_REF) -> None:
     """Density regulation (Beverton-Holt) plus age survival, in place."""
     j0 = float(data[:, :, 0].sum())
     j1 = float(data[:, :, 1].sum())
-    r = (j0 + 5.0 * j1) / (EGGS + 5.0 * (4.0 / (F + 1)))
+    r = (j0 + 5.0 * j1) / density_ref
     s1 = LAMBDA / ((LAMBDA - 1.0) * r + 1.0) * 2.0 / SF / EGGS
     data[:, :, 0] *= s1
     data *= SURVIVAL
@@ -189,27 +200,33 @@ def classify(data: np.ndarray) -> dict[str, float]:
     return out
 
 
-def run(order: str, n_ticks: int, mats: np.ndarray | None = None) -> list[dict[str, float]]:
+def run(
+    order: str, n_ticks: int, mats: np.ndarray | None = None, scale: float = 1.0
+) -> list[dict[str, float]]:
     """Run ``n_ticks`` ticks under a given event ``order`` (e.g. ``"R-S-A"``).
 
     Reproduction reads the tick-start adults (before any event), so the order
     only changes when the newborn cohort is written and when density regulation
-    acts on it.
+    acts on it.  ``scale`` multiplies the initial state (and the density
+    reference), for a larger population with identical normalized dynamics.
     """
     mats = DEFAULT_MATS if mats is None else mats
     events = order.split("-")
     for name in events:
         if name not in _EVENTS:
             raise ValueError(f"unknown event {name!r} in order {order!r}")
-    data = initial_state()
+    data = initial_state(scale)
+    density_ref = scale * DENSITY_REF
     history = [classify(data)]  # t = 0
     for _ in range(n_ticks):
         newborns = newborn_counts(data, mats)
         for name in events:
             if name == "R":
                 event_R(data, newborns)
+            elif name == "S":
+                event_S(data, density_ref)
             else:
-                _EVENTS[name](data)
+                event_A(data)
         history.append(classify(data))
     return history
 
@@ -278,12 +295,14 @@ class Simulation:
     """
 
     def __init__(self, *, dc: float = 1.0, stochastic: bool = False,
-                 seed: int | None = None) -> None:
-        """Create a simulation with the given drive conversion rate."""
+                 seed: int | None = None, scale: float = 1.0) -> None:
+        """Create a simulation with the given drive conversion rate and scale."""
         self.mats = homing_mats(dc=dc)
         self.stochastic = stochastic
         self.rng = np.random.default_rng(seed)
-        self.data = initial_state()
+        self.scale = scale
+        self.data = initial_state(scale)
+        self.density_ref = scale * DENSITY_REF
 
     def _newborn(self) -> np.ndarray | None:
         data = self.data
@@ -319,7 +338,7 @@ class Simulation:
         if self.stochastic:
             j0 = float(data[:, :, 0].sum())
             j1 = float(data[:, :, 1].sum())
-            r = (j0 + 5.0 * j1) / (EGGS + 5.0 * (4.0 / (F + 1)))
+            r = (j0 + 5.0 * j1) / self.density_ref
             s1 = LAMBDA / ((LAMBDA - 1.0) * r + 1.0) * 2.0 / SF / EGGS
             age0 = data[:, :, 0].reshape(-1)
             total0 = float(age0.sum())
@@ -333,7 +352,7 @@ class Simulation:
                             self.rng, data[z, sex, age], SURVIVAL[sex, age]
                         )
         else:
-            event_S(data)
+            event_S(data, self.density_ref)
 
     def step(self, order: str) -> None:
         """Advance the state by one tick under the given event order."""

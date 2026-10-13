@@ -170,9 +170,15 @@ _EVENTS = {"R": event_R, "S": event_S, "A": event_A}
 
 
 def classify(data: np.ndarray) -> dict[str, float]:
-    """Split the state into the eight ``{A,J}_{F,M}_{W,D}`` categories."""
+    """Split the state into the eight ``{A,J}_{F,M}_{W,D}`` categories.
+
+    ``A`` sums adult ages (>= ``NEW_ADULT_AGE``); ``J`` is **age 1 only**.  Age 0
+    is the egg/newborn pool, whose tick-boundary value differs by bookkeeping
+    between orders (transient in R-first orders, standing in R-last orders), so
+    it is excluded to keep the categories comparable.
+    """
     adults = slice(NEW_ADULT_AGE, N_AGES)
-    juveniles = slice(0, NEW_ADULT_AGE)
+    juveniles = slice(1, NEW_ADULT_AGE)
     out: dict[str, float] = {}
     for sex, sex_name in ((0, "F"), (1, "M")):
         for age_name, ages in (("A", adults), ("J", juveniles)):

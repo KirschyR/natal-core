@@ -53,8 +53,11 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
 4. **随机性**：natal 风格**连续采样**（Beta/Gamma），`n≤1` 时退化为确定性均值。因此
    - sf 较小时小类**无噪声**，只有大计数（卵）有噪声；
    - sf 增大后更多类进入采样 → 噪声来源增加；N 足够大时相对噪声 ∝ 1/√N 变小，**顺序效应显现**。
-5. **适合度代价**：`viability_dd`（作用于末幼期 age1）与 `fecundity_dd`（作用于繁殖）都会拖慢
-   drive；`fecundity_dd` 更直接削弱 dd 的繁殖输出、**放大顺序差异**。
+5. **适合度代价**：`viability_dd`（末幼期 age1）与 `fecundity_dd`（繁殖）都拖慢 drive。受控对比
+   （`dc=0.8, sf=10, ticks≤200, 100 次`，`Δ=RSA−SAR 的最终固定率`）：无代价 `+0.01`；仅
+   `viability=0.8` `+0.02`；仅 `fecundity=0.8` `+0.07`；两者皆 0.8 `+0.09`。→ **fecundity 代价更显著地
+   放大顺序差，viability 单独较弱，二者叠加最大**。（机制：代价使 drive 更勉强、早期随机丢失增多，
+   「R-SA 建立更快」的优势更凸显。注：此为**最终固定率**口径、对时机不敏感；顺序主效应是时机。）
 6. **初始额外队列的线性清除**：只加雄性时，额外 dd 队列随 5 个雄成年龄线性老化至死，
    总量每步减 `X/M`（X=额外量，M=5），**恢复时间由释放年龄决定（投 male0 则 5 tick），与数量无关**；
    这段线性下降与 Beverton–Holt 无关（BH 只钉平衡高度）。

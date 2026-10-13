@@ -31,7 +31,6 @@ from pathlib import Path
 
 import matplotlib
 import numpy as np
-import plotly.express as px
 from scipy.signal import fftconvolve
 
 matplotlib.use("Agg")
@@ -349,27 +348,6 @@ def main() -> int:
         det_coverage[order] = coverage[None, :, :]
     grids = np.array([adult_by_order[order] for order in ORDERS])
     np.savez(IMG / "spatial_event_order.npz", grids=grids, orders=np.array(ORDERS))
-
-    fig = px.imshow(
-        grids, animation_frame=1, facet_col=0, origin="upper",
-        color_continuous_scale="Viridis", zmin=0.0, zmax=1.0,
-        labels={"animation_frame": "tick", "facet_col": "order", "color": "Drive|Drive frac"},
-        aspect="equal",
-    )
-    for annotation in fig.layout.annotations:
-        if annotation.text in ("0", "1"):
-            annotation.text = ORDERS[int(annotation.text)]
-    fig.update_layout(
-        title={"text": "spatial event-order (adult Drive|Drive fraction): R-S-A vs S-A-R<br>"
-               + _params_title("<br>", stochastic=False, scale=1.0),
-               "x": 0.5, "xanchor": "center"},
-        coloraxis_colorbar_title="frac",
-    )
-    if fig.layout.updatemenus:
-        fig.layout.updatemenus[0].buttons[0].args[1]["frame"]["duration"] = 120
-    html_out = IMG / "spatial_event_order.html"
-    fig.write_html(html_out, include_plotlyjs="inline")
-    print(f"wrote {html_out}")
 
     det_out = _coverage_figure(
         det_coverage, args.ticks, IMG / "spatial_coverage_curves.png",

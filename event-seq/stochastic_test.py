@@ -31,6 +31,9 @@ ORDERS = ["R-S-A", "S-A-R"]
 # Initial-population scaling factor: every per-group count is multiplied by this
 # (the density reference scales too, so normalized dynamics are unchanged).
 SCALING_FACTOR = 10.0
+# Drive-homozygote fitness: viability at the last juvenile age, fecundity in reproduction.
+VIABILITY_DD = 0.8
+FECUNDITY_DD = 0.8
 
 
 def run_replicates(order: str, runs: int, ticks: int, dc: float,
@@ -39,7 +42,8 @@ def run_replicates(order: str, runs: int, ticks: int, dc: float,
     series = {key: np.zeros((runs, ticks + 1)) for key in m.CATEGORIES}
     for r in range(runs):
         history = m.Simulation(
-            dc=dc, stochastic=True, seed=r, scale=scaling_factor
+            dc=dc, stochastic=True, seed=r, scale=scaling_factor,
+            viability_dd=VIABILITY_DD, fecundity_dd=FECUNDITY_DD,
         ).run(order, ticks)
         for key in m.CATEGORIES:
             series[key][r] = [h[key] for h in history]
@@ -64,7 +68,8 @@ def plot_order(order: str, series: dict[str, np.ndarray], runs: int, dc: float,
     for ax in axes[-1]:
         ax.set_xlabel("tick")
     fig.suptitle(
-        f"event order: {order} | stochastic (n={runs}) | dc={dc} | sf={scaling_factor:g}",
+        f"event order: {order} | stochastic (n={runs}) | dc={dc} | sf={scaling_factor:g} "
+        f"| viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
         fontsize=13,
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
@@ -96,7 +101,8 @@ def plot_total_stochastic(
     ax.set_xlabel("tick")
     ax.set_ylabel("total population (eggs excluded)")
     ax.set_title(
-        f"stochastic total population (eggs excluded) | n={runs} | dc={dc} | sf={scaling_factor:g}"
+        f"stochastic total population (eggs excluded) | n={runs} | dc={dc} "
+        f"| sf={scaling_factor:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}"
     )
     ax.grid(alpha=0.3)
     ax.legend()
@@ -110,7 +116,7 @@ def plot_total_stochastic(
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=100)
-    ap.add_argument("--ticks", type=int, default=60)
+    ap.add_argument("--ticks", type=int, default=200)
     ap.add_argument("--dc", type=float, default=0.8)
     ap.add_argument("--scaling-factor", type=float, default=SCALING_FACTOR)
     args = ap.parse_args()

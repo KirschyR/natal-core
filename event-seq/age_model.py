@@ -148,16 +148,27 @@ def initial_state(scale: float = 1.0) -> np.ndarray:
     return data
 
 
-def newborn_counts(data: np.ndarray, mats: np.ndarray) -> np.ndarray:
-    """Newborn genotype counts from the current adult state, shape ``(N_Z,)``."""
+def newborn_counts(
+    data: np.ndarray, mats: np.ndarray, fecundity_dd: float = 1.0
+) -> np.ndarray:
+    """Newborn genotype counts from the current adult state, shape ``(N_Z,)``.
+
+    ``fecundity_dd`` scales the reproduction weight of the ``Drive|Drive``
+    genotype for **both parents** (egg production and mating), mirroring natal's
+    fecundity fitness.  It changes the newborn total and its genotype mix.
+    """
+    fecundity = np.ones(N_Z)
+    fecundity[DRIVE_GENOTYPE] = fecundity_dd
     female_adults = data[:, 0, NEW_ADULT_AGE:]
     male_adults = data[:, 1, NEW_ADULT_AGE:]
-    total_female = float(female_adults.sum())
-    total_male = float(male_adults.sum())
+    female_w = female_adults.sum(axis=1) * fecundity
+    male_w = male_adults.sum(axis=1) * fecundity
+    total_female = float(female_w.sum())
+    total_male = float(male_w.sum())
     if total_female <= 0.0 or total_male <= 0.0:
         return np.zeros(N_Z)
-    female_freq = female_adults.sum(axis=1) / total_female
-    male_freq = male_adults.sum(axis=1) / total_male
+    female_freq = female_w / total_female
+    male_freq = male_w / total_male
     m3 = mats.reshape(N_Z, N_Z, N_Z)  # m3[k, i, j]
     prop = np.einsum("i,j,kij->k", female_freq, male_freq, m3)
     return EGGS * total_female * prop
@@ -169,14 +180,22 @@ def event_R(data: np.ndarray, newborns: np.ndarray) -> None:
     data[:, 1, 0] = (1.0 - SEX_RATIO) * newborns
 
 
-def event_S(data: np.ndarray, density_ref: float = DENSITY_REF) -> None:
-    """Density regulation (Beverton-Holt) plus age survival, in place."""
+def event_S(
+    data: np.ndarray, density_ref: float = DENSITY_REF, viability_dd: float = 1.0
+) -> None:
+    """Density regulation (Beverton-Holt) plus age survival, in place.
+
+    ``viability_dd`` is an extra viability multiplier on the ``Drive|Drive``
+    genotype at the last juvenile age (``NEW_ADULT_AGE - 1``), mirroring natal's
+    ``target_viability_age`` in ``compute_viability_survival_rates``.
+    """
     j0 = float(data[:, :, 0].sum())
     j1 = float(data[:, :, 1].sum())
     r = (j0 + 5.0 * j1) / density_ref
     s1 = LAMBDA / ((LAMBDA - 1.0) * r + 1.0) * 2.0 / SF / EGGS
     data[:, :, 0] *= s1
     data *= SURVIVAL
+    data[DRIVE_GENOTYPE, :, NEW_ADULT_AGE - 1] *= viability_dd
 
 
 def event_A(data: np.ndarray) -> None:
@@ -225,14 +244,21 @@ def classify(
 
 
 def run(
-    order: str, n_ticks: int, mats: np.ndarray | None = None, scale: float = 1.0
+    order: str,
+    n_ticks: int,
+    mats: np.ndarray | None = None,
+    scale: float = 1.0,
+    viability_dd: float = 1.0,
+    fecundity_dd: float = 1.0,
 ) -> list[dict[str, float]]:
     """Run ``n_ticks`` ticks under a given event ``order`` (e.g. ``"R-S-A"``).
 
     Reproduction reads the tick-start adults (before any event), so the order
     only changes when the newborn cohort is written and when density regulation
     acts on it.  ``scale`` multiplies the initial state (and the density
-    reference), for a larger population with identical normalized dynamics.
+    reference); ``viability_dd`` is the ``Drive|Drive`` viability multiplier at
+    the last juvenile age; ``fecundity_dd`` is the ``Drive|Drive`` fecundity
+    multiplier applied during reproduction.
     """
     mats = DEFAULT_MATS if mats is None else mats
     events = order.split("-")
@@ -243,14 +269,14 @@ def run(
     density_ref = scale * DENSITY_REF
     history = [classify(data)]  # t = 0
     for _ in range(n_ticks):
-        newborns = newborn_counts(data, mats)
+        newborns = newborn_counts(data, mats, fecundity_dd)
         eggs_f = SEX_RATIO * newborns
         eggs_m = (1.0 - SEX_RATIO) * newborns
         for name in events:
             if name == "R":
                 event_R(data, newborns)
             elif name == "S":
-                event_S(data, density_ref)
+                event_S(data, density_ref, viability_dd)
             else:
                 event_A(data)
         history.append(classify(data, eggs_f, eggs_m))
@@ -321,12 +347,15 @@ class Simulation:
     """
 
     def __init__(self, *, dc: float = 1.0, stochastic: bool = False,
-                 seed: int | None = None, scale: float = 1.0) -> None:
+                 seed: int | None = None, scale: float = 1.0,
+                 viability_dd: float = 1.0, fecundity_dd: float = 1.0) -> None:
         """Create a simulation with the given drive conversion rate and scale."""
         self.mats = homing_mats(dc=dc)
         self.stochastic = stochastic
         self.rng = np.random.default_rng(seed)
         self.scale = scale
+        self.viability_dd = viability_dd
+        self.fecundity_dd = fecundity_dd
         self.data = initial_state(scale)
         self.density_ref = scale * DENSITY_REF
         self._eggs_f = np.zeros(N_Z)
@@ -334,14 +363,16 @@ class Simulation:
 
     def _newborn(self) -> np.ndarray | None:
         data = self.data
-        female_adults = data[:, 0, NEW_ADULT_AGE:]
-        male_adults = data[:, 1, NEW_ADULT_AGE:]
-        total_female = float(female_adults.sum())
-        total_male = float(male_adults.sum())
+        fecundity = np.ones(N_Z)
+        fecundity[DRIVE_GENOTYPE] = self.fecundity_dd
+        female_w = data[:, 0, NEW_ADULT_AGE:].sum(axis=1) * fecundity
+        male_w = data[:, 1, NEW_ADULT_AGE:].sum(axis=1) * fecundity
+        total_female = float(female_w.sum())
+        total_male = float(male_w.sum())
         if total_female <= 0.0 or total_male <= 0.0:
             return None
-        female_freq = female_adults.sum(axis=1) / total_female
-        male_freq = male_adults.sum(axis=1) / total_male
+        female_freq = female_w / total_female
+        male_freq = male_w / total_male
         m3 = self.mats.reshape(N_Z, N_Z, N_Z)
         prop = np.einsum("i,j,kij->k", female_freq, male_freq, m3)
         if self.stochastic:
@@ -386,11 +417,14 @@ class Simulation:
             for z in range(N_Z):
                 for sex in range(N_SEX):
                     for age in range(N_AGES):
+                        p = SURVIVAL[sex, age]
+                        if z == DRIVE_GENOTYPE and age == NEW_ADULT_AGE - 1:
+                            p *= self.viability_dd
                         data[z, sex, age] = _continuous_binomial(
-                            self.rng, data[z, sex, age], SURVIVAL[sex, age]
+                            self.rng, data[z, sex, age], p
                         )
         else:
-            event_S(data, self.density_ref)
+            event_S(data, self.density_ref, self.viability_dd)
 
     def step(self, order: str) -> None:
         """Advance the state by one tick under the given event order."""

@@ -27,6 +27,10 @@ sys.path.insert(0, str(HERE))
 import age_model as m  # noqa: E402
 
 IMG = HERE / "img"
+# Drive-homozygote fitness: viability applied at the last juvenile age,
+# fecundity applied during reproduction.
+VIABILITY_DD = 0.8
+FECUNDITY_DD = 0.8
 
 # Only these two orders keep the density-regulation gate (S) between writing
 # age-0 (R) and aging (A); the other four permutations let the unregulated
@@ -59,7 +63,10 @@ def plot_order(order: str, history: list[dict[str, float]], ticks: int) -> Path:
         ax.grid(alpha=0.3)
     for ax in axes[-1]:
         ax.set_xlabel("tick")
-    fig.suptitle(f"event order: {order}", fontsize=15)
+    fig.suptitle(
+        f"event order: {order} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
+        fontsize=15,
+    )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
 
     out = IMG / f"order_{order.replace('-', '')}.png"
@@ -82,7 +89,10 @@ def plot_total_deterministic(
         ax.plot(np.arange(len(history)), total_series(history), linewidth=1.6, label=order)
     ax.set_xlabel("tick")
     ax.set_ylabel("total population (eggs excluded)")
-    ax.set_title("deterministic total population (eggs excluded)")
+    ax.set_title(
+        f"deterministic total population (eggs excluded) | viability_dd={VIABILITY_DD:g} "
+        f"| fecundity_dd={FECUNDITY_DD:g}"
+    )
     ax.set_xlim(0, ticks)
     ax.grid(alpha=0.3)
     ax.legend()
@@ -95,7 +105,7 @@ def plot_total_deterministic(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ticks", type=int, default=261)
+    ap.add_argument("--ticks", type=int, default=150)
     ap.add_argument("--orders", type=str, default="", help="comma-separated subset, e.g. R-S-A,S-A-R")
     args = ap.parse_args()
 
@@ -103,7 +113,7 @@ def main() -> int:
     orders = [o.strip() for o in args.orders.split(",") if o.strip()] or _all_orders()
     histories: dict[str, list[dict[str, float]]] = {}
     for order in orders:
-        history = m.run(order, args.ticks)
+        history = m.run(order, args.ticks, viability_dd=VIABILITY_DD, fecundity_dd=FECUNDITY_DD)
         histories[order] = history
         out = plot_order(order, history, args.ticks)
         frac = _final_adult_drive_fraction(history)

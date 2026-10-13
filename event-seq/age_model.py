@@ -67,8 +67,16 @@ DRIVE_FRACTION_OF_AGE2 = 0.1
 # dynamics unchanged while the population size grows.
 DENSITY_REF = EGGS + 5.0 * (4.0 / (F + 1))
 
-# category labels in the 4x2 plotting order
-CATEGORIES = ["A_F_W", "A_F_D", "A_M_W", "A_M_D", "J_F_W", "J_F_D", "J_M_W", "J_M_D"]
+# category labels in the 4x3 plotting order: rows = (F_W, F_D, M_W, M_D),
+# columns = (Adult, Juvenile, Egg).
+CATEGORIES = [
+    "A_F_W", "J_F_W", "E_F_W",
+    "A_F_D", "J_F_D", "E_F_D",
+    "A_M_W", "J_M_W", "E_M_W",
+    "A_M_D", "J_M_D", "E_M_D",
+]
+# categories summed for the "total population" figure (eggs / age 0 excluded).
+TOTAL_CATEGORIES = [c for c in CATEGORIES if not c.startswith("E_")]
 
 
 def homing_mats(dc: float = 1.0, gcr: float = 0.0, herr: float = 0.0,
@@ -181,18 +189,22 @@ _EVENTS = {"R": event_R, "S": event_S, "A": event_A}
 
 
 def classify(data: np.ndarray) -> dict[str, float]:
-    """Split the state into the eight ``{A,J}_{F,M}_{W,D}`` categories.
+    """Split the state into the twelve ``{E,A,J}_{F,M}_{W,D}`` categories.
 
-    ``A`` sums adult ages (>= ``NEW_ADULT_AGE``); ``J`` is **age 1 only**.  Age 0
-    is the egg/newborn pool, whose tick-boundary value differs by bookkeeping
-    between orders (transient in R-first orders, standing in R-last orders), so
-    it is excluded to keep the categories comparable.
+    ``A`` sums adult ages (>= ``NEW_ADULT_AGE``); ``J`` is **age 1 only**;
+    ``E`` is **age 0 only** (the egg/newborn pool).  Age 0 is excluded from the
+    total-population figure because its tick-boundary value differs by
+    bookkeeping between orders (transient in R-first orders, standing in R-last
+    orders).
     """
-    adults = slice(NEW_ADULT_AGE, N_AGES)
-    juveniles = slice(1, NEW_ADULT_AGE)
+    category_ages = {
+        "A": slice(NEW_ADULT_AGE, N_AGES),
+        "J": slice(1, NEW_ADULT_AGE),
+        "E": slice(0, 1),
+    }
     out: dict[str, float] = {}
     for sex, sex_name in ((0, "F"), (1, "M")):
-        for age_name, ages in (("A", adults), ("J", juveniles)):
+        for age_name, ages in category_ages.items():
             drive = float(data[DRIVE_GENOTYPE, sex, ages].sum())
             total = float(data[:, sex, ages].sum())
             out[f"{age_name}_{sex_name}_W"] = total - drive

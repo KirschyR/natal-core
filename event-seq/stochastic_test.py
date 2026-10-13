@@ -2,8 +2,9 @@
 
 Runs ``--runs`` independent stochastic replicates of the single-population model
 for R-S-A and S-A-R, with drive conversion ``--dc`` (default 0.8), and plots the
-per-category mean with its 95% CI (mean +/- 1.96 SEM) in a 4x2 grid under
-``event-seq/img/``.
+per-category mean with its 95% CI (mean +/- 1.96 SEM) in a 4x3 grid under
+``event-seq/img/``, plus one total-population figure (eggs excluded) overlaying
+both orders.
 
 Usage:
     python event-seq/stochastic_test.py [--runs 100] [--ticks 60] [--dc 0.8]
@@ -48,7 +49,7 @@ def run_replicates(order: str, runs: int, ticks: int, dc: float,
 def plot_order(order: str, series: dict[str, np.ndarray], runs: int, dc: float,
                scaling_factor: float) -> Path:
     x = np.arange(series[m.CATEGORIES[0]].shape[1])
-    fig, axes = plt.subplots(4, 2, figsize=(11, 13), sharex=True)
+    fig, axes = plt.subplots(4, 3, figsize=(15, 13), sharex=True)
     for ax, key in zip(axes.ravel(), m.CATEGORIES):
         traj = series[key]
         mean = traj.mean(axis=0)
@@ -74,6 +75,38 @@ def plot_order(order: str, series: dict[str, np.ndarray], runs: int, dc: float,
     return out
 
 
+def total_replicates(series: dict[str, np.ndarray]) -> np.ndarray:
+    """Per-replicate total population (eggs excluded), shape ``(runs, ticks+1)``."""
+    return np.sum([series[key] for key in m.TOTAL_CATEGORIES], axis=0)
+
+
+def plot_total_stochastic(
+    series_by_order: dict[str, dict[str, np.ndarray]], runs: int, dc: float,
+    scaling_factor: float,
+) -> Path:
+    """Overlay the stochastic mean total population of each order (eggs excluded)."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for order, series in series_by_order.items():
+        total = total_replicates(series)
+        mean = total.mean(axis=0)
+        ci = 1.96 * total.std(axis=0, ddof=1) / np.sqrt(runs)
+        x = np.arange(mean.shape[0])
+        line = ax.plot(x, mean, linewidth=1.6, label=order)[0]
+        ax.fill_between(x, mean - ci, mean + ci, alpha=0.25, color=line.get_color())
+    ax.set_xlabel("tick")
+    ax.set_ylabel("total population (eggs excluded)")
+    ax.set_title(
+        f"stochastic total population (eggs excluded) | n={runs} | dc={dc} | sf={scaling_factor:g}"
+    )
+    ax.grid(alpha=0.3)
+    ax.legend()
+    out = IMG / f"total_stochastic_sf{scaling_factor:g}.png"
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=100)
@@ -83,8 +116,10 @@ def main() -> int:
     args = ap.parse_args()
 
     IMG.mkdir(parents=True, exist_ok=True)
+    series_by_order: dict[str, dict[str, np.ndarray]] = {}
     for order in ORDERS:
         series = run_replicates(order, args.runs, args.ticks, args.dc, args.scaling_factor)
+        series_by_order[order] = series
         out = plot_order(order, series, args.runs, args.dc, args.scaling_factor)
         final = series["A_F_D"] + series["A_M_D"]
         adult = final + series["A_F_W"] + series["A_M_W"]
@@ -95,6 +130,8 @@ def main() -> int:
             f"{order}: wrote {out.name}  mean final adult drive frac={np.nanmean(frac):.4f} "
             f"fixed(>0.99)={fixed}/{args.runs} lost(<0.01)={lost}/{args.runs}"
         )
+    total_out = plot_total_stochastic(series_by_order, args.runs, args.dc, args.scaling_factor)
+    print(f"wrote {total_out.name}")
     return 0
 
 

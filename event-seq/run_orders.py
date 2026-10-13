@@ -1,9 +1,10 @@
 """Run the single-population event-order test and plot population counts.
 
-For every tick order (permutation of R / S / A) this produces one figure with
-eight subplots (4 rows x 2 columns), one per ``{A,J}_{F,M}_{W,D}`` category,
-and writes it to ``event-seq/img/order_<ORDER>.png``.  The figure title records
-the event order the result comes from.
+For every tick order this produces one figure with twelve subplots (4 rows x 3
+columns) -- ``{A,J,E}_{F,M}_{W,D}`` (rows = sex/type, columns = age) -- written
+to ``event-seq/img/order_<ORDER>.png``, plus one total-population figure
+overlaying the orders (eggs excluded), ``img/total_deterministic.png``.  The
+figure title records the event order.
 
 Usage:
     python event-seq/run_orders.py [--ticks 261]
@@ -45,11 +46,11 @@ def _final_adult_drive_fraction(history: list[dict[str, float]]) -> float:
 
 
 def plot_order(order: str, history: list[dict[str, float]], ticks: int) -> Path:
-    """Write one 4x2 figure for a single event order and return its path."""
+    """Write one 4x3 figure for a single event order and return its path."""
     series = {key: np.array([h[key] for h in history]) for key in m.CATEGORIES}
     x = np.arange(len(history))
 
-    fig, axes = plt.subplots(4, 2, figsize=(11, 13), sharex=True)
+    fig, axes = plt.subplots(4, 3, figsize=(15, 13), sharex=True)
     for ax, key in zip(axes.ravel(), m.CATEGORIES):
         ax.plot(x, series[key], linewidth=1.6)
         ax.set_title(key)
@@ -67,6 +68,31 @@ def plot_order(order: str, history: list[dict[str, float]], ticks: int) -> Path:
     return out
 
 
+def total_series(history: list[dict[str, float]]) -> np.ndarray:
+    """Total population over time, eggs (age 0) excluded."""
+    return np.array([sum(h[key] for key in m.TOTAL_CATEGORIES) for h in history])
+
+
+def plot_total_deterministic(
+    histories: dict[str, list[dict[str, float]]], ticks: int
+) -> Path:
+    """Overlay the deterministic total population of each order (eggs excluded)."""
+    fig, ax = plt.subplots(figsize=(9, 5))
+    for order, history in histories.items():
+        ax.plot(np.arange(len(history)), total_series(history), linewidth=1.6, label=order)
+    ax.set_xlabel("tick")
+    ax.set_ylabel("total population (eggs excluded)")
+    ax.set_title("deterministic total population (eggs excluded)")
+    ax.set_xlim(0, ticks)
+    ax.grid(alpha=0.3)
+    ax.legend()
+    out = IMG / "total_deterministic.png"
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ticks", type=int, default=261)
@@ -75,11 +101,15 @@ def main() -> int:
 
     IMG.mkdir(parents=True, exist_ok=True)
     orders = [o.strip() for o in args.orders.split(",") if o.strip()] or _all_orders()
+    histories: dict[str, list[dict[str, float]]] = {}
     for order in orders:
         history = m.run(order, args.ticks)
+        histories[order] = history
         out = plot_order(order, history, args.ticks)
         frac = _final_adult_drive_fraction(history)
         print(f"{order}: wrote {out.name}  final adult drive fraction = {frac:.4f}")
+    total_out = plot_total_deterministic(histories, args.ticks)
+    print(f"wrote {total_out.name}")
     return 0
 
 

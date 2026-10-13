@@ -25,9 +25,13 @@ import argparse
 import sys
 from pathlib import Path
 
+import matplotlib
 import numpy as np
 import plotly.express as px
 from scipy.signal import fftconvolve
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt  # noqa: E402
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
@@ -36,6 +40,7 @@ import age_model as m  # noqa: E402
 from natal.frontend.spatial.topology import build_gaussian_kernel  # noqa: E402
 
 IMG = HERE / "img" / "spatial"
+COVERS = [0.1, 0.3, 0.5, 0.7, 0.9]
 
 ROWS, COLS = 41, 41
 KERNEL_SIZE = 7
@@ -126,13 +131,21 @@ def adult_drive_fraction(data: np.ndarray) -> np.ndarray:
     return np.divide(drive, total, out=np.zeros_like(drive), where=total > 0)
 
 
+def non_egg_drive_fraction(data: np.ndarray) -> np.ndarray:
+    """Per-deme ``Drive|Drive`` fraction of non-egg individuals (ages >= 1)."""
+    total = data[:, :, 1:].sum(axis=(0, 1, 2))
+    drive = data[m.DRIVE_GENOTYPE, :, 1:].sum(axis=(0, 1))
+    return np.divide(drive, total, out=np.zeros_like(drive), where=total > 0)
+
+
 def run_order(
     order: str, rows: int, cols: int, ticks: int, kernel: np.ndarray, valid_sum: np.ndarray
-) -> np.ndarray:
-    """Return ``(ticks+1, rows, cols)`` adult drive-fraction grids for one order."""
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return ``(adult_grids, non_egg_grids)``, each ``(ticks+1, rows, cols)``."""
     mats = m.homing_mats(dc=DC)
     data = initial_state(rows, cols, RELEASE_RADIUS, RELEASE_MULTIPLE)
-    frames = [adult_drive_fraction(data)]
+    adult_frames = [adult_drive_fraction(data)]
+    non_egg_frames = [non_egg_drive_fraction(data)]
     for _ in range(ticks):
         newborns = _reproduction(data, mats, FECUNDITY_DD)
         for name in order.split("-"):
@@ -143,8 +156,45 @@ def run_order(
             else:
                 _event_A(data)
         _event_M(data, kernel, valid_sum, MIGRATION_RATE)
-        frames.append(adult_drive_fraction(data))
-    return np.array(frames)
+        adult_frames.append(adult_drive_fraction(data))
+        non_egg_frames.append(non_egg_drive_fraction(data))
+    return np.array(adult_frames), np.array(non_egg_frames)
+
+
+def _params_title(br: str) -> str:
+    """Parameter string, wrapped after the spatial block (``br`` = line break)."""
+    return (
+        f"dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g} | "
+        f"grid={ROWS}x{COLS} | kernel_size={KERNEL_SIZE} | mean_dispersal={MEAN_DISPERSAL:g}{br}"
+        f"migration_rate={MIGRATION_RATE:g} | release_radius={RELEASE_RADIUS:g} | "
+        f"release_age2_mult={RELEASE_MULTIPLE:g} | boundary=natal-normalized | deterministic"
+    )
+
+
+def plot_coverage_curves(
+    non_egg_by_order: dict[str, np.ndarray], ticks: int, out: Path
+) -> Path:
+    """Plot covered-deme counts over time for each coverage threshold."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 6), sharey=True)
+    for ax, order in zip(axes, ORDERS):
+        grids = non_egg_by_order[order]  # (ticks+1, rows, cols)
+        for cover in COVERS:
+            counts = (grids > cover).sum(axis=(1, 2))
+            ax.plot(np.arange(ticks + 1), counts, linewidth=1.6, label=f"cover>{cover:g}")
+        ax.set_title(order)
+        ax.set_xlabel("tick")
+        ax.grid(alpha=0.3)
+    axes[0].set_ylabel(f"covered demes (of {ROWS * COLS})")
+    axes[0].legend(fontsize=9)
+    fig.suptitle(
+        "covered demes over time (Drive|Drive fraction of non-egg individuals)\n"
+        + _params_title("\n"),
+        fontsize=10.5,
+    )
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.89))
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+    return out
 
 
 def main() -> int:
@@ -156,9 +206,13 @@ def main() -> int:
     kernel = kernel_off_center(KERNEL_SIZE, MEAN_DISPERSAL)
     valid_sum = fftconvolve(np.ones((ROWS, COLS)), kernel, mode="same")
 
-    grids = np.array(
-        [run_order(order, ROWS, COLS, args.ticks, kernel, valid_sum) for order in ORDERS]
-    )  # (n_orders, ticks+1, rows, cols)
+    adult_by_order: dict[str, np.ndarray] = {}
+    non_egg_by_order: dict[str, np.ndarray] = {}
+    for order in ORDERS:
+        adult, non_egg = run_order(order, ROWS, COLS, args.ticks, kernel, valid_sum)
+        adult_by_order[order] = adult
+        non_egg_by_order[order] = non_egg
+    grids = np.array([adult_by_order[order] for order in ORDERS])
     np.savez(IMG / "spatial_event_order.npz", grids=grids, orders=np.array(ORDERS))
 
     fig = px.imshow(
@@ -178,10 +232,7 @@ def main() -> int:
 
     title = (
         "spatial age-structured event-order (adult Drive|Drive fraction): R-S-A vs S-A-R<br>"
-        f"dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g} | "
-        f"grid={ROWS}x{COLS} | kernel_size={KERNEL_SIZE} | mean_dispersal={MEAN_DISPERSAL:g} | "
-        f"migration_rate={MIGRATION_RATE:g} | release_radius={RELEASE_RADIUS:g} | "
-        f"release_age2_mult={RELEASE_MULTIPLE:g} | boundary=natal-normalized | deterministic"
+        + _params_title("<br>")
     )
     fig.update_layout(title={"text": title, "x": 0.5, "xanchor": "center"}, coloraxis_colorbar_title="frac")
     if fig.layout.updatemenus:
@@ -190,9 +241,12 @@ def main() -> int:
     out = IMG / "spatial_event_order.html"
     fig.write_html(out, include_plotlyjs="inline")
     print(f"wrote {out}")
-    for i, order in enumerate(ORDERS):
-        final = grids[i, -1]
-        print(f"  {order}: final covered (frac>=0.5) = {int((final >= 0.5).sum())}/{ROWS*COLS}")
+
+    cov_out = plot_coverage_curves(non_egg_by_order, args.ticks, IMG / "spatial_coverage_curves.png")
+    print(f"wrote {cov_out}")
+    for order in ORDERS:
+        final = grids[ORDERS.index(order), -1]
+        print(f"  {order}: final covered (frac>=0.5) = {int((final >= 0.5).sum())}/{ROWS * COLS}")
     return 0
 
 

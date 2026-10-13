@@ -188,19 +188,22 @@ def event_A(data: np.ndarray) -> None:
 _EVENTS = {"R": event_R, "S": event_S, "A": event_A}
 
 
-def classify(data: np.ndarray) -> dict[str, float]:
+def classify(
+    data: np.ndarray,
+    female_eggs: np.ndarray | None = None,
+    male_eggs: np.ndarray | None = None,
+) -> dict[str, float]:
     """Split the state into the twelve ``{E,A,J}_{F,M}_{W,D}`` categories.
 
-    ``A`` sums adult ages (>= ``NEW_ADULT_AGE``); ``J`` is **age 1 only**;
-    ``E`` is **age 0 only** (the egg/newborn pool).  Age 0 is excluded from the
-    total-population figure because its tick-boundary value differs by
-    bookkeeping between orders (transient in R-first orders, standing in R-last
-    orders).
+    ``A`` sums adult ages (>= ``NEW_ADULT_AGE``); ``J`` is **age 1 only**.
+    ``E`` is the **newborn cohort produced by reproduction this tick** (per-sex,
+    per-genotype arrays ``female_eggs``/``male_eggs``), not the tick-boundary
+    age-0 value, so it is phase-independent and comparable across event orders.
+    When no cohort is supplied (e.g. at t = 0) age 0 is used.
     """
     category_ages = {
         "A": slice(NEW_ADULT_AGE, N_AGES),
         "J": slice(1, NEW_ADULT_AGE),
-        "E": slice(0, 1),
     }
     out: dict[str, float] = {}
     for sex, sex_name in ((0, "F"), (1, "M")):
@@ -209,6 +212,15 @@ def classify(data: np.ndarray) -> dict[str, float]:
             total = float(data[:, sex, ages].sum())
             out[f"{age_name}_{sex_name}_W"] = total - drive
             out[f"{age_name}_{sex_name}_D"] = drive
+    eggs = {
+        "F": data[:, 0, 0] if female_eggs is None else female_eggs,
+        "M": data[:, 1, 0] if male_eggs is None else male_eggs,
+    }
+    for sex_name, egg in eggs.items():
+        drive = float(egg[DRIVE_GENOTYPE])
+        total = float(np.sum(egg))
+        out[f"E_{sex_name}_W"] = total - drive
+        out[f"E_{sex_name}_D"] = drive
     return out
 
 
@@ -232,6 +244,8 @@ def run(
     history = [classify(data)]  # t = 0
     for _ in range(n_ticks):
         newborns = newborn_counts(data, mats)
+        eggs_f = SEX_RATIO * newborns
+        eggs_m = (1.0 - SEX_RATIO) * newborns
         for name in events:
             if name == "R":
                 event_R(data, newborns)
@@ -239,7 +253,7 @@ def run(
                 event_S(data, density_ref)
             else:
                 event_A(data)
-        history.append(classify(data))
+        history.append(classify(data, eggs_f, eggs_m))
     return history
 
 
@@ -315,6 +329,8 @@ class Simulation:
         self.scale = scale
         self.data = initial_state(scale)
         self.density_ref = scale * DENSITY_REF
+        self._eggs_f = np.zeros(N_Z)
+        self._eggs_m = np.zeros(N_Z)
 
     def _newborn(self) -> np.ndarray | None:
         data = self.data
@@ -335,14 +351,24 @@ class Simulation:
 
     def _event_R(self, newborns: np.ndarray | None) -> None:
         if newborns is None:
+            self._eggs_f = np.zeros(N_Z)
+            self._eggs_m = np.zeros(N_Z)
             return
         if self.stochastic:
+            eggs_f = np.zeros(N_Z)
+            eggs_m = np.zeros(N_Z)
             for z in range(N_Z):
                 n = float(newborns[z])
                 female = _continuous_binomial(self.rng, n, SEX_RATIO)
+                eggs_f[z] = female
+                eggs_m[z] = n - female
                 self.data[z, 0, 0] = female
                 self.data[z, 1, 0] = n - female
+            self._eggs_f = eggs_f
+            self._eggs_m = eggs_m
         else:
+            self._eggs_f = SEX_RATIO * newborns
+            self._eggs_m = (1.0 - SEX_RATIO) * newborns
             event_R(self.data, newborns)
 
     def _event_S(self) -> None:
@@ -384,5 +410,5 @@ class Simulation:
         history = [classify(self.data)]
         for _ in range(n_ticks):
             self.step(order)
-            history.append(classify(self.data))
+            history.append(classify(self.data, self._eggs_f, self._eggs_m))
         return history

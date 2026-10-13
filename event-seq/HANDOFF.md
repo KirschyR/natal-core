@@ -87,18 +87,44 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
     切割 `eecr` 造成，`dd(母)×ww(父)→dr`），是 paper 模型自身的性质，非翻译错误。开关
     `drive∈{"homing","tare"}` 已加入 `age_model.run`/`Simulation`/`drive_mats` 与 `spatial_test.run_replicate`；
     仅 TARE 用 `gcr/eecr`（默认 1/1），homing 用 `dc`。
-13. **TARE 有「播种阈值」（nucleation threshold），无稳定波钉扎**：空间（`avd=0.5`、中央圆 `r=3`、**双性**
-    释放 dd）下，释放量低于临界 → 驱动丢失，高于 → 成波并最终扫过全域；homing 在测试范围内无阈值
-    （0.5× 即扫过）。机制与 §2#10 同源（阈值/潜伏期由局域有效增长率决定）。**未找到稳定的「波钉扎」
-    共存态**：在 `t=2000`、扫描 `viability_dd∈[0.2,1]`/`fecundity_dd∈[0.4,1]` 后只见「扫过」或「丢失」两态，
-    没有介于其间的稳定驱动+WT 共存。故本文所称严格 chasing 在本模型里是**阈值 + 长潜伏**现象
-    （近阈值时驱动与 WT 空间共存的**瞬态**前沿），而不是稳定双稳前沿。
+13. **TARE 在本模型里是「固定 / 丢失」双态：没有真正的野生型共存**（**修正早前误判**）。注意 `classify`
+    的 `W` = **非 dd**（含 `dw/rw/dr`），**不等于**野生型 `ww`；早前把「非 dd 平衡」当成了 WT 共存。
+    以真正的 `ww`（规范序 index 2）复核：well-mixed（seed `0.3 dd`，`t=1500–2000`）扫描
+    `gcr=eecr∈{1.0,0.8,0.6,0.5,0.4}`、`ddfitness∈{1.0,0.6,0.4}`（含逐基因型代价组合）后，**`ww` 一律
+    趋于 0（固定）或回到 1（丢失），没有内部稳定共存**；`ddfitness` 只是把 `dd` 换成 `dr`（抗性载体）、
+    代价过大时驱动崩溃，并不保住 `ww`。**给抗性 `rw` 加代价违反科学假设**（靶基因为必需**单倍足量**基因，
+    `rw` 中性），故**不采用**该做法。注意 `rr` 隐性致死**已经隐含**在 paper 的 mats 中：母本为载体的组合
+    （`dw/rw/dr` × `dw/rw/dr`）后代总和 <1（`0.5–0.75`，见 §5#14），即毒素以「减少后代总数」形式编码，
+    而非显式 `rr` 基因型。但即便如此野生型仍无法在高频下反超——`r` 由切割产生、与驱动连锁，高切割率下载体
+    不产 `ww`。→ 严格 chasing 所需的「驱动与 WT 空间共存、不固定」在本（确定性连续）模型里**没有对应参数区**，
+    需另加机制（见 §6#8）。空间上 TARE 仍表现为**播种阈值 + 长潜伏**（§2#14）。
 14. **事件顺序显著移动 TARE 阈值/潜伏期**（同样释放，`R-S-A` 比 `S-A-R` 更早成波）：
     释放 `0.9×`：R-S-A 终值 carrier `0.72` vs S-A-R `0.01`；释放 `1.0×`、`t=600`：R-S-A `0.985` vs
     S-A-R `0.022`；释放 `1.25×`、`t=600`：S-A-R 处在**驱动 `0.35` / WT `0.48` 的空间共存潜伏期**
     （前沿半径 `r≈17`，`t=800` 才扫过），而 R-S-A 已扫过。强 fecundity 代价
     （`viability=1.0, fecundity=0.4`，释放 `1.5×`，`t=2000`）下 R-S-A `1.00` vs S-A-R `0.03`，佐证 §2#5。
     产物：`event-seq/tare_chasing.py`、`img/spatial/tare_threshold.png`、`tare_latency.png`、`tare_chasing.json`。
+15. **TARE 有强性别特异传递，释放性别极大影响效率**：TARE 矩阵本身不对称（母本 `eecr` 效应）：
+    `dd(母)×ww(父)→dr`，而 `ww(母)×dd(父)→dw`；homing 基本对称。实测（TARE，rel=2、rad=3、t=600）：
+
+    | 释放性别 | carrier | WT |
+    |---|---|---|
+    | 仅雄 | 0.628 | 0.259 |
+    | 仅雌 | 0.965 | 0.020 |
+    | 双性 | 1.000 | 0.000 |
+
+    TARE **雌性释放效率远高于雄性**，解释了既有 M5/event-seq「仅雄释放」对 TARE 低效；也说明假设两性
+    对称传递会误判 TARE 释放效率，后续研究 TARE 波/chasing 应扫性别比或采用双性释放。
+16. **显式 `rr`（6 基因型）确定性测试：忠实实现 ≡ 5 基因型，不产生 chasing**。`event-seq/tare_rr.py` 把 `rr`
+    显式作为第 6 个基因型：后代矩阵 = paper `tare_mats`（5 型）+ `rr` 取「缺失质量」`1-Σ_k`（即隐性致死类；
+    已验证每对亲本的 6 个后代和为 1）。
+    - **忠实实现**（`rr` 在繁殖/合子期移除，`drop_rr=True`）与 **5 基因型模型逐位一致**（`rtol<1e-9`，自测）：
+      paper 的 `renew` 本就只返回存活后代，`rr` 从不进入个体、不参与密度反馈。故**显式 `rr` 本身不改变确定性结果**。
+    - **若把 `rr` 计入密度反馈后再死**（延迟致死，`rr_age=0/1`）：等于额外、频率依赖的抑制，会**放慢驱动波**
+      并放大顺序差（`t=300`、rel=2、rad=3、avd=0.5：R-S-A carrier 5-gen `0.899` → rr@age0 `0.709`；
+      S-A-R `0.352` → `0.105`；总种群约低 2–8%）。但 `t=1000` 两顺序仍都扫过（`ww→0`），**仍无 WT 共存**。
+    结论：**显式 `rr` 单独不能产生 chasing**；只有「延迟致死」这种抑制解释才改变动态，且只改时机、不改结局。
+    产物：`tare_rr.py`、`img/spatial/tare_rr_carrier.html`（交互六边形，R-S-A|S-A-R）、`tare_rr_compare.png`、`tare_rr_report.json`。
 
 ---
 
@@ -145,6 +171,7 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
 | `spatial_test.py` | 空间模型（natal 归一化迁移）+ 覆盖曲线图（`COVERS={0.1..0.9}`） |
 | `spatial_html.py` | 六边形热图交互式 HTML（确定性 + sf10/sf100 随机均值） |
 | `tare_chasing.py` | TARE 播种阈值/chasing 实验：阈值扫描 + 近阈值潜伏期（R-S-A vs S-A-R），自测含 `tare_mats` 对齐 paper |
+| `tare_rr.py` | 显式 `rr`（6 基因型）确定性测试：5-gen vs `rr@age0/1`，交互六边形 HTML；自测含「忠实 rr ≡ 5-gen」 |
 
 产物（`event-seq/img/`，**已 gitignore**，不入库）：
 
@@ -163,6 +190,7 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
 | `spatial_test.py` | 0.8 | 0.8 | 0.8 | 120 | grid 41²，kernel=7，avd=1，release 0.5×age2 |
 | `spatial_html.py` | 0.8 | 0.8 | 0.8 | 120 | runs=100，sf∈{10,100} |
 | `tare_chasing.py` | —（TARE gcr=eecr=1） | 0.8 | 0.8 | 600/1000 | grid 41²，avd=0.5，**双性**释放 dd，中央圆 r=3，release∈{0.5..2.0}；carrier={dd,dw,dr} |
+| `tare_rr.py` | —（TARE gcr=eecr=1，6 基因型） | 0.8 | 0.8 | 600 | grid 41²，avd=0.5，双性释放 dd rel=2、r=3；`rr` 致死（v=0，age0/age1 两种） |
 
 覆盖曲线口径：每 deme 的 `dd` 占**非卵个体**（age≥1）比例 `> cover` 的 deme 数；随机图给出
 **mean + 95% 运行分布区间（2.5–97.5 分位）**。
@@ -198,6 +226,14 @@ event-seq 脚本是**纯 NumPy 自实现**，**不调用 natal 的 Rust 引擎**
 12. **避免适合度重复计**：paper 把代价折进 `mats`；natal 放在 `viability_fitness`；我们模型另有 `viability_dd`/`fecundity_dd`。
     **同一份代价只在一个地方施加**（用 paper `mats` 就别再加同项 viability）。natal 里 `viability_scaling`（预设）与
     `.fitness(viability=...)` 写**同一张表**，构建次序 presets→fitness，后写覆盖前写。
+13. **`classify` 的 `W` = 非 dd，不是野生型 `ww`**：`classify` 把除 `DRIVE_GENOTYPE`（=dd）外的**所有**基因型
+    都归为 `W`（含 `dw/rw/dr`）。统计「与驱动对立的野生型」时必须直接按基因型 index 2（`CORD_PURE_W`=ww）取，
+    否则会把抗性/杂合载体也算成野生型（曾因此误判 TARE 有 WT 共存，见 §2#13）。`tare_chasing.py` 的 `wt` 用的是真 `ww`。
+14. **靶基因单倍足量 → `rw` 中性；`rr` 致死只以「减少后代总数」隐含在 mats**：`age_model.tare_mats`（paper）
+    中 `sum_k m3[k,i,j]`（母 `i` × 父 `j` 的后代总和）对载体近交组合 <1——例如 `dw×dw=0.75`、`dw×ww=0.50`、
+    `dr×ww=0.50`、`rw×rw=0.75`（homing 除 `rw/dr` 外恒为 1）。即毒素（`rr` 不可存活）按**减少该组合的后代
+    总数**编码，5 基因型模型**不含显式 `rr`**。因此：**不要**再给 `rw` 加 fitness cost（违背单倍足量假设）；
+    若要显式刻画 `rr` 的种群抑制，需要扩基因型或加密度项——属改科学模型，须授权 + 独立复核。
 
 ---
 
@@ -210,12 +246,20 @@ event-seq 脚本是**纯 NumPy 自实现**，**不调用 natal 的 Rust 引擎**
 5. **对接 M5 空间规模**：在完整 `500×500`（route A GPU）上验证顺序对波速的影响是否稳健。
 6. **natal 引擎交叉验证**：用 natal `SpatialPopulation`（R-S-A）与自写空间实现对比，确认语义一致。
 7. **线性化解析**：推一 tick 反馈滞后对早期增长率/波速的解析修正。
-8. **加 TARE 驱动、找严格 chasing（已完成，见 §2#12–14）**：`drive∈{"homing","tare"}` 开关、
-   `tare_mats`（对齐 paper）、`event-seq/tare_chasing.py` 均已落地。结论：严格 chasing 在本模型里是
-   **播种阈值 + 长潜伏**现象（近阈值时驱动与 WT 空间共存的瞬态前沿），**未找到稳定波钉扎共存态**；
-   事件顺序显著移动该阈值/潜伏期（R-S-A 更早成波）。仍可继续：① 换 `mean_dispersal`/`migration_rate`
-   进一步分离「波速」与「阈值」；② 引入真正的双稳（如带代价的 resistance/性别特异传递）寻找稳定钉扎前沿；
-   ③ 对阈值/潜伏期做随机与 bootstrap 显著性（§6#1、#4）。
+8. **加 TARE 驱动、找严格 chasing（已落地，见 §2#12–16）**：`drive∈{"homing","tare"}` 开关、`tare_mats`
+   （对齐 paper）、`tare_chasing.py`、显式 `rr` 的 `tare_rr.py` 均已完成。结论：本（1 位点 5 基因型，及忠实
+   6 基因型）TARE 在确定性连续模型里只有「固定 / 丢失」两态，**没有 WT 共存**；空间表现为**播种阈值 + 长潜伏**，
+   事件顺序显著移动阈值/潜伏期。
+   **要得到真正的 chasing（持续移动、与 WT 共存、不固定），需要新增机制**，候选（按推荐顺序）：
+   ① **显式 `rr`：已测试（§2#16）**——忠实实现 ≡ 5 基因型（无变化）；只有「延迟致死、计入密度」的变体才加抑制，
+      但仍只改时机、`t=1000` 仍扫过，**不产生 WT 共存**。故单纯显式 `rr` 不行，需要「抑制 + WT 再定殖」结构。
+   ② **WT 源 / 边界补给**：给域外 WT 补给或非均匀 Allee，使前沿后方可持续恢复 WT（抑制型 chase 的关键）。
+   ③ **小规模随机性**：仓库自己指出 chasing 本质是随机现象；用 natal 连续采样器在低 `sf` 下跑，让漂变
+      制造 WT 避难所（当前 sf≥10 仍太大）。
+   ④ **抗性 `r` 加 fitness cost：不采用**——靶基因单倍足量，`rw` 必须中性；给 `rw` 加代价违背科学假设，
+      且自测显示它单独也只移动固定↔丢失阈值、造不出 WT 共存。
+   另可继续：换 `mean_dispersal`/`migration_rate` 分离波速与阈值；对阈值/潜伏期做随机与 bootstrap 显著性
+   （§6#1、#4）。若动到科学模型（如显式 `rr`/抑制项），按高风险流程先获授权并独立复核，默认关闭。
 
 ---
 

@@ -308,12 +308,13 @@ def _coverage_figure(
         arr = coverage_by_order[order]
         mean = arr.mean(axis=0)
         n_runs = arr.shape[0]
-        ci = (1.96 * arr.std(axis=0, ddof=1) / np.sqrt(n_runs)) if n_runs > 1 else None
+        if n_runs > 1:
+            lo = np.percentile(arr, 2.5, axis=0)
+            hi = np.percentile(arr, 97.5, axis=0)
         for idx, cover in enumerate(COVERS):
             line = ax.plot(x, mean[:, idx], linewidth=1.6, label=f"cover>{cover:g}")[0]
-            if ci is not None:
-                ax.fill_between(x, mean[:, idx] - ci[:, idx], mean[:, idx] + ci[:, idx],
-                                alpha=0.25, color=line.get_color())
+            if n_runs > 1:
+                ax.fill_between(x, lo[:, idx], hi[:, idx], alpha=0.30, color=line.get_color())
         ax.set_title(order)
         ax.set_xlabel("tick")
         ax.grid(alpha=0.3)
@@ -368,8 +369,8 @@ def main() -> int:
             coverage_by_order[order] = np.array(runs)
         out = _coverage_figure(
             coverage_by_order, args.ticks, IMG / f"spatial_coverage_curves_sf{scale:g}.png",
-            "covered demes over time (Drive|Drive frac of non-egg; mean +/-95% CI over "
-            f"{args.runs} runs)\n" + _params_title("\n", stochastic=True, scale=scale),
+            "covered demes over time (Drive|Drive frac of non-egg; mean with 95% interval "
+            f"(2.5-97.5 pct) over {args.runs} runs)\n" + _params_title("\n", stochastic=True, scale=scale),
         )
         print(f"wrote {out}")
     return 0

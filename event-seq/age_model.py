@@ -45,6 +45,14 @@ CORD_PURE_W = 2  # ww (WT|WT)
 CORD_RELEASE_GENOTYPE = 0  # dd (Drive|Drive)
 DRIVE_GENOTYPE = 0  # only dd counts as drive (homozygous)
 
+# Canonical paper genotype order shared by both drives.  The homing
+# ``drive_generator.m`` is already written in this order; the TARE generator
+# labels its matrices as ``[ww, dw, dd, rw, dr]`` and is permuted on import.
+GENOTYPES = ("dd", "dw", "ww", "rw", "dr")
+_TARE_ORDER = ("ww", "dw", "dd", "rw", "dr")
+# canonical index -> position in the TARE order (dd<->ww swapped).
+_TARE_TO_CANON = np.array([_TARE_ORDER.index(g) for g in GENOTYPES])
+
 _FEMALE_AGING = [1.0 - 1.0 / (F - i + 1) for i in range(1, F)]  # 7 values
 _MALE_AGING = [1.0 - 1.0 / (M - i + 1) for i in range(1, M)]  # 4 values
 FEMALE_SURVIVAL = np.array([1.0, 1.0, *_FEMALE_AGING, 0.0])
@@ -127,6 +135,110 @@ def homing_mats(dc: float = 1.0, gcr: float = 0.0, herr: float = 0.0,
     cost = np.tile(fit, (5, 1))
     blocks = [m.T * cost for m in (mat_dd, mat_dw, mat_ww, mat_rw, mat_dr)]
     return np.vstack(blocks)
+
+
+def tare_mats(gcr: float = 1.0, eecr: float = 1.0, ddfitness: float = 1.0) -> np.ndarray:
+    """Return the paper TARE ``mats`` operator in canonical order, shape ``(25, 5)``.
+
+    Faithful translation of ``radial_release_optimizer/tare/drive_generator.m``
+    (Toxin-Antidote Recessive Embryo drive; ``gcr`` = germline cut rate, ``eecr``
+    = early-embryo cut rate, ``ddfitness`` = drive-homozygote fitness).  Two
+    conventions differ from :func:`homing_mats`:
+
+    * the paper's TARE generator does **not** transpose the raw matrices, so
+      ``mats[k * 5 + i, j]`` is the offspring-``k`` weight for female ``i`` x
+      male ``j`` exactly as written (verified against the shipped
+      ``tare/drive_params.mat``);
+    * the raw genotype order is ``[ww, dw, dd, rw, dr]``, so the inner
+      female/male axes are permuted to the canonical ``[dd, dw, ww, rw, dr]``
+      to make the result a drop-in for :func:`homing_mats`.
+
+    Args:
+        gcr: Germline cut rate (ideal TARE uses 1).
+        eecr: Early-embryo cut rate (ideal TARE uses 1).
+        ddfitness: Drive-homozygote fitness folded into the operator.
+
+    Returns:
+        ``(25, 5)`` operator in canonical genotype order.
+    """
+    mat_dd = np.array([
+        [0, 0, 0, 0, 0],
+        [0, (gcr - 1) ** 2 / 4 - (gcr * (gcr - 1)) / 2 + gcr**2 / 4, 1 / 2, 0, 1 / 4],
+        [0, 1 / 2, 1, 0, 1 / 2],
+        [0, 0, 0, 0, 0],
+        [0, 1 / 4, 1 / 2, 0, 1 / 4],
+    ])
+    mat_dw = np.array([
+        [0, 1 / 2, 1, 0, 1 / 2],
+        [((eecr - 1) * (gcr - 1)) / 2 - (gcr * (eecr - 1)) / 2, (gcr * (eecr - 1) * (gcr - 1)) / 2 - ((eecr - 1) * (gcr - 1) ** 2) / 2, ((eecr - 1) * (gcr - 1)) / 2, ((eecr - 1) * (gcr - 1)) / 4 - (gcr * (eecr - 1)) / 4, ((eecr - 1) * (gcr - 1)) / 4],
+        [(eecr - 1) ** 2, -((eecr - 1) ** 2 * (gcr - 1)) / 2, 0, (eecr - 1) ** 2 / 2, 0],
+        [0, 1 / 4, 1 / 2, 0, 1 / 4],
+        [1 / 2 - eecr / 2, ((eecr - 1) * (gcr - 1)) / 4, 0, 1 / 4 - eecr / 4, 0],
+    ])
+    mat_ww = np.array([
+        [1, 1 / 2 - gcr / 2, 0, 1 / 2, 0],
+        [-((eecr - 1) ** 2 * (gcr - 1)) / 2, ((eecr - 1) ** 2 * (gcr - 1) ** 2) / 4, 0, -((eecr - 1) ** 2 * (gcr - 1)) / 4, 0],
+        [0, 0, 0, 0, 0],
+        [1 / 2, 1 / 4 - gcr / 4, 0, 1 / 4, 0],
+        [0, 0, 0, 0, 0],
+    ])
+    mat_rw = np.array([
+        [0, gcr / 2, 0, 1 / 2, 1 / 2],
+        [eecr * (eecr - 1) * (gcr - 1) - (gcr * (eecr - 1)) / 2, (gcr * (eecr - 1) * (gcr - 1)) / 2 - (eecr * (eecr - 1) * (gcr - 1) ** 2) / 2, 0, ((eecr - 1) * (gcr - 1)) / 4 - (gcr * (eecr - 1)) / 4 + (eecr * (eecr - 1) * (gcr - 1)) / 2, ((eecr - 1) * (gcr - 1)) / 4],
+        [0, 0, 0, 0, 0],
+        [1 / 2, 1 / 4, 0, 1 / 2, 1 / 4],
+        [1 / 2 - eecr / 2, ((eecr - 1) * (gcr - 1)) / 4, 0, 1 / 4 - eecr / 4, 0],
+    ])
+    mat_dr = np.array([
+        [0, 0, 0, 0, 0],
+        [(eecr * gcr) / 2 - (eecr * (gcr - 1)) / 2, gcr**2 / 2 - (gcr * (gcr - 1)) / 2 + (eecr * (gcr - 1) ** 2) / 2 - (eecr * gcr * (gcr - 1)) / 2, gcr / 2 - (eecr * (gcr - 1)) / 2, (eecr * gcr) / 4 - (eecr * (gcr - 1)) / 4 + 1 / 4, gcr / 4 - (eecr * (gcr - 1)) / 4 + 1 / 4],
+        [1 - (eecr - 1) ** 2, gcr / 2 + (((eecr - 1) ** 2 - 1) * (gcr - 1)) / 2, 0, 1 - (eecr - 1) ** 2 / 2, 1 / 2],
+        [0, 1 / 4, 1 / 2, 0, 1 / 4],
+        [eecr / 2, gcr / 4 - (eecr * (gcr - 1)) / 4 + 1 / 4, 1 / 2, eecr / 4 + 1 / 4, 1 / 2],
+    ])
+    f = np.sqrt(ddfitness)
+    fit = np.array([1.0, f, f**2, 1.0, f])  # TARE order [ww, dw, dd, rw, dr]
+    cost = np.tile(fit, (5, 1))
+    blocks = [m * cost for m in (mat_dd, mat_dw, mat_ww, mat_rw, mat_dr)]
+    perm = _TARE_TO_CANON  # canonical index -> TARE position
+    reordered = [b[np.ix_(perm, perm)] for b in blocks]
+    return np.vstack(reordered)
+
+
+def drive_mats(
+    drive: str,
+    *,
+    dc: float = 1.0,
+    gcr: float | None = None,
+    eecr: float | None = None,
+    ddfitness: float = 1.0,
+) -> np.ndarray:
+    """Return the offspring operator for the given drive type.
+
+    Args:
+        drive: ``"homing"`` (uses ``dc``) or ``"tare"`` (uses ``gcr``/``eecr``).
+        dc: Homing drive conversion rate.
+        gcr: Germline cut rate.  Defaults to 0 for homing and 1 for TARE.
+        eecr: Early-embryo cut rate (TARE only).  Defaults to 1.
+        ddfitness: Drive-homozygote fitness folded into the operator.
+
+    Returns:
+        ``(25, 5)`` operator in canonical genotype order.
+
+    Raises:
+        ValueError: If ``drive`` is not recognized.
+    """
+    if drive == "homing":
+        return homing_mats(
+            dc=dc, gcr=0.0 if gcr is None else gcr, herr=0.0, ddfitness=ddfitness
+        )
+    if drive == "tare":
+        return tare_mats(
+            gcr=1.0 if gcr is None else gcr,
+            eecr=1.0 if eecr is None else eecr,
+            ddfitness=ddfitness,
+        )
+    raise ValueError(f"unknown drive {drive!r}")
 
 
 DEFAULT_MATS = homing_mats()
@@ -251,6 +363,9 @@ def run(
     viability_dd: float = 1.0,
     fecundity_dd: float = 1.0,
     dc: float = 1.0,
+    drive: str = "homing",
+    gcr: float | None = None,
+    eecr: float | None = None,
 ) -> list[dict[str, float]]:
     """Run ``n_ticks`` ticks under a given event ``order`` (e.g. ``"R-S-A"``).
 
@@ -259,9 +374,11 @@ def run(
     acts on it.  ``scale`` multiplies the initial state (and the density
     reference); ``viability_dd`` is the ``Drive|Drive`` viability multiplier at
     the last juvenile age; ``fecundity_dd`` is the ``Drive|Drive`` fecundity
-    multiplier applied during reproduction.
+    multiplier applied during reproduction.  ``drive`` selects the offspring
+    operator (see :func:`drive_mats`); ``dc`` is used by homing and
+    ``gcr``/``eecr`` by TARE.
     """
-    mats = homing_mats(dc=dc) if mats is None else mats
+    mats = drive_mats(drive, dc=dc, gcr=gcr, eecr=eecr) if mats is None else mats
     events = order.split("-")
     for name in events:
         if name not in _EVENTS:
@@ -349,9 +466,11 @@ class Simulation:
 
     def __init__(self, *, dc: float = 1.0, stochastic: bool = False,
                  seed: int | None = None, scale: float = 1.0,
-                 viability_dd: float = 1.0, fecundity_dd: float = 1.0) -> None:
-        """Create a simulation with the given drive conversion rate and scale."""
-        self.mats = homing_mats(dc=dc)
+                 viability_dd: float = 1.0, fecundity_dd: float = 1.0,
+                 drive: str = "homing", gcr: float | None = None,
+                 eecr: float | None = None) -> None:
+        """Create a simulation with the given drive type, rate and scale."""
+        self.mats = drive_mats(drive, dc=dc, gcr=gcr, eecr=eecr)
         self.stochastic = stochastic
         self.rng = np.random.default_rng(seed)
         self.scale = scale

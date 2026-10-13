@@ -66,6 +66,39 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
    - `J`（幼体）**只取 age1**；`A` 为成虫。
 8. **只有 `R-S-A` 与 `S-A-R` 自洽**：其余排列会让 age0 队列绕过密度调节（S）直接老化，
    未调节卵池泄漏 → 数值爆炸（可达上万倍）。
+9. **「不固定但存在」的共存区容易找，且顺序差主要体现在动态上**：homing + **足够大的适合度代价**
+   会落到**内部共存平衡**（如 `dc=0.6` 时 `cost∈[0.3,0.6]` → dd 平衡 0.26–0.83，是连续带而非刀锋区）。
+   该区**终值两顺序几乎相同**（如 dc=0.6/cost=0.4：0.354/0.354），但**趋近共存的动态差很大**
+   （同配置 t=80 全局 dd/(非卵)：R-S-A 0.116 vs S-A-R 0.031）。这是**均匀共存**，不是严格 chasing；
+   严格 chasing（波钉扎/Allee）需**阈值/抗性**机制（如 TARE），见 §2#12–14。
+10. **「启动慢」与「速度慢」同源**：事件顺序只改**局域有效增长率 `r`**（迁移核/`D` 两顺序**相同**）；
+    波速 ∝ `√r`、启动时间 ∝ `1/r`，故二者一起变（`dc=0.8, avd=1`：R-S-A 前沿拟合 t0≈36、速度 0.79；
+    S-A-R t0≈48、速度 0.64 cells/tick）。要「分开」只能独立改 `D`（核）或种子大小。
+11. **迁移核 = 中心点采样**（natal `build_gaussian_kernel` 与 paper 一致）：`mean_dispersal=avd → sigma=avd/√(π/2)`，
+    `w[dr,dc]=exp(-dist²/2σ²)`（hex 度量 `dr²+dc²+dr·dc`）后归一化。与「对 deme 面积积分」的差在
+    `σ≫格尺寸`很小、`σ≲格尺寸`较大（avd=0.5 有效均值 0.21 vs 0.42）。**已接受中心点方案**
+    （想更接近连续就缩小 hex 尺寸），不再纠结该细节。
+12. **TARE 已实现并与 paper 逐位对齐**：`age_model.tare_mats(gcr, eecr, ddfitness)` 逐字翻译
+    `radial_release_optimizer/tare/drive_generator.m`，与仓库自带 `tare/drive_params.mat` 的 `mats`
+    **逐位一致**（max|diff| = 0）。两个与 homing 不同的约定：① TARE 生成器**不转置**原始矩阵（homing 转置），
+    即 `mats[k*5+i, j]`=母本 `i` × 父本 `j` 的后代 `k` 权重，直接以母/父次序使用；② 原始基因型序是
+    `[ww, dw, dd, rw, dr]`，导入时按 `dd<->ww`（`_TARE_TO_CANON`）置换成规范序 `[dd, dw, ww, rw, dr]`
+    （block 后代轴本就是规范序，无需重排）。副作用：TARE 的 `dd×ww` 与 `ww×dd` **不对称**（母本早期胚胎
+    切割 `eecr` 造成，`dd(母)×ww(父)→dr`），是 paper 模型自身的性质，非翻译错误。开关
+    `drive∈{"homing","tare"}` 已加入 `age_model.run`/`Simulation`/`drive_mats` 与 `spatial_test.run_replicate`；
+    仅 TARE 用 `gcr/eecr`（默认 1/1），homing 用 `dc`。
+13. **TARE 有「播种阈值」（nucleation threshold），无稳定波钉扎**：空间（`avd=0.5`、中央圆 `r=3`、**双性**
+    释放 dd）下，释放量低于临界 → 驱动丢失，高于 → 成波并最终扫过全域；homing 在测试范围内无阈值
+    （0.5× 即扫过）。机制与 §2#10 同源（阈值/潜伏期由局域有效增长率决定）。**未找到稳定的「波钉扎」
+    共存态**：在 `t=2000`、扫描 `viability_dd∈[0.2,1]`/`fecundity_dd∈[0.4,1]` 后只见「扫过」或「丢失」两态，
+    没有介于其间的稳定驱动+WT 共存。故本文所称严格 chasing 在本模型里是**阈值 + 长潜伏**现象
+    （近阈值时驱动与 WT 空间共存的**瞬态**前沿），而不是稳定双稳前沿。
+14. **事件顺序显著移动 TARE 阈值/潜伏期**（同样释放，`R-S-A` 比 `S-A-R` 更早成波）：
+    释放 `0.9×`：R-S-A 终值 carrier `0.72` vs S-A-R `0.01`；释放 `1.0×`、`t=600`：R-S-A `0.985` vs
+    S-A-R `0.022`；释放 `1.25×`、`t=600`：S-A-R 处在**驱动 `0.35` / WT `0.48` 的空间共存潜伏期**
+    （前沿半径 `r≈17`，`t=800` 才扫过），而 R-S-A 已扫过。强 fecundity 代价
+    （`viability=1.0, fecundity=0.4`，释放 `1.5×`，`t=2000`）下 R-S-A `1.00` vs S-A-R `0.03`，佐证 §2#5。
+    产物：`event-seq/tare_chasing.py`、`img/spatial/tare_threshold.png`、`tare_latency.png`、`tare_chasing.json`。
 
 ---
 
@@ -111,6 +144,7 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
 | `stochastic_test.py` | 非空间随机：100 次均值 ± 区间；`SCALING_FACTOR` 默认 10，`--scaling-factor` 可调 |
 | `spatial_test.py` | 空间模型（natal 归一化迁移）+ 覆盖曲线图（`COVERS={0.1..0.9}`） |
 | `spatial_html.py` | 六边形热图交互式 HTML（确定性 + sf10/sf100 随机均值） |
+| `tare_chasing.py` | TARE 播种阈值/chasing 实验：阈值扫描 + 近阈值潜伏期（R-S-A vs S-A-R），自测含 `tare_mats` 对齐 paper |
 
 产物（`event-seq/img/`，**已 gitignore**，不入库）：
 
@@ -128,9 +162,16 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
 | `stochastic_test.py` | 0.6（默认 `--dc`） | 0.8 | 0.8 | 200 | runs=100，sf=10（默认） |
 | `spatial_test.py` | 0.8 | 0.8 | 0.8 | 120 | grid 41²，kernel=7，avd=1，release 0.5×age2 |
 | `spatial_html.py` | 0.8 | 0.8 | 0.8 | 120 | runs=100，sf∈{10,100} |
+| `tare_chasing.py` | —（TARE gcr=eecr=1） | 0.8 | 0.8 | 600/1000 | grid 41²，avd=0.5，**双性**释放 dd，中央圆 r=3，release∈{0.5..2.0}；carrier={dd,dw,dr} |
 
 覆盖曲线口径：每 deme 的 `dd` 占**非卵个体**（age≥1）比例 `> cover` 的 deme 数；随机图给出
 **mean + 95% 运行分布区间（2.5–97.5 分位）**。
+
+### 4.1 计算后端（重要）
+event-seq 脚本是**纯 NumPy 自实现**，**不调用 natal 的 Rust 引擎**（`_engine_rs`）。唯一用到 natal 的是
+`from natal.frontend.spatial.topology import build_gaussian_kernel`（`topology.py` 里的**纯 Python** 函数，只算迁移核）。
+原因：natal 引擎的 tick 内事件顺序**固定为 R-S-A**，无法重排；为支持任意 R/S/A 顺序，生命周期在 NumPy 里**逐阶段复刻**。
+（真正调用 natal 引擎/route A 的是 `hexagon_spatial_test/` 下的 M5 探针，与本分支无关。）
 
 ---
 
@@ -148,6 +189,15 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
    跑 pytest/phase0 前 `unset PYTHONHOME PYO3_PYTHON PYTHONPATH`。
 10. Git/GitHub：远端 `explo/event-seq` 需在 `remote.origin.fetch` 加一条 refspec 才能被 VSCode 识别为跟踪分支
     （否则显示 “Publish Branch”）；本地需显式 refspec fetch 建立 remote-tracking ref 才能识别跟踪分支。
+11. **驱动类型（TARE，已实现）**：`age_model.tare_mats` = paper
+    `Hex-model-main/radial_release_optimizer/tare/drive_generator.m` 的 `(25,5)` 翻译，与 `homing_mats` 同结构
+    （drop-in），并已对齐仓库自带 `tare/drive_params.mat`（见 §2#12）。**不要**用 natal 的 `ToxinAntidoteDrive`
+    （6 ztype 含 `R|R`、有性别、传递与致死分离，接入我们 5 基因型模型代价大）。要点：① paper TARE 基因型序是
+    `ww,dw,dd,rw,dr`（homing 是 `dd,dw,ww,rw,dr`），导入时按 `dd<->ww` 归一到规范序；② TARE 生成器**不转置**
+    （homing 转置），照原样以母/父次序使用；③ TARE 的 `dd×ww`/`ww×dd` 不对称属模型自身，非 bug。
+12. **避免适合度重复计**：paper 把代价折进 `mats`；natal 放在 `viability_fitness`；我们模型另有 `viability_dd`/`fecundity_dd`。
+    **同一份代价只在一个地方施加**（用 paper `mats` 就别再加同项 viability）。natal 里 `viability_scaling`（预设）与
+    `.fitness(viability=...)` 写**同一张表**，构建次序 presets→fitness，后写覆盖前写。
 
 ---
 
@@ -160,6 +210,12 @@ natal-core 的 `AgeStructuredPopulation`（`rust/src/kernels/age_structured.rs`�
 5. **对接 M5 空间规模**：在完整 `500×500`（route A GPU）上验证顺序对波速的影响是否稳健。
 6. **natal 引擎交叉验证**：用 natal `SpatialPopulation`（R-S-A）与自写空间实现对比，确认语义一致。
 7. **线性化解析**：推一 tick 反馈滞后对早期增长率/波速的解析修正。
+8. **加 TARE 驱动、找严格 chasing（已完成，见 §2#12–14）**：`drive∈{"homing","tare"}` 开关、
+   `tare_mats`（对齐 paper）、`event-seq/tare_chasing.py` 均已落地。结论：严格 chasing 在本模型里是
+   **播种阈值 + 长潜伏**现象（近阈值时驱动与 WT 空间共存的瞬态前沿），**未找到稳定波钉扎共存态**；
+   事件顺序显著移动该阈值/潜伏期（R-S-A 更早成波）。仍可继续：① 换 `mean_dispersal`/`migration_rate`
+   进一步分离「波速」与「阈值」；② 引入真正的双稳（如带代价的 resistance/性别特异传递）寻找稳定钉扎前沿；
+   ③ 对阈值/潜伏期做随机与 bootstrap 显著性（§6#1、#4）。
 
 ---
 

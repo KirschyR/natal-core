@@ -49,7 +49,10 @@ ROWS, COLS = 41, 41
 KERNEL_SIZE = 7
 MEAN_DISPERSAL = 1.0
 MIGRATION_RATE = 1.0
+DRIVE = "homing"
 DC = 0.8
+GCR = 1.0
+EECR = 1.0
 VIABILITY_DD = 0.8
 FECUNDITY_DD = 0.8
 RELEASE_RADIUS = 3.0
@@ -252,10 +255,14 @@ def _coverage_counts(data: np.ndarray) -> np.ndarray:
 def run_replicate(
     order: str, rows: int, cols: int, ticks: int, kernel: np.ndarray, valid_sum: np.ndarray,
     *, scale: float, stochastic: bool, seed: int, keep_grids: bool = False,
+    drive: str = DRIVE, gcr: float = GCR, eecr: float = EECR,
 ) -> tuple[np.ndarray | None, np.ndarray]:
     """Return ``(adult_grids or None, coverage_counts)`` for one replicate."""
     rng = np.random.default_rng(seed)
-    mats = m.homing_mats(dc=DC)
+    kwargs: dict[str, float] = {"dc": DC}
+    if drive == "tare":
+        kwargs.update(gcr=gcr, eecr=eecr)
+    mats = m.drive_mats(drive, **kwargs)
     data = initial_state(rows, cols, RELEASE_RADIUS, RELEASE_MULTIPLE, scale)
     density_ref = scale * m.DENSITY_REF
     coverage = np.zeros((ticks + 1, len(COVERS)))
@@ -290,8 +297,13 @@ def run_replicate(
 
 def _params_title(br: str, *, stochastic: bool, scale: float) -> str:
     mode = f"stochastic | sf={scale:g}" if stochastic else "deterministic"
+    if DRIVE == "tare":
+        drive_params = f"drive=tare | gcr={GCR:g} | eecr={EECR:g}"
+    else:
+        drive_params = f"drive={DRIVE} | dc={DC:g}"
     return (
-        f"dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g} | "
+        f"{drive_params} | "
+        f"viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g} | "
         f"grid={ROWS}x{COLS} | kernel_size={KERNEL_SIZE} | mean_dispersal={MEAN_DISPERSAL:g}{br}"
         f"migration_rate={MIGRATION_RATE:g} | release_radius={RELEASE_RADIUS:g} | "
         f"release_age2_mult={RELEASE_MULTIPLE:g} | boundary=natal-normalized | {mode}"

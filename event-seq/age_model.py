@@ -250,6 +250,7 @@ def run(
     scale: float = 1.0,
     viability_dd: float = 1.0,
     fecundity_dd: float = 1.0,
+    dc: float = 1.0,
 ) -> list[dict[str, float]]:
     """Run ``n_ticks`` ticks under a given event ``order`` (e.g. ``"R-S-A"``).
 
@@ -260,7 +261,7 @@ def run(
     the last juvenile age; ``fecundity_dd`` is the ``Drive|Drive`` fecundity
     multiplier applied during reproduction.
     """
-    mats = DEFAULT_MATS if mats is None else mats
+    mats = homing_mats(dc=dc) if mats is None else mats
     events = order.split("-")
     for name in events:
         if name not in _EVENTS:

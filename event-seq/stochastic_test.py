@@ -117,7 +117,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--runs", type=int, default=100)
     ap.add_argument("--ticks", type=int, default=200)
-    ap.add_argument("--dc", type=float, default=0.8)
+    ap.add_argument("--dc", type=float, default=0.6)
     ap.add_argument("--scaling-factor", type=float, default=SCALING_FACTOR)
     args = ap.parse_args()
 

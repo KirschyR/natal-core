@@ -27,6 +27,8 @@ sys.path.insert(0, str(HERE))
 import age_model as m  # noqa: E402
 
 IMG = HERE / "img"
+# Drive parameters shared by the deterministic run.
+DC = 0.6  # drive conversion rate
 # Drive-homozygote fitness: viability applied at the last juvenile age,
 # fecundity applied during reproduction.
 VIABILITY_DD = 0.8
@@ -64,7 +66,7 @@ def plot_order(order: str, history: list[dict[str, float]], ticks: int) -> Path:
     for ax in axes[-1]:
         ax.set_xlabel("tick")
     fig.suptitle(
-        f"event order: {order} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
+        f"event order: {order} | dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
         fontsize=15,
     )
     fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
@@ -90,8 +92,8 @@ def plot_total_deterministic(
     ax.set_xlabel("tick")
     ax.set_ylabel("total population (eggs excluded)")
     ax.set_title(
-        f"deterministic total population (eggs excluded) | viability_dd={VIABILITY_DD:g} "
-        f"| fecundity_dd={FECUNDITY_DD:g}"
+        f"deterministic total population (eggs excluded) | dc={DC:g} "
+        f"| viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}"
     )
     ax.set_xlim(0, ticks)
     ax.grid(alpha=0.3)
@@ -113,7 +115,9 @@ def main() -> int:
     orders = [o.strip() for o in args.orders.split(",") if o.strip()] or _all_orders()
     histories: dict[str, list[dict[str, float]]] = {}
     for order in orders:
-        history = m.run(order, args.ticks, viability_dd=VIABILITY_DD, fecundity_dd=FECUNDITY_DD)
+        history = m.run(
+            order, args.ticks, dc=DC, viability_dd=VIABILITY_DD, fecundity_dd=FECUNDITY_DD
+        )
         histories[order] = history
         out = plot_order(order, history, args.ticks)
         frac = _final_adult_drive_fraction(history)

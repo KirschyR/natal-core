@@ -66,10 +66,11 @@ def plot_order(order: str, history: list[dict[str, float]], ticks: int) -> Path:
     for ax in axes[-1]:
         ax.set_xlabel("tick")
     fig.suptitle(
-        f"event order: {order} | dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
+        f"event order: {order}\n"
+        f"dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
         fontsize=15,
     )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
 
     out = IMG / f"order_{order.replace('-', '')}.png"
     fig.savefig(out, dpi=150)
@@ -92,8 +93,8 @@ def plot_total_deterministic(
     ax.set_xlabel("tick")
     ax.set_ylabel("total population (eggs excluded)")
     ax.set_title(
-        f"deterministic total population (eggs excluded) | dc={DC:g} "
-        f"| viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}"
+        "deterministic total population (eggs excluded)\n"
+        f"dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}"
     )
     ax.set_xlim(0, ticks)
     ax.grid(alpha=0.3)

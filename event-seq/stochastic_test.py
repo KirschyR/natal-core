@@ -68,11 +68,11 @@ def plot_order(order: str, series: dict[str, np.ndarray], runs: int, dc: float,
     for ax in axes[-1]:
         ax.set_xlabel("tick")
     fig.suptitle(
-        f"event order: {order} | stochastic (n={runs}) | dc={dc} | sf={scaling_factor:g} "
-        f"| viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
+        f"event order: {order} | stochastic (n={runs})\n"
+        f"dc={dc:g} | sf={scaling_factor:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}",
         fontsize=13,
     )
-    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.98))
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95))
 
     out = IMG / f"order_{order.replace('-', '')}_stoch_sf{scaling_factor:g}.png"
     fig.savefig(out, dpi=150)
@@ -101,8 +101,8 @@ def plot_total_stochastic(
     ax.set_xlabel("tick")
     ax.set_ylabel("total population (eggs excluded)")
     ax.set_title(
-        f"stochastic total population (eggs excluded) | n={runs} | dc={dc} "
-        f"| sf={scaling_factor:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}"
+        f"stochastic total population (eggs excluded) | n={runs}\n"
+        f"dc={dc:g} | sf={scaling_factor:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g}"
     )
     ax.grid(alpha=0.3)
     ax.legend()

@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import itertools
 import sys
 from pathlib import Path
 
@@ -28,15 +27,14 @@ import age_model as m  # noqa: E402
 
 IMG = HERE / "img"
 
-# Canonical orders first, then the rest of the permutations.
+# Only these two orders keep the density-regulation gate (S) between writing
+# age-0 (R) and aging (A); the other four permutations let the unregulated
+# age-0 pool leak into age 1 and diverge.
 _CANONICAL = ["R-S-A", "S-A-R"]
 
 
 def _all_orders() -> list[str]:
-    perms = ["-".join(p) for p in itertools.permutations("RSA")]
-    ordered = [o for o in _CANONICAL if o in perms]
-    ordered += [o for o in perms if o not in ordered]
-    return ordered
+    return list(_CANONICAL)
 
 
 def _final_adult_drive_fraction(history: list[dict[str, float]]) -> float:

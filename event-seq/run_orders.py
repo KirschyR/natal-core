@@ -2,7 +2,7 @@
 
 For every tick order this produces one figure with twelve subplots (4 rows x 3
 columns) -- ``{A,J,E}_{F,M}_{W,D}`` (rows = sex/type, columns = age) -- written
-to ``event-seq/img/order_<ORDER>.png``, plus one total-population figure
+to ``event-seq/img/non-spatial/order_<ORDER>.png``, plus one total-population figure
 overlaying the orders (eggs excluded), ``img/total_deterministic.png``.  The
 figure title records the event order.
 
@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import age_model as m  # noqa: E402
 
-IMG = HERE / "img"
+IMG = HERE / "img" / "non-spatial"
 # Drive parameters shared by the deterministic run.
 DC = 0.6  # drive conversion rate
 # Drive-homozygote fitness: viability applied at the last juvenile age,

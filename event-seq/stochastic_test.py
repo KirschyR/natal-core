@@ -3,7 +3,7 @@
 Runs ``--runs`` independent stochastic replicates of the single-population model
 for R-S-A and S-A-R, with drive conversion ``--dc`` (default 0.8), and plots the
 per-category mean with its 95% CI (mean +/- 1.96 SEM) in a 4x3 grid under
-``event-seq/img/``, plus one total-population figure (eggs excluded) overlaying
+``event-seq/img/non-spatial/``, plus one total-population figure (eggs excluded) overlaying
 both orders.
 
 Usage:
@@ -26,7 +26,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import age_model as m  # noqa: E402
 
-IMG = HERE / "img"
+IMG = HERE / "img" / "non-spatial"
 ORDERS = ["R-S-A", "S-A-R"]
 # Initial-population scaling factor: every per-group count is multiplied by this
 # (the density reference scales too, so normalized dynamics are unchanged).

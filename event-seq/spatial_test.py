@@ -41,13 +41,13 @@ ROWS, COLS = 41, 41
 KERNEL_SIZE = 7
 MEAN_DISPERSAL = 1.0
 MIGRATION_RATE = 1.0
-DC = 0.6
+DC = 0.8
 VIABILITY_DD = 0.8
 FECUNDITY_DD = 0.8
 RELEASE_RADIUS = 3.0
-# dd males added per patch deme at each adult male age, as a multiple of the
-# equilibrium male count of that age (1.0 => the patch's adult males are all dd).
-DRIVE_FRACTION = 1.0
+# dd males added at age 2 in the central disk, as a multiple of that age's
+# equilibrium male count.
+RELEASE_MULTIPLE = 0.5
 ORDERS = ["R-S-A", "S-A-R"]
 
 
@@ -59,19 +59,20 @@ def kernel_off_center(size: int, mean_dispersal: float) -> np.ndarray:
     return kernel
 
 
-def initial_state(rows: int, cols: int, radius: float, drive_fraction: float) -> np.ndarray:
+def initial_state(rows: int, cols: int, radius: float, release_multiple: float) -> np.ndarray:
     """``(N_Z, N_SEX, N_AGES, rows, cols)`` WT equilibrium + central drive males.
 
-    Drive (``Drive|Drive``) males are added at every adult male age in the
-    central disk, ``drive_fraction`` times that age's equilibrium male count.
+    ``Drive|Drive`` males are added at age 2 (the first adult age) in the central
+    disk, ``release_multiple`` times that age's equilibrium male count.
     """
     data = np.zeros((m.N_Z, m.N_SEX, m.N_AGES, rows, cols))
     data[m.CORD_PURE_W, 0] = m.INITIAL_FEMALE[:, None, None]
     data[m.CORD_PURE_W, 1] = m.INITIAL_MALE[:, None, None]
     rr, cc = np.mgrid[0:rows, 0:cols]
     mask = (rr - (rows - 1) / 2.0) ** 2 + (cc - (cols - 1) / 2.0) ** 2 <= radius**2
-    for age in range(m.NEW_ADULT_AGE, m.NEW_ADULT_AGE + m.M):
-        data[m.CORD_RELEASE_GENOTYPE, 1, age, mask] += drive_fraction * m.INITIAL_MALE[age]
+    data[m.CORD_RELEASE_GENOTYPE, 1, m.NEW_ADULT_AGE, mask] += (
+        release_multiple * m.INITIAL_MALE[m.NEW_ADULT_AGE]
+    )
     return data
 
 
@@ -130,7 +131,7 @@ def run_order(
 ) -> np.ndarray:
     """Return ``(ticks+1, rows, cols)`` adult drive-fraction grids for one order."""
     mats = m.homing_mats(dc=DC)
-    data = initial_state(rows, cols, RELEASE_RADIUS, DRIVE_FRACTION)
+    data = initial_state(rows, cols, RELEASE_RADIUS, RELEASE_MULTIPLE)
     frames = [adult_drive_fraction(data)]
     for _ in range(ticks):
         newborns = _reproduction(data, mats, FECUNDITY_DD)
@@ -148,7 +149,7 @@ def run_order(
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--ticks", type=int, default=90)
+    ap.add_argument("--ticks", type=int, default=120)
     args = ap.parse_args()
 
     IMG.mkdir(parents=True, exist_ok=True)
@@ -180,7 +181,7 @@ def main() -> int:
         f"dc={DC:g} | viability_dd={VIABILITY_DD:g} | fecundity_dd={FECUNDITY_DD:g} | "
         f"grid={ROWS}x{COLS} | kernel_size={KERNEL_SIZE} | mean_dispersal={MEAN_DISPERSAL:g} | "
         f"migration_rate={MIGRATION_RATE:g} | release_radius={RELEASE_RADIUS:g} | "
-        f"release_frac={DRIVE_FRACTION:g} | boundary=natal-normalized | deterministic"
+        f"release_age2_mult={RELEASE_MULTIPLE:g} | boundary=natal-normalized | deterministic"
     )
     fig.update_layout(title={"text": title, "x": 0.5, "xanchor": "center"}, coloraxis_colorbar_title="frac")
     if fig.layout.updatemenus:

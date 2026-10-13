@@ -212,3 +212,146 @@ def run(order: str, n_ticks: int, mats: np.ndarray | None = None) -> list[dict[s
                 _EVENTS[name](data)
         history.append(classify(data))
     return history
+
+
+# --- stochastic mode --------------------------------------------------------
+#
+# natal's stochastic path uses *continuous* samplers (Beta/Gamma based) rather
+# than integer Binomial/Poisson, because the reference counts are fractional
+# (adults ~0.22).  The continuous samplers fall back to the deterministic mean
+# when n <= 1, so small classes do not collapse while large classes (the ~40
+# eggs) carry the noise.  These mirror ``rust/src/kernels/rng.rs``.
+
+_EPS = 1e-12
+
+
+def _continuous_poisson(rng: np.random.Generator, lam: float) -> float:
+    """Continuous Poisson (``Gamma(shape=lambda, scale=1)``)."""
+    if lam <= _EPS:
+        return 0.0
+    return float(rng.gamma(shape=lam, scale=1.0))
+
+
+def _continuous_binomial(rng: np.random.Generator, n: float, p: float) -> float:
+    """Continuous Binomial via a Beta proportion; mean when ``n <= 1``."""
+    if p <= _EPS:
+        return 0.0
+    if p >= 1.0 - _EPS:
+        return float(n)
+    if n <= 1.0 + _EPS:
+        return float(n) * p
+    concentration = n - 1.0
+    alpha = max(p * concentration, _EPS)
+    beta = max((1.0 - p) * concentration, _EPS)
+    numerator = rng.gamma(shape=alpha, scale=1.0)
+    denominator = rng.gamma(shape=beta, scale=1.0)
+    proportion = 0.0 if numerator == 0.0 else numerator / (numerator + denominator)
+    return float(proportion * n)
+
+
+def _continuous_multinomial(rng: np.random.Generator, n: float, p: np.ndarray) -> np.ndarray:
+    """Continuous Multinomial via normalized Gamma draws; mean when ``n <= 1``."""
+    n = float(n)
+    p = np.asarray(p, dtype=float)
+    if n <= 1.0 + _EPS:
+        return n * p
+    concentration = n - 1.0
+    draws = np.zeros(len(p))
+    for i, prob in enumerate(p):
+        alpha = prob * concentration
+        if alpha > _EPS:
+            draws[i] = rng.gamma(shape=alpha, scale=1.0)
+    total = float(draws.sum())
+    if total > _EPS:
+        return draws * (n / total)
+    return n * p
+
+
+class Simulation:
+    """Single-population model with optional natal-style continuous sampling.
+
+    The deterministic path reproduces :func:`run` exactly; the stochastic path
+    samples continuous Poisson (egg count), continuous multinomial (offspring
+    genotypes and density-recruited juveniles) and continuous binomial (sex
+    assignment and survival), matching natal's ``continuous_sampling=True``
+    semantics for fractional counts.
+    """
+
+    def __init__(self, *, dc: float = 1.0, stochastic: bool = False,
+                 seed: int | None = None) -> None:
+        """Create a simulation with the given drive conversion rate."""
+        self.mats = homing_mats(dc=dc)
+        self.stochastic = stochastic
+        self.rng = np.random.default_rng(seed)
+        self.data = initial_state()
+
+    def _newborn(self) -> np.ndarray | None:
+        data = self.data
+        female_adults = data[:, 0, NEW_ADULT_AGE:]
+        male_adults = data[:, 1, NEW_ADULT_AGE:]
+        total_female = float(female_adults.sum())
+        total_male = float(male_adults.sum())
+        if total_female <= 0.0 or total_male <= 0.0:
+            return None
+        female_freq = female_adults.sum(axis=1) / total_female
+        male_freq = male_adults.sum(axis=1) / total_male
+        m3 = self.mats.reshape(N_Z, N_Z, N_Z)
+        prop = np.einsum("i,j,kij->k", female_freq, male_freq, m3)
+        if self.stochastic:
+            total_eggs = _continuous_poisson(self.rng, EGGS * total_female)
+            return _continuous_multinomial(self.rng, total_eggs, prop)
+        return EGGS * total_female * prop
+
+    def _event_R(self, newborns: np.ndarray | None) -> None:
+        if newborns is None:
+            return
+        if self.stochastic:
+            for z in range(N_Z):
+                n = float(newborns[z])
+                female = _continuous_binomial(self.rng, n, SEX_RATIO)
+                self.data[z, 0, 0] = female
+                self.data[z, 1, 0] = n - female
+        else:
+            event_R(self.data, newborns)
+
+    def _event_S(self) -> None:
+        data = self.data
+        if self.stochastic:
+            j0 = float(data[:, :, 0].sum())
+            j1 = float(data[:, :, 1].sum())
+            r = (j0 + 5.0 * j1) / (EGGS + 5.0 * (4.0 / (F + 1)))
+            s1 = LAMBDA / ((LAMBDA - 1.0) * r + 1.0) * 2.0 / SF / EGGS
+            age0 = data[:, :, 0].reshape(-1)
+            total0 = float(age0.sum())
+            if total0 > 0.0:
+                draws = _continuous_multinomial(self.rng, total0 * s1, age0 / total0)
+                data[:, :, 0] = draws.reshape(N_Z, N_SEX)
+            for z in range(N_Z):
+                for sex in range(N_SEX):
+                    for age in range(N_AGES):
+                        data[z, sex, age] = _continuous_binomial(
+                            self.rng, data[z, sex, age], SURVIVAL[sex, age]
+                        )
+        else:
+            event_S(data)
+
+    def step(self, order: str) -> None:
+        """Advance the state by one tick under the given event order."""
+        newborns = self._newborn()
+        for name in order.split("-"):
+            if name == "R":
+                self._event_R(newborns)
+            elif name == "S":
+                self._event_S()
+            elif name == "A":
+                event_A(self.data)
+            else:
+                raise ValueError(f"unknown event {name!r} in order {order!r}")
+
+    def run(self, order: str, n_ticks: int) -> list[dict[str, float]]:
+        """Run ``n_ticks`` ticks; returns the per-tick category history."""
+        history = [classify(self.data)]
+        for _ in range(n_ticks):
+            self.step(order)
+            history.append(classify(self.data))
+        return history

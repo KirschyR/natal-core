@@ -103,15 +103,20 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ticks", type=int, default=200)
     ap.add_argument("--stride", type=int, default=1)
+    ap.add_argument("--normalize-h", choices=["none", "mean1"], default="none",
+                    help="normalize H to mean 1 for the capacity mode (makes its total match baseline)")
     args = ap.parse_args()
     IMG.mkdir(parents=True, exist_ok=True)
     H = es.make_H()
+    Hcap = H / H.mean() if args.normalize_h == "mean1" else H
     kernel = es.kernel_off_center(es.KERNEL_SIZE, es.MEAN_DISPERSAL)
     bias, times = es.run("bias", H, ticks=args.ticks, kernel=kernel, record_every=1)
-    capacity, _ = es.run("capacity", H, ticks=args.ticks, kernel=kernel, record_every=1)
-    out, vmax = build_frames(H, bias, capacity, times, args.stride, IMG / "h_insertion_compare.html")
-    np.savez(IMG / "h_insertion_compare.npz", H=H, bias=bias, capacity=capacity, times=np.array(times))
-    print(f"wrote {out}  (density vmax={vmax:.1f})")
+    capacity, _ = es.run("capacity", Hcap, ticks=args.ticks, kernel=kernel, record_every=1)
+    suffix = "_norm" if args.normalize_h == "mean1" else ""
+    out, vmax = build_frames(H, bias, capacity, times, args.stride,
+                             IMG / f"h_insertion_compare{suffix}.html")
+    np.savez(IMG / f"h_insertion_compare{suffix}.npz", H=H, bias=bias, capacity=capacity, times=np.array(times))
+    print(f"wrote {out}  (density vmax={vmax:.1f}, normalize_h={args.normalize_h})")
     print(f"t=0 totals: bias={bias[0].sum():.1f} capacity={capacity[0].sum():.1f}")
     print(f"t={times[-1]} totals: bias={bias[-1].sum():.1f} capacity={capacity[-1].sum():.1f}")
     return 0

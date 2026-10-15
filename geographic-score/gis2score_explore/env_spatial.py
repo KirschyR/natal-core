@@ -47,7 +47,7 @@ MIGRATION_RATE = 1.0
 # Four Gaussian peaks on the hex grid (row, col); the hex metric is
 # d^2 = di^2 + dj^2 + di*dj, so these are physically distinct bumps.
 PEAKS = ((16, 16), (16, 44), (44, 16), (44, 44))
-PEAK_SIGMA = 6.0
+PEAK_SIGMA = 4.0
 H_FLOOR = 0.10
 EPS = 1e-12
 

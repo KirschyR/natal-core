@@ -82,3 +82,7 @@ hexagon_spatial_test/hex-model-new/
 event-seq/img/
 
 geographic-score/ASCENT_paper/
+
+# gis2score exploration: reference-model copy + generated figures/HTML
+simple_spatial_model_ref/
+img/

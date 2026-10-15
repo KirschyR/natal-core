@@ -9,7 +9,7 @@ so the spatial pattern of the two simulation modes can be compared against it by
 eye.  Populated via a self-contained base64-PNG HTML (no external assets).
 
 Usage:
-    python geographic-score/gis2score_explore/env_html.py --ticks 200 --stride 4
+    python geographic-score/gis2score_explore/env_html.py --ticks 200 --stride 1
 """
 
 from __future__ import annotations
@@ -102,7 +102,7 @@ timer=setInterval(()=>show((Number(slider.value)+1)%frames.length),200);}});
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--ticks", type=int, default=200)
-    ap.add_argument("--stride", type=int, default=5)
+    ap.add_argument("--stride", type=int, default=1)
     args = ap.parse_args()
     IMG.mkdir(parents=True, exist_ok=True)
     H = es.make_H()

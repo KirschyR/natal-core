@@ -1,135 +1,140 @@
-# data2score：环境 GIS → H/K 的数据源与执行计划
+# data2score：环境 GIS → capacity K 的工作流计划（定稿配置）
 
-> 本文件只在本分支（`method/gis2score`）记录。目标：为 Hawaii（NEON **PUUM** 站点，已有物种计数标签）
-> 备齐**同时满足 ASCENT 六特征与 hex 乘性因子**的环境栅格，并把「数据输入 → 中间层 → H/K 矩阵」的
-> minimal demo 计划写清楚。
+> 本文件只在本分支（`method/gis2score`）记录。
+> 目标：走 **hex model 的分层乘性响应函数**，把环境 GIS 数据转换为 **每 deme 的 capacity K**；
+> **不训练/不拟合**响应函数参数（用占位值），重点是**工作流框架**是否正确、可复现、可替换。
 >
-> **当前状态：只做规划，不执行下载/处理。** 执行前需确认 §6 的决策项。
+> **当前状态：规划已定稿，尚未执行任何下载/处理。**
 
 ---
 
-## 1. 环境变量需求（两个模型的并集）
+## 1. 最终配置（已定）
 
-| 变量 | ASCENT（六特征） | hex model（乘性因子） | 说明 |
-|---|---|---|---|
-| 海拔 elevation | ✅ elevation | ✅ `altitudefunc`（800 m 归零） | DEM |
-| 建筑密度 building density | ✅ | （无直接项，可用建成区） | 建筑面/建成区 |
-| 人口密度 population density | ✅ | ✅ `bloodmeal/foodfunc` | 栅格人口 |
-| 最高温度 max temperature | ✅ | ✅ `tempfunc`（tmax） | 逐月气候 |
-| 农田 cropland | ✅ | —（土地覆盖） | 类别→比例 |
-| 森林 forest | ✅ | —（土地覆盖） | 类别→比例 |
-| 降雨 rainfall | — | ✅ `rainfunc` | 逐月降水 |
-| 水体（永久/季节性） | — | ✅ `waterfunc` | 地表水/季节水 |
-| 月均温/月最低温 | — | ✅ `tempfunc` | 逐月气候 |
-
-**结论**：并集 = **海拔、建筑、人口、温度（max/mean/min）、降雨、农田、森林、水体（永久/季节）**。
+| 项目 | 决定 |
+|---|---|
+| 方案 | hex model 乘性响应函数 → K（不使用 ASCENT/SVM；不保留 ASCENT 特征接口） |
+| 参数 | **占位值**（可运算、无科学意义），输出标 `uncalibrated`；拟合后续外挂 |
+| K 尺度 | `k_scale = 10`（占位） |
+| 时间 | **气候态 12 个月**，输出 **12×K** |
+| 聚合顺序 | **先在高分辨率逐像素算 K，再面积积分到 hex** |
+| 区域 | 六个主岛：**Kauai、Oahu、Molokai、Maui、Lanai、Hawaii** |
+| 投影 | **Albers Equal Area（Hawaii 参数）** |
+| 网格 | 中心距 **100 m**、`area_scale=1`、**hex-model-new 的取向** |
+| 陆海 | `elevation > 0` 为陆地；海域 `K=0` |
+| DEM | **Copernicus DEM GLO-30** |
+| 人口 | **WorldPop 2020** |
+| 气候 | **WorldClim 2**（逐月气候态；`tmax/tmin/tavg/prec`） |
+| 水体 | **JRC Global Surface Water**；`seasonality=12` → 永久水，`1–11` → 季节水，`<1` → 非水；每像素 **0/1** |
+| 输出 | **`.npz`** 密集矩阵；**不输出中间因子图**；**不导出 `.mat`**；只存网格定义（不存 cell centers） |
+| 验证 | 合成/几何自测；**NEON 验证移出当前阶段**（待参数校准后再做） |
 
 ---
 
-## 2. 数据源清单（推荐）
+## 2. 变量与数据源（hex 因子）
 
-| 变量 | 推荐源 | 分辨率/时相 | 覆盖 | 备注/许可 |
+| 变量 | 用途（响应函数） | 源 | 分辨率/时相 | adapter 注意 |
 |---|---|---|---|---|
-| 海拔 | **Copernicus DEM GLO-30**（或 SRTM 30 m） | 30 m，静态 | 全球（含 Hawaii） | 开放 |
-| 建筑密度 | **GHSL built-up surface**（或 Microsoft/OSM 建筑面派生） | 10/100 m/1 km；多期 | 全球 | 开放；OSM 需聚合 |
-| 人口密度 | **WorldPop**（或 CIESIN **GPW v4** / GHSL population） | 100 m / 1 km；逐年/5 年 | 全球 | 开放 |
-| 温度（max/mean/min） | **WorldClim 2**（`tmax/tmin/tavg`） | ~1 km；逐月 | 全球 | 开放 |
-| 降雨 | **WorldClim 2** `prec`（或 CHIRPS 5 km） | ~1 km；逐月 | 全球 | 开放 |
-| 农田 | **ESA WorldCover**（class 40）或 **NLCD**（Cultivated Crops） | 10 m / 30 m | 全球 / 美国 | 类别→比例 |
-| 森林 | **ESA WorldCover**（tree cover）或 **Hansen GFC** / **NLCD** | 10 m / 30 m | 全球 / 美国 | 类别/树冠比例 |
-| 水体（永久/季节） | **JRC Global Surface Water**（seasonality） | 30 m；月/季节 | 全球 | 开放；季节水首选 |
-| （可选）土地覆盖底图 | **NLCD**（美国，30 m）或 **WorldCover** | 30 m / 10 m | 美国 / 全球 | Hawaii 优先 NLCD（与 NEON `nlcdClass` 一致） |
+| 海拔 | `altitudefunc`（800 m 归零） | **Copernicus GLO-30** | 30 m，静态 | 米；nodata/海面处理 |
+| 降雨 | `rainfunc` | **WorldClim 2 `prec`** | ~1 km，逐月气候态 | **mm**；注意单位 |
+| 温度 | `tempfunc`（mean/min/max） | **WorldClim 2 `tavg/tmin/tmax`** | ~1 km，逐月气候态 | **°C×10**（adapter ÷10） |
+| 人口 | `bloodmeal/foodfunc` | **WorldPop 2020** | 100 m，年 | count vs density；统一 people/km² |
+| 水体 | `waterfunc`（永久/季节） | **JRC GSW** | 30 m，季节统计 | `seasonality` 切分；0/1 |
 
-### 2.1 对 Hawaii 的优先组合
-- **DEM**：Copernicus GLO-30 / SRTM 30 m；
-- **人口**：WorldPop 100 m（或 GPW 1 km）；
-- **气候**：WorldClim 2（逐月 `tmax/tmin/tavg/prec`）；
-- **土地覆盖**：**NLCD 30 m**（与 NEON `nlcdClass` 同源，含农田/森林/建成区/水体/湿地）；
-- **建筑**：GHSL built-up（若 NLCD “Developed” 强度不够细）；
-- **季节水**：**JRC Global Surface Water**（hex 的 `water_p/water_s`）。
-
-> 最小“备齐两模型”集合 ≈ **5 个源**：DEM + 人口 + WorldClim 2 + NLCD/WorldCover + JRC 水体；
-> 建筑可由 GHSL 或 NLCD Developed 派生。
+> 注：**ASCENT 的 6 特征（建筑/农田/森林）不在本阶段**；若以后切回 H 路线再接。
 
 ---
 
-## 3. 最小 demo vs 完整集
+## 3. 网格定义
 
-### 3.1 Minimal demo（先跑通管线，不追求完整）
-- **标签**：NEON PUUM，选 1–3 年「有物种表」的月份，1 个目标 taxon（presence/absence）。
-- **环境**：先用 **2–3 个核心源**即可：
-  - DEM（海拔）+ WorldClim 2（温度/降雨）+ NLCD/WorldCover（土地覆盖）；
-  - 人口/建筑/季节水可后补。
-- **网格**：栅格原生 30 m 或聚合到 ~100 m，范围覆盖 PUUM（约 19.55–19.58 N，−155.32…−155.22 E）。
-- **输出**：
-  - H：SVM（DEM/土地覆盖派生特征）→ H 矩阵；
-  - K：`altitudefunc`/土地覆盖 + 用 NEON 计数标定 `baseK` → K 矩阵。
+### 3.1 投影（建议参数，执行前确认）
+```
++proj=aea +lat_1=19 +lat_2=22 +lat_0=20.5 +lon_0=-157 +datum=WGS84 +units=m +no_defs
+```
+- Albers Equal Area，标准纬线 19°/22°，中央经线 -157°，原点纬度 20.5°；
+- 覆盖六岛（约 lon −160.3…−154.7，lat 18.9…22.3），跨群岛变形小。
 
-### 3.2 完整集（满足两模型原生计划）
-- 六特征（ASCENT）+ 降雨/水体/月温（hex）全部备齐（§2 的 5 源 + 建筑）。
-- 逐月时间维（WorldClim/JRC 月度或季节），与 hex 的 12 月 K、NEON 的逐月标签对齐。
+### 3.2 网格参数
+- `center_distance_m = 100`（hex-model-new scale 1）；
+- `hex_area_m2 = 8660.254…`；`area_scale = 1`；
+- **取向 = hex-model-new**：`x = (√3/2)·j·d`，`y = (i − j/2)·d`（左上原点，x 东、y 南）；
+- `origin_xy_m`：六岛在 Albers 下投影 bbox 的 `(min_x, min_y)`（+ 边距）；
+- `rows/cols`：由 bbox 与 d 推导（约 4000×3000，~1200 万 hex）；
+- `land_mask = elevation > 0`（海域 K=0）。
 
----
+> 说明：现有 `hex-model-new/terrain/*_islands` 只覆盖 **Maui Nui**（Molokai/Maui/Lanai），不含 Kauai/Oahu/Hawaii，**不能直接作为六岛网格**；因此采用**自建六岛网格**，但沿用其 100 m/exact-overlap 转换器与取向。
 
-## 4. 管线阶段（执行顺序）
-
-**Phase 0 · 决策（先确认，见 §6）**
-- H 还是 K（或两者共用数据层）；目标物种；时间窗；分析网格；土地覆盖源（NLCD vs WorldCover）；建筑源。
-
-**Phase 1 · 获取与登记**
-- NEON 子集（`~/.neon_token`，`X-API-Token`）；
-- 环境栅格（§2）；
-- 记录来源 URL/DOI、版本、下载日期、SHA256、许可（manifest）。
-
-**Phase 2 · adapter**
-- NEON：`mos_trapping`/`mos_sorting`/`mos_expertTaxonomistIDProcessed`/`mos_subsampling` → `LabelTable`；
-  - absence：`samplingImpractical=OK` 且 `sampleID` 空（0 捕获）；有样本时按 `targetTaxaPresent`/计数；
-  - 丰度：`individualCount / proportionIdentified`（或只做 presence/absence）。
-- 栅格：每层重投影/重采样到目标网格（连续量 bilinear，类别量 nearest/mode）。
-
-**Phase 3 · 对齐与聚合**
-- 选 `AnalysisGrid`（30 m 或 ~100 m）；
-- 特征：面积加权或中心点采样到网格；
-- 标签：显式参数化「标签→网格」规则（单元大小、presence 判定、absence、未采样=背景/排除）；
-- 保留 `trapHours` 作为 effort。
-
-**Phase 4 · 模型**
-- H：SVM（线性/ RBF；Optuna 可选）+ **空间分块 CV** → H；
-- K：hex 乘性响应函数（rain/water/pop/alt/temp）→ K；或用 H→`f(H)`/`baseK` 标定到 NEON 计数；
-- 产出 `ScoreMap`（`kind=suitability|capacity`、`units`、`uncertainty`、`provenance`）。
-
-**Phase 5 · 验证与输出**
-- 空间 CV / 留出站点/月份；与 NEON `elevation`、`nlcdClass` 交叉校验；
-- 输出矩阵 + 地图 + 元数据；自测（常数场还原、NaN/对齐、单位）。
-
-**Phase 6 · 扩展决策**
-- 是否补全 6 特征/完整 hex 因子；是否从 PUUM 扩展到其他 NEON 站点/全岛。
+### 3.3 面积积分
+- 先在各源层原生分辨率上算 K（逐像素）；
+- 再用 **exact-overlap 面积积分**（`validate_hex_area_mapping.py` 的算法）把 K 聚合到 hex；
+- 避免“先把输入聚合到 hex 再算 K”的非线性误差。
 
 ---
 
-## 5. 关键风险与口径
-1. **尺度不一致**：气候 ~1 km、土地覆盖 30/10 m、样点 ~10 m → 统一网格与重采样规则必须显式。
-2. **时间对齐**：WorldClim 月气候 vs NEON 采样日期；用「同月」或插值，需记录。
-3. **absence 语义**：0 捕获 vs 未采样；子采样（`proportionIdentified`）影响绝对丰度。
-4. **空间自相关/固定样点**：随机 CV 高估；用空间分块 CV，注意外推。
-5. **分类分辨率**：`taxonID` 可能到属/复合种；`mos_barcoding` 可细化。
-6. **许可/溯源**：每层记录来源、版本、许可、哈希；大文件放 `data/`（已 ignore）或 `~/storage`。
+## 4. 输出
+
+### 4.1 `K.npz`（数组）
+| 字段 | 形状/类型 | 内容 |
+|---|---|---|
+| `K` | `(12, R, C)` float32 | 每 hex 的 capacity（单位见 meta） |
+| `land_mask` | `(R, C)` bool | `elevation>0` |
+| `months` | `(12,)` int16 | 1–12 |
+
+- **密集矩阵**存储；float32 以控制体积（~0.5–1 GB 量级）。
+- **不存** `cell_center_x/y`；网格定义在 meta 中用公式描述。
+- **不存**中间因子图。
+
+### 4.2 `K.meta.json`（元数据）
+`crs`、`convention`（hex-model）、`center_distance_m`、`area_scale`、`hex_area_m2`、
+`pixel_area_m2`、`rows`、`cols`、`origin_xy_m`、`extent_m`、`units`、`k_scale`、
+`parameters`（占位值 + `uncalibrated: true`）、`inputs`（各层源/版本/年份/哈希/许可）、
+`mapping_version`、`months`（气候态说明）、`created_at`、`updated_at`、`version`。
+
+### 4.3 更新策略
+- 固定输出路径（如 `geographic-score/data/k_hawaii6_albers100.npz` + `.meta.json`）；
+- 输入地理信息更新时：**重写同一文件**（临时文件 + 原子替换），不保留多份；
+- 更新时同步 `meta.version / updated_at / inputs.*.sha256`，便于追溯但**不额外占空间**。
 
 ---
 
-## 6. 需要先确认的决策项
-1. **H 还是 K**（或两者共用数据层）。
-2. **目标物种**（先统计 presence/absence 数量，确保可训练）。
-3. **时间窗**（如 2019–2025）。
-4. **分析网格/分辨率**（30 m 原生 vs ~100 m 聚合）。
-5. **土地覆盖源**：NLCD（美国、与 NEON `nlcdClass` 一致）还是 WorldCover（全球）。
-6. **建筑密度源**：GHSL built-up vs OSM/Microsoft 建筑面。
-7. 是否把**季节水（JRC）**纳入第一版。
+## 5. 管线阶段（执行顺序）
+
+1. **获取**：Copernicus GLO-30、WorldClim 2、WorldPop 2020、JRC GSW；记录来源/哈希/许可。
+2. **adapter**：
+   - 每层统一单位/CRS/nodata（WorldClim 温度 ÷10）；
+   - 水体：JRC `seasonality` → `water_p/water_s`（0/1）；
+   - DEM：`elevation>0` → `land_mask`。
+3. **高分辨率计算**：逐像素套 `rainfunc/waterfunc/bloodmeal/altitudefunc/tempfunc` → `S`；`K = base + k_scale·S`；海域 `K=0`。
+4. **面积积分**：exact-overlap 聚合到六岛 hex 网格 → `K[month]`。
+5. **输出**：写 `K.npz` + `K.meta.json`。
+6. **自测**：见 §6。
 
 ---
 
-## 7. 与已定/未定路线的关系
-- 数据层（`LabelTable`/`FeatureStack`/`AnalysisGrid`）与 **H/K 的最终选择无关**；两条路线共用。
-- **ASCENT/H**：需要 6 特征（尤其海拔/建筑/人口/温度/农田/森林）+ 标签；
-- **hex/K**：需要 rain/water/pop/alt/temp + 校准目标（NEON 计数）。
-- 因此先备齐 §2 的源即可同时支撑两条路线。
+## 6. 验证（当前阶段）
+
+- **合成数据自测**：
+  - `altitudefunc(800)=0`、altitude>800 → 0；
+  - 无雨/无水/极端温度的边界行为；
+  - NaN/Inf 处理；
+  - **面积积分守恒**（`ΣK_hex ≈ ΣK_pixel`）；
+  - 单位/CRS/网格对齐。
+- **几何验证**：用六岛 bbox 生成网格，抽查 hex 覆盖/边界；
+- **NEON：移出当前阶段**。理由：参数为占位值，K 不可能准确描述观测丰度；NEON 留待**参数校准后**做独立验证（秩相关/AUC/季节相关）。
+
+---
+
+## 7. 风险与注意
+1. **六岛范围**：现有 `islands` 仅 Maui Nui；必须自建六岛网格。
+2. **非线性聚合**：务必“先算 K 再积分”。
+3. **单位**：WorldClim 温度 °C×10；WorldPop count vs density；JRC 季节统计口径。
+4. **内存/IO**：12×~1200 万 hex 的 float32 约 0.5–1 GB；密集存储 + 同文件重写有 IO 开销。
+5. **陆地掩膜**：`elevation>0` 会把 bbox 内其他陆地（如 Niihau/Kahoolawe）也纳入；若严格只要六岛需额外岛礁掩膜（待定，非当前默认）。
+6. **占位参数**：K 仅用于验证工作流，不具科学解释力。
+
+---
+
+## 8. 执行前仅需核对的具体数值
+1. Albers 参数（`lat_1/lat_2/lat_0/lon_0`）与六岛 bbox → `origin/extent/rows/cols`。
+2. WorldClim 2 的变量名与单位（`tavg/tmin/tmax` 的 ×10、`prec` 的 mm/月）。
+3. JRC `seasonality` 的读取字段与切分（12 / 1–11 / <1）。
+4. 是否对 Niihau/Kahoolawe 做额外排除（默认：不排除，`elevation>0` 即陆地）。

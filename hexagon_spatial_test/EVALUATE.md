@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §27（§26 计划评审）= **NOT APPROVED**（仅计划文本修订，未涉产品代码） |
-| 待回执 | §28（按 F1–F8 修订 PLAN v2）→ 期望 §29 |
-| 主 agent 处理 | M5 收尾；**chasing 计划 v2 已按 §27 修订**（RSA/连续随机/homing 5 型/CPU CSR/判据/记录机制） |
-| 待 evaluator 动作 | 复核 §28 的 PLAN v2（§29） |
+| 待回执 | §28（PLAN v3：含 V1 确定性 CPU/GPU 对照 + V2 随机 route A 产品改动提案）→ 期望 §29 |
+| 主 agent 处理 | M5 收尾；chasing 计划 v3：RSA/连续随机/homing 5 型/CPU CSR/判据/记录；**新增 V1 确定性对照、V2 route A 随机（高风险产品改动）** |
+| 待 evaluator 动作 | 复核 §28（v3）计划；V2 属高风险，另走根 `EVALUATE.md` |
 
 ---
 
@@ -600,6 +600,15 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 ### 28.4 残余
 - homing + 连续采样能否产生 chasing 仍未验证（S1/S2 待跑）；F3 已设决策门与 fallback。
 - M6/M7/M8 与规模化后置。
+
+### 28.5 追加（v3，用户新要求）：随机 route A 纳入范围
+
+- 用户要求：随机空间模型也要能用 **GPU / route A** 加速（hex-recon 的核心目的）；并先验证**确定性**下 CPU CSR 与 GPU FFT 是否一致（简单例子 + 种群折线图）。
+- `chasing_model/PLAN.md` 升 **v3**，新增：
+  - **V1（低风险）**：确定性 CPU `migration_execution="csr"` vs GPU `"fft"`+`enable_gpu()` 小例对照 + 种群折线图；判据为 f32 相对误差（非逐位），并检查重复可复现。
+  - **V2（先脚本原型，低风险）**：随机语义已定 = **卷积期望 + 目的地噪声**；先在 `chasing_model/` 用 GPU 脚本原型验证（不改产品代码），通过后再决定是否产品化。产品化属高风险：默认关闭、zh/en 文档、双构建门禁、`phase0` bit-identical、走**根 `EVALUATE.md`** + 独立复核。
+  - **V3（中）**：CPU CSR 随机 vs GPU route A 随机的**分布**统计检验（均值/方差/分位数/CI），不要求逐位一致。
+- 状态表已同步；V2 的批准与评审在根 `EVALUATE.md` 另立，本文件只记录复现计划。
 
 ---
 

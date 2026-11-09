@@ -4,7 +4,9 @@
 > 目标：走 **hex model 的分层乘性响应函数**，把环境 GIS 数据转换为 **每 deme 的 capacity K**；
 > **不训练/不拟合**响应函数参数（用占位值），重点是**工作流框架**是否正确、可复现、可替换。
 >
-> **当前状态：规划已定稿，尚未执行任何下载/处理。**
+> **当前状态：已按本配置实现并跑通六岛工作流。**
+> 脚本：`geographic-score/data2score_pipeline/`；输出：`geographic-score/data/k_hawaii6_albers100.npz` + `.meta.json`。
+> 参数仍为**占位值**（`uncalibrated`），仅验证工作流，不具科学解释力。
 
 ---
 
@@ -41,6 +43,10 @@
 | 水体 | `waterfunc`（永久/季节） | **JRC GSW** | 30 m，季节统计 | `seasonality` 切分；0/1 |
 
 > 注：**ASCENT 的 6 特征（建筑/农田/森林）不在本阶段**；若以后切回 H 路线再接。
+>
+> 实现补充（2026-11）：WorldClim 采用官方 30s 分块 COG（`tile_25`），数据已是 float32 `°C`/`mm`，
+> **无需 ÷10**；WorldPop 采用 USA 2020 UN-adjusted constrained counts，nodata（非建成区）按 0 处理。
+> 计算在 Albers 下 **30 m** 公共格网逐像素完成，再用 exact-overlap 面积积分到 100 m hex。
 
 ---
 

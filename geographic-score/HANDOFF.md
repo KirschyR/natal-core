@@ -17,8 +17,10 @@
 ## 1. 当前状态
 
 - 分支 `method/gis2score`；工作树干净（截至交接时）。
-- **尚未实现 K 工作流**；目前只有：数据调研文档、Phase-0 的 H 实验脚手架、GBIF/NEON 样例数据。
-- 环境：`.venv`（numpy/scipy/matplotlib/pandas/plotly 可用；`natal` 可导入）。
+- **K 工作流已实现并跑通**：脚本在 `geographic-score/data2score_pipeline/`；
+  六岛 12 个月输出在 `geographic-score/data/k_hawaii6_albers100.npz` + `.meta.json`；
+  自测见 `selftest.py`（全部通过，面积守恒相对误差 ~1e-9）。
+- 环境：`.venv`（numpy/scipy/matplotlib/pandas/plotly/rasterio/shapely/pyproj 可用；`natal` 可导入）。
   运行前：`unset PYTHONHOME PYO3_PYTHON PYTHONPATH`，用 `.venv/bin/python`。
 - 网络可用；NEON token 在 `~/.neon_token`（`X-API-Token` 头可用）。
 
@@ -64,11 +66,28 @@
 
 ---
 
-## 4. 剩余任务（本次要完成）
+## 4. 已完成任务（本次实现）
 
-**搭建并跑通「环境 GIS → K per hex」工作流**，输出六岛 12 个月的 `K.npz` + `K.meta.json`。
+**已搭建并跑通「环境 GIS → K per hex」工作流**，输出六岛 12 个月的 `K.npz` + `K.meta.json`。
 
-建议步骤：
+运行方式：
+```bash
+unset PYTHONHOME PYO3_PYTHON PYTHONPATH
+.venv/bin/python geographic-score/data2score_pipeline/fetch_raw.py   # 下载/校验原始数据
+.venv/bin/python geographic-score/data2score_pipeline/build_k.py     # 构建 K（约 10 分钟，含几何缓存）
+.venv/bin/python geographic-score/data2score_pipeline/selftest.py    # 合成 + 输出自测
+```
+
+实现说明：
+- 原始数据在 `geographic-score/data/raw/`（含 `manifest.json` 哈希）；
+  几何权重缓存在 `geographic-score/data/cache/`；均为 gitignored。
+- 计算格网为 **Albers 下 30 m**（逐像素算 K 后 exact-overlap 积分到 100 m hex）；
+  输出格网 `rows=6961, cols=6249`，`land_mask` 为“与任一 `elevation>0` 的 30 m 像素相交的 hex”。
+- WorldClim 使用官方 30s 分块 COG `tile_25`，已是 float32 `°C`/`mm`（**不是 ×10**）；
+  WorldPop 使用 USA 2020 constrained counts，nodata（非建成区）按 0 处理。
+- 参数仍为占位值，`status=uncalibrated`；不要据此解释生态量级。
+
+原始建议步骤（保留供参考）：
 1. **定网格**：Albers 投影；六岛 lon/lat bbox（约 `[-160.3,-154.7]×[18.9,22.3]`）投影后取 bbox+边距；
    `origin_xy_m=bbox.min`；`rows/cols` 由 100 m 中心距与 bbox 推导；取向按 hex-model-new
    （`x=(√3/2)j·d`，`y=(i−j/2)·d`）。

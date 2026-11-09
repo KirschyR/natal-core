@@ -18,6 +18,7 @@ DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DEFAULT_NPZ = DATA_DIR / "k_hawaii6_albers100.npz"
 DEFAULT_META = DATA_DIR / "k_hawaii6_albers100.meta.json"
 DEFAULT_OUT = Path(__file__).resolve().parents[1] / "imgs_output"
+REGION_DIR_NAME = "hawaii6_albers100_hex100m"
 
 ISLAND_LABELS = {
     "Kauai": (-159.50, 22.05),
@@ -116,21 +117,6 @@ def plot_overview(ax, x, y, values, norm, title, meta, kind, annotate=False, s=0
     return scatter
 
 
-def make_monthly(output: Path, x, y, land_values, norm, kind, meta, months):
-    for index, month in enumerate(months):
-        fig, ax = plt.subplots(figsize=(13, 10), layout="constrained")
-        scatter = plot_overview(
-            ax, x, y, land_values[index], norm,
-            f"Hawaii six-island K (placeholder, uncalibrated) - month {int(month):02d}",
-            meta, kind, annotate=True,
-        )
-        fig.colorbar(scatter, ax=ax, label=f"K per hex, {_norm_label(kind, norm)}", shrink=0.85)
-        fig.suptitle("Albers Equal Area; 100 m hex-model-new lattice; exact area integration")
-        fig.savefig(output / f"k_hawaii6_month{int(month):02d}_{kind}.png", dpi=170)
-        plt.close(fig)
-        print(f"  wrote month {int(month):02d}", flush=True)
-
-
 def make_monthly_panels(output: Path, x, y, land_values, norm, kind, meta, months):
     fig, axes = plt.subplots(3, 4, figsize=(22, 15), layout="constrained")
     for index, (ax, month) in enumerate(zip(axes.ravel(), months)):
@@ -202,7 +188,7 @@ def main(argv=None):
     parser.add_argument("--npz", type=Path, default=DEFAULT_NPZ)
     parser.add_argument("--meta", type=Path, default=DEFAULT_META)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT)
-    parser.add_argument("--norm", choices=("power", "linear", "log"), default="power")
+    parser.add_argument("--norm", choices=("power", "linear", "log", "both"), default="both")
     args = parser.parse_args(argv)
 
     if not args.npz.exists() or not args.meta.exists():
@@ -213,15 +199,18 @@ def main(argv=None):
     y = (Y - ymin) / 1000.0
     land_values = K[:, ii, jj]
     mean = land_values.mean(axis=0)
-    monthly_norm = make_norm(land_values, args.norm)
-    annual_norm = make_norm(mean, args.norm)
 
-    args.out_dir.mkdir(parents=True, exist_ok=True)
-    print(f"writing heatmaps to {args.out_dir}", flush=True)
-    make_monthly(args.out_dir, x, y, land_values, monthly_norm, args.norm, meta, months)
-    make_monthly_panels(args.out_dir, x, y, land_values, monthly_norm, args.norm, meta, months)
-    make_annual_mean(args.out_dir, x, y, mean, annual_norm, args.norm, meta)
-    make_island_zooms(args.out_dir, x, y, mean, annual_norm, args.norm, meta)
+    kinds = ("power", "linear", "log") if args.norm == "both" else (args.norm,)
+    region_dir = args.out_dir / REGION_DIR_NAME
+    for kind in kinds:
+        monthly_norm = make_norm(land_values, kind)
+        annual_norm = make_norm(mean, kind)
+        kind_dir = region_dir / kind
+        kind_dir.mkdir(parents=True, exist_ok=True)
+        print(f"writing {kind} heatmaps to {kind_dir}", flush=True)
+        make_monthly_panels(kind_dir, x, y, land_values, monthly_norm, kind, meta, months)
+        make_annual_mean(kind_dir, x, y, mean, annual_norm, kind, meta)
+        make_island_zooms(kind_dir, x, y, mean, annual_norm, kind, meta)
     print("done", flush=True)
     return 0
 

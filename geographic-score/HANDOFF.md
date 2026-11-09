@@ -76,8 +76,8 @@ unset PYTHONHOME PYO3_PYTHON PYTHONPATH
 .venv/bin/python geographic-score/data2score_pipeline/fetch_raw.py   # 下载/校验原始数据
 .venv/bin/python geographic-score/data2score_pipeline/build_k.py     # 构建 K（约 10 分钟，含几何缓存）
 .venv/bin/python geographic-score/data2score_pipeline/selftest.py    # 合成 + 输出自测
-.venv/bin/python geographic-score/data2score_pipeline/plot_k.py      # 热图（默认 power 归一化）
-.venv/bin/python geographic-score/data2score_pipeline/plot_k.py --norm log  # 对数版本
+.venv/bin/python geographic-score/data2score_pipeline/plot_k.py      # 热图（默认 power/linear/log 三套）
+.venv/bin/python geographic-score/data2score_pipeline/plot_k.py --norm log  # 只出对数版本
 ```
 
 实现说明：
@@ -88,9 +88,10 @@ unset PYTHONHOME PYO3_PYTHON PYTHONPATH
 - WorldClim 使用官方 30s 分块 COG `tile_25`，已是 float32 `°C`/`mm`（**不是 ×10**）；
   WorldPop 使用 USA 2020 constrained counts，nodata（非建成区）按 0 处理。
 - 参数仍为占位值，`status=uncalibrated`；不要据此解释生态量级。
-- 热图脚本 `plot_k.py` 输出到 `geographic-score/imgs_output/`（`*.png` 已 gitignore）：
-  每月全景、12 月拼接面板、年均全景、六岛放大图；文件名带 `_power` 或 `_log`。
-  power 版本用于看相对高低，log 版本把 K=0 的陆地 hex 显示为浅灰，便于区分“零容量”和“低容量”。
+- 热图脚本 `plot_k.py` 默认生成 `power/linear/log` 三套，输出到
+  `geographic-score/imgs_output/hawaii6_albers100_hex100m/<norm>/`（`*.png` 已 gitignore）：
+  **仅保留** 12 月拼接面板、年均全景、六岛年均放大图（不再逐月单独出图）。
+  power 用于看相对高低；log 把 K=0 的陆地 hex 显示为浅灰；linear 为原始 0..max 线性色标。
 
 原始建议步骤（保留供参考）：
 1. **定网格**：Albers 投影；六岛 lon/lat bbox（约 `[-160.3,-154.7]×[18.9,22.3]`）投影后取 bbox+边距；

@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §25（M1 遗传一步对照）= **APPROVED** |
-| 待回执 | —（下一交接为 M5 完成后的 §26） |
-| 主 agent 处理 | M0–M4（含 route A）与 M1 均闭环并复核通过；**M5（径向/线性释放）勘察完成，待实施** |
-| 待 evaluator 动作 | —（M5 交接后） |
+| 待回执 | §26（M5 收尾 + chasing 计划）→ 期望 §27 |
+| 主 agent 处理 | M0–M4（含 route A）与 M1 闭环；M5 翻译版自测完成；**转向 RSA 全随机 chasing，计划见 `chasing_model/PLAN.md`** |
+| 待 evaluator 动作 | 评审 §26 的 chasing 计划与 M5 收尾（计划评审，非结果复核） |
 
 ---
 
@@ -546,6 +546,31 @@ evaluator 在「evaluator 回执区」追加 **§N+1**：裁定（APPROVED / NOT
 
 §25 = **APPROVED**。M1（homing 一步算子）闭环。非阻断建议：F1 补 `herr≠0`（或不对称性别率）用例以钉住母/父轴序；
 F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径。后续进入 **M5**。
+
+## §26 — M5 收尾 + Chasing 计划与骨架（请评审**计划**）
+
+### 26.1 方向变更（用户 2026-11-09 决策）
+- 世代内事件顺序固定为 natal 的 **R-S-A**；**不再**逐位还原 MATLAB hex model。
+- `event-seq` 支线已验证：~40% 差异几乎全部来自 tick 内事件顺序；RSA 定案后该支线不再使用（已 gitignore）。
+- chasing 采用**完全随机**模型，首个驱动 **homing**，先用**连续采样**，小范围优先；结果需带时间轴的 HTML 热图。
+- `hexagon_spatial_test/hex-model-new/`（重建参考）与 chasing 无关，已 gitignore。
+- M5 径向翻译版保留为历史 golden；因转向，**M5 不再送 MATLAB 定量复核**。
+
+### 26.2 本次改动（均未触碰产品代码）
+- `.gitignore`：按用户要求忽略 `event-seq/`、`geographic-score/`、`hexagon_spatial_test/hex-model-new/`。
+- 新增 `hexagon_spatial_test/chasing_model/PLAN.md`（执行计划：模型定义、chasing 指标、S0–S5 阶梯、产物布局、风险、审查流程）。
+- 更正记录：`results/M5_radial_report.md` §7 曾称「已在本文件追加 §26」，实际此前未写；本节即对 M5 的正式收尾。
+- 待实现（P0）：恢复 `m5_engine_probe.py` 的 `record_every=0`（防长跑 OOM）；chasing 脚本/结果将置于 `hexagon_spatial_test/chasing_model/`。
+
+### 26.3 请 evaluator 核对点（本轮=计划评审）
+1. `PLAN.md` 是否覆盖：RSA、连续随机、homing、小范围优先、HTML 时间轴、指标/重复/种子策略。
+2. 模型映射（年龄/存活/密度/homing `offspring_tensor`/迁移边界/释放）是否与既有 M1/M5/event-seq 结论自洽、有无过度承诺。
+3. 产物布局与 `.gitignore` 改动是否合规；是否误伤应跟踪文件。
+4. 高风险边界：本计划默认不改 natal 产品代码；若后续确需改引擎，是否明确要求另行批准 + 根 `EVALUATE.md` + 全量门禁。
+
+### 26.4 残余
+- homing + 连续采样能否产生 chasing（共存 + 移动前沿）尚未验证（S1/S2 待跑）。
+- M6/M7/M8 与 500×500 规模化后置。
 
 ---
 

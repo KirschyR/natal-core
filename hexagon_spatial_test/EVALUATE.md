@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §25（M1 遗传一步对照）= **APPROVED** |
-| 待回执 | §26（M5 收尾 + chasing 计划）→ 期望 §27 |
-| 主 agent 处理 | M0–M4（含 route A）与 M1 闭环；M5 翻译版自测完成；**转向 RSA 全随机 chasing，计划见 `chasing_model/PLAN.md`** |
-| 待 evaluator 动作 | 评审 §26 的 chasing 计划与 M5 收尾（计划评审，非结果复核） |
+| 最近回执 | §27（§26 计划评审）= **NOT APPROVED**（仅计划文本修订，未涉产品代码） |
+| 待回执 | §28（按 F1–F8 修订 PLAN v2）→ 期望 §29 |
+| 主 agent 处理 | M5 收尾；**chasing 计划 v2 已按 §27 修订**（RSA/连续随机/homing 5 型/CPU CSR/判据/记录机制） |
+| 待 evaluator 动作 | 复核 §28 的 PLAN v2（§29） |
 
 ---
 
@@ -571,6 +571,35 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 ### 26.4 残余
 - homing + 连续采样能否产生 chasing（共存 + 移动前沿）尚未验证（S1/S2 待跑）。
 - M6/M7/M8 与 500×500 规模化后置。
+
+## §28 — 响应 §27：PLAN v2（F1–F8 修订，请复核）
+
+### 28.1 改动清单（仅计划/文档，未触产品代码）
+- `hexagon_spatial_test/chasing_model/PLAN.md` → **v2**，逐条闭环 §27：
+  - **F1**：随机实验一律 **CPU CSR**；route A `fft` 仅确定性，stochastic+GPU 需另行批准；S5 改为 **101×101 CPU CSR**（route A 仅确定性对照）。
+  - **F2**：`scaling_factor s` **同时乘初始年龄向量与 `age_1_carrying_capacity`**，使 `expected_comp=s·42.222`、`expected_survival_rate` 不变；结果 JSON 记录 `s/K/expected_comp`。
+  - **F3**：S1/S2 增加成功/失败判据（共存 ≥ `N_coexist`、前沿严格增长、不全局固定）与 fallback（homing 失败则缩小目标并如实报告；切换机制需用户批准）。
+  - **F4**：钉死 **5 型论文 homing**（等位 `[WT,Drive,Res]`，carrier=`{dd,dw,dr}`，复用 M1 映射），**不用** 3 型。
+  - **F5**：事件顺序写「R-S-A → migration（tick 末尾）」。
+  - **F6**：S1 起 **burn-in**；频率/总种群指标**排除 age0**。
+  - **F7**：逐 tick `record_every=0` 只存 per-deme 频率（`~41×41×T` float），不存全量 state。
+  - **F8**：结果统一 **JSON**，不用 CSV（全局忽略）。
+- 本文件状态表同步。
+
+### 28.2 自测/证据
+- 本轮仅改 `PLAN.md` 与 `EVALUATE.md`（状态表 + §28）；`git diff --stat` 应只含二者，未触产品代码。
+- 复核命令建议：
+  `rg -n "CPU CSR|scaling_factor|N_coexist|burn-in|age0|R-S-A|JSON|F1|F2|F3|F4" hexagon_spatial_test/chasing_model/PLAN.md`
+- 引擎事实沿用 §27.1 独立证据：`fft` 拒 stochastic（该测试 1 passed）；stochastic CSR 行宽上限 32 < size7 实测 48；15×15 stochastic+continuous CSR 可跑；`expected_comp=42.222`、`expected_survival_rate=1/90`。
+
+### 28.3 请 evaluator 核对点
+1. F1–F4 的修订是否闭环；F5–F8 是否补齐（对照 §27.2/§27.5）。
+2. PLAN v2 是否仍与 M1/M5/event-seq 口径自洽、无过度承诺。
+3. 是否可在批准后直接进入 P0/S0（小范围 CPU CSR）。
+
+### 28.4 残余
+- homing + 连续采样能否产生 chasing 仍未验证（S1/S2 待跑）；F3 已设决策门与 fallback。
+- M6/M7/M8 与规模化后置。
 
 ---
 
@@ -1609,3 +1638,131 @@ evaluator 复跑全部门禁 **全绿**。§14 的 NOT APPROVED 解除。S0/S1/S
 - `ddfitness`/性别特异未扫（§24.5）。
 
 > 审查期间未改任何仓库源码或数据；仅新增本回执。
+
+## §27 — §26 M5 收尾 + chasing 计划评审回执（evaluator）
+
+### 27.0 裁定
+
+**NOT APPROVED（计划文本需修订；本轮不需改产品代码，也不需改 `.gitignore`）**
+
+- 审查对象：`recon/hex-model` @ `9cf0be0`（`0906a5f` 的下一提交）。工作树 clean；该提交只含
+  `.gitignore`、`hexagon_spatial_test/EVALUATE.md`、`hexagon_spatial_test/chasing_model/PLAN.md`，未触碰产品代码
+  （`git show --stat HEAD`）。§26 所称“本次未提交改动”实际已在 `9cf0be0` 提交；审查据此进行，不影响内容。
+- 结论：核对点 1/3/4 基本 PASS；核对点 2 的年龄/存活/密度/迁移/释放映射与既有 M1/M5/event-seq 口径一致（PASS），
+  但 **F1（S5/route A GPU 与引擎能力冲突）**、**F2（`scaling_factor` 与密度标定关系未定义）** 属于计划文本中的
+  可复现性缺陷；**F3（homing chasing 可行性）** 是需要在 S1/S2 设决策门的高风险项。核心 S0–S4 方向可行，
+  修订 PLAN 后即可进入实现。
+
+### 27.1 独立运行证据（命令 + 结果）
+
+1. 版本/提交范围：`git status --short` → 空；`git rev-parse HEAD` → `9cf0be0`；`git show --stat HEAD` → 仅上述 3 文件。
+2. `.gitignore` 未误伤已跟踪文件：`git ls-files event-seq geographic-score hexagon_spatial_test/hex-model-new` → 空；
+   `git check-ignore -v event-seq/img/spatial/tare_chasing.json geographic-score hexagon_spatial_test/hex-model-new`
+   → `.gitignore:81/82/83` 命中。`chasing_model/{model.py,run_chasing.py,results/foo.json}` → NOT IGNORED；
+   `results/foo.html`/`foo.csv` → 被既有全局 `*.html`/`*.csv` 规则忽略。
+3. 引擎能力：
+   - `pytest tests/test_spatial_fft_plan.py::test_migration_execution_fft_rejects_stochastic -q` → **1 passed**。
+   - 自建 15×15 `HexGrid`、`n_ages=10`、`stochastic=True + continuous_sampling=True`、`size=7` 核、`Op.add`
+     释放钩子、`run(n_steps=3, record_every=0)`：
+     - `execution="csr"` → `OK total=1051.5771006921543 n_ztypes=3 shape=(225, 2, 10, 3)`。
+     - `execution="fft"` → `ERROR NotImplementedError migration_execution='fft' supports deterministic models only`。
+   - `fold_migration_csr`（15×15、`size=7`）→ `include_center=False`：`nnz=8424, max_row_width=48`；
+     `include_center=True`：`nnz=8649, max_row_width=49`（builder 默认 `kernel_include_center=False`）。
+4. 密度/放大口径（同一 15×15 模型，首 tick 后每 deme 总人口）：
+   - `scale=1, K=4/9` → `expected_comp=42.2222, total1=2.111, adult1=1.667`。
+   - `scale=10, K=4/9` → `expected_comp=42.2222, total1=17.209, adult1=16.667`（recruitment 被压低）。
+   - `scale=10, K=10·4/9=4.4444` → `expected_comp=422.2222, total1=21.111, adult1=16.667`（正好 10× 基准 2.111）。
+   - `pop._demes[0].params.expected_comp / expected_survival_rate` → `42.2222 / 0.0111111 (=1/90)`。
+5. 事件顺序（源码）：`rust/src/kernels/age_structured.rs:1087-1088`（first hook → reproduction → early hook →
+   survival → late hook → aging）；`rust/src/sessions/spatial.rs:755-757`（“lifecycle … then migration”）。
+6. event-seq 证据（不在当前工作树，读自 `explo/event-seq` 分支）：
+   `git show explo/event-seq:event-seq/HANDOFF.md` §2#9/#13；`git show explo/event-seq:event-seq/age_model.py`
+   第 247-258、386-387 行（`scale` 同时乘初始态与 `density_ref`）。
+
+### 27.2 逐条发现
+
+**F1（高，S5 原描述不可执行）**：`PLAN.md:28` 的“大范围再评估 route A `fft`”与 `PLAN.md:49` 的
+“S5 放大（可选）101×101 / route A GPU 稳健性”默认服务 stochastic chasing；但 `fft` 路径明确只支持确定性
+（`src/natal/frontend/spatial/population.py:806-811`；`src/natal/frontend/spatial/builder.py:1589-1593`；
+现有测试 `tests/test_spatial_fft_plan.py:161` 也断言 stochastic 被拒）。同时，stochastic CSR GPU 有行宽上限
+`MAX_CSR_ROW = MAX_Z = 32`（`rust/src/gpu/kernels.rs:63`；`rust/src/gpu/executor.rs:2470-2473`），而计划
+`size=7` 核的 CSR 最大行宽实测为 48（builder 默认 `kernel_include_center=False`；`include_center=True` 时为 49）。
+→ **S1–S3 必须显式写 CPU CSR；S5 不能按现文做 stochastic route A GPU。**
+修订方式二选一：(a) S5 改为 101×101 CPU CSR；(b) 保留 route A/FFT 仅作**确定性对照**，并明确说明
+“stochastic + route A 需要引擎改动 → 另行批准 + 根 `EVALUATE.md` + 全量门禁”，不得作为默认计划步骤。
+
+**F2（高，影响 S2/S3 可复现性）**：`PLAN.md:30`/`PLAN.md:68` 用 `scaling_factor` 调节信噪，但未定义它与
+`age_1_carrying_capacity`（K）/`eggs_per_female` 的关系。event-seq 的 `scale` 同时乘初始态与 `density_ref`
+（`explo/event-seq:event-seq/age_model.py` 247-258、386-387；HANDOFF §3.1 “D 随 scale 缩放”）。natal 的
+`expected_comp` 由 K 与 eggs 派生；上述证据 4 表明只放大初始态而不放大 K（`scale=10, K=4/9`）时
+`expected_comp` 仍为 42.222，recruitment 被压低（total1=17.209 vs 21.111），所谓“只调信噪”不成立。
+→ PLAN 必须写明：`scaling_factor` 同时乘初始年龄向量与 `age_1_carrying_capacity`（或等价地按 scale 重推 K）；
+结果 JSON 记录该值。否则 S2 的 `scaling_factor` 扫描与 S3 的重复统计不可复现。
+
+**F3（中高，科学可行性风险）**：`PLAN.md:9`/`PLAN.md:11` 以 homing 为第一驱动追求“驱动与 WT 空间共存、
+前沿持续移动、不必然全局固定”。但 event-seq 的既有结论（`explo/event-seq:event-seq/HANDOFF.md` §2#9/#13）
+是：homing + 足够 fitness cost 在均匀模型里落到**均匀内部共存**，不是严格 chasing；严格 chasing 需要
+阈值/Allee（如 TARE），而 TARE 在该模型里又没有真正 WT 长期共存。`PLAN.md:72`/§26.4 已承认“尚未验证”，
+但 S1/S2 没有明确的失败判据与回退。→ 建议（不是断言 homing 一定不可行）：在 S1/S2 增加可执行的决策门
+（例如连续 N tick 前沿半径不增，或 WT 只在驱动后方均匀残留而无滞后带），并预先定义 fallback
+（TARE/阈值机制，或把目标明确缩小为“空间共存 + 移动前沿”）。否则可能在不可达目标上反复调参。
+
+**F4（中，映射口径不一致）**：`PLAN.md:22` 写“homing 5 型，直接复用 M1 已验证的 `offspring_tensor` 映射”；
+M1 的 5 型映射需要 `Res` 等位（`repro/m1_offspring_check.py:45-49`，species `["WT","Drive","Res"]`），
+而 `repro/m5_engine_probe.py:100` 只建 `["WT","Drive"]`（3 型）；本次冒烟实测 `n_ztypes=3`。→ 明确二选一：
+(a) 3 型理想 homing（无抗性形成，`rw/dr` 不可达），相应调整 carrier 定义（如 carrier=`WT|Drive`+`Drive|Drive`）；
+(b) 5 型论文映射（加 `Res` 等位并验证 M1 子张量）。不要在同一计划里混用。
+
+**F5（低，事件顺序表述）**：`PLAN.md:10` 只写“R-S-A”。natal 的实际顺序是
+reproduction→survival→aging（`rust/src/kernels/age_structured.rs:1087-1088`），随后 migration
+（`rust/src/sessions/spatial.rs:755-757`）。→ 写成“R-S-A → migration（tick 末尾）”，避免误解迁移位置。
+
+**F6（低，初始态/指标）**：`PLAN.md:21` 的“WT 平衡年龄向量”来自 M5/reference，含 age0=40 eggs/deme；
+在 natal R-S-A 下 tick 边界 age0=0。实测初始总人口 42.111/deme，第一 tick 后 2.111/deme（age0 被本 tick
+繁殖覆盖并处理）。→ S1 明确 burn-in，或总种群/频率指标排除 age0，避免把首 tick 瞬态当成 chasing 信号。
+
+**F7（低，HTML 记录路径）**：`PLAN.md:13`/`PLAN.md:35`/`PLAN.md:48` 要带时间轴 HTML，`PLAN.md:67` 又要求
+`record_every=0` 防 OOM；需要明确记录机制。实测 `pop.run(1, record_every=0)` + `_native_stacked_state()`
+可逐 tick 取频率（本次冒烟即此方式），但 `record_every=0` 单独不产生 history。→ PLAN 写明“逐 tick 步进、
+只存 per-deme 频率（41×41×T float）”及内存上限。
+
+**F8（低，产物跟踪）**：`.gitignore:54` 全局忽略 `*.csv`，`PLAN.md:60` 只列 HTML/PNG。若脚本输出 CSV 会被
+静默忽略。→ 结果统一用 JSON（PLAN 已写 JSON），或明确需要入库的 CSV 例外；不要为此无说明地改全局 ignore。
+
+### 27.3 核对点结论
+
+- **核对点 1（覆盖 RSA/连续随机/homing/小范围/HTML/指标/重复/种子）**：**PASS（带 F1–F7 的精度要求）**。
+  `PLAN.md:10-13`、`32-49`、`68-70`、`82-86` 均有对应项；但 `scaling_factor`、成功判据、seed/CI 细节需按
+  F2/F3/F7 补实。
+- **核对点 2（模型映射自洽/无过度承诺）**：**PASS（映射本身）+ 需修订 F1/F3/F4**。年龄/存活与
+  `repro/m5_engine_probe.py:34-49`、`repro/m5_radial_reference.py:43-54` 一致；本次构建
+  `expected_comp=42.2222`、`expected_survival_rate=1/90`，与 `D=40+5·(4/9)` 及 event-seq 平衡式自洽；
+  迁移的丢界+行重归一化见 `src/natal/frontend/spatial/migration.py:424-435`；释放钩子（双性、首个成虫龄、
+  `Op.add`）与 `m5_engine_probe.py:73-86` 一致。M5 仅作历史 golden，§26.1/`PLAN.md:16` 明确不再送 MATLAB
+  定量复核——**M5 的 12/12 是自测，不是 evaluator 数值批准**。
+- **核对点 3（产物布局与 `.gitignore`）**：**PASS**。忽略项均为未跟踪的探索/外部目录，已跟踪文件不受影响；
+  `chasing_model/` 脚本与 `results/*.json` 不被忽略；HTML/PNG（及 CSV）按既有全局规则不入库。产物布局
+  `PLAN.md:53-61` 合规。
+- **核对点 4（高风险边界）**：**PASS**。`PLAN.md:72` 明确“若后续确需改 natal 产品代码，必须另行获批、
+  默认关闭、走根 `EVALUATE.md` 与全量门禁 + 独立复核”；HEAD 未触碰产品代码。
+
+### 27.4 残余风险 / 未检查项
+
+- 未运行 M5 MATLAB golden、长跑 41×41 随机重复或 HTML 生成（本轮为计划评审，不冒充结果复核）。
+- 未在共享 GPU 上运行 stochastic CSR/route A（F1 依据源码、现有测试与 CSR 行宽实测，非 GPU 运行）。
+- `event-seq` 源码不在当前工作树（`event-seq/` 仅剩 `img/` 与 `__pycache__`，已 gitignore）；本次从
+  `explo/event-seq` 分支读取。若该分支被删除，~40% 结论将失去脚本证据，只剩本地被忽略的图/JSON。
+- F3 是科学风险而非已证明的不可能；若用户明确接受“先试 homing、失败再换机制”，可在 PLAN 中记录该决策，
+  但仍建议保留可执行的失败判据，避免结果解释歧义。
+
+### 27.5 批准前需要的最小修订
+
+1. **F1**：S5 改为 CPU CSR，或把 route A/FFT 限定为确定性对照并注明“stochastic 需另行批准的产品改动”。
+2. **F2**：写明 `scaling_factor` 与 K/初始态的同步关系。
+3. **F3**：在 S1/S2 加 chasing 成功/失败判据与 fallback（或明确缩小目标）。
+4. **F4**：钉死 3 型或 5 型及 carrier 定义。
+5. **F5–F8**：按上述低风险项补 PLAN 文本。
+完成后追加 §28 交接，evaluator 以 §29 复核；本轮不需要修改产品代码。
+
+> 审查期间未改任何产品源码、`.gitignore` 或数据；仅追加本回执。工作树在追加前 clean，追加后仅
+> `hexagon_spatial_test/EVALUATE.md` 有本回执改动，未 commit/push。

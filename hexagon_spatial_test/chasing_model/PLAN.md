@@ -153,3 +153,38 @@ results/                         # JSON（HTML/PNG 受全局 ignore）
 - 均值：M0 中位 0.9%/最大 4.6%；M1 1.2%/5.9%（R=300 的 MC 噪声内）。
 - 残余：M1 的 per-deme 方差比 p05–p95 为 0.46–1.50（边界/非均匀 N 的局部调制）；部分 lag 协方差低 15–35%（circulant/uniform 近似）。下一步：改善局部缩放/边界处理，或用精确有限域协方差校验。
 - 产物：`compare_migration_models.py`、`results/compare_migration_models.json`、`results/compare_migration_models.png`。
+
+## 10. 下一步执行计划（文件与对比清单）
+
+### 10.1 要创建的模块
+
+| 文件 | 职责 |
+|---|---|
+| `migration_models.py` | 迁移算子：`build_hex_csr` / `cpu_csr_continuous` / `m0_source_deterministic` / `m1_spectral_gaussian`（numpy + torch 版）；支持批量平面 `(n_planes, rows, cols)` |
+| `model.py` | 全模型 R-S-A 生命周期（NumPy 原型，RSA、连续采样），迁移 backend 可切换；`lifecycle_rng` 与 `migration_rng` 独立 |
+| `metrics.py` | 算子级与整模型指标 + CI（bootstrap/百分位） |
+| `run_chasing.py` | 子命令：`verify-deterministic` / `compare-operators` / `compare-full` / `html` / `chase` |
+| `viz_html.py` | 时间轴滑块 HTML 热图（drive/WT/carrier） |
+
+### 10.2 对比清单（明确“比什么”）
+
+1. **确定性 CPU vs GPU**（natal 引擎）：CPU `csr` vs GPU `fft`；总种群/携带率/逐 deme 场；`max rel`（f32，目标 ≤1e-5）+ FFT 重复可复现；折线图。
+2. **算子级随机**：CPU CSR vs M0 vs M1；per-deme 均值（中位/最大）、方差比（中位+5–95%）、**lag 平均协方差**、总量 mean/std、负值比例。
+3. **跨引擎校验**：NumPy CPU CSR backend vs natal CPU CSR——确定性轨迹（小网格）与随机矩（均值/方差，R 次）。
+4. **整模型随机**：CPU CSR vs M0/M1；覆盖曲线（≥阈值 deme 数，mean±95%CI）、前沿半径随时间、共存时长、固定概率、总种群；lifecycle 噪声共享（配对）。
+5. **chasing**：homing 基线；成功/失败判据（§3）。
+
+### 10.3 验收门槛
+
+- **G1 确定性**：`max rel ≤ 1e-5`；FFT 重复逐位一致。
+- **G2 M1 算子**：方差比中位 0.9–1.1；lag 协方差与 CPU 相对误差 20–30% 内；总量守恒；均值在 MC 误差内。
+- **G3 整模型**：M0/M1 与 CPU 的覆盖曲线 CI 重叠、前沿速度无系统偏差；差异如实记录。
+- **G4 chasing**：晚期共存 ≥ `N_coexist`、前沿严格增长、不全局固定。
+
+### 10.4 执行顺序
+
+1. `migration_models.py` + 单测（守恒、均值/方差/lag 协方差、CPU-GPU 一致）。
+2. 精修 M1 边界/非均匀 N，扩展 `compare_migration_models.py`（多初始场、多参数）。
+3. `model.py` 全模型 + 与 natal CPU CSR 的跨引擎校验。
+4. `run_chasing.py compare-full` + `metrics.py` + `viz_html.py`。
+5. `chase` 实验（小范围 → 放大）。

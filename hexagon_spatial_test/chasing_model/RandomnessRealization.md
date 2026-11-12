@@ -539,3 +539,118 @@ $$
 - 连续分布：`rust/src/kernels/rng.rs` 的 `continuous_binomial`、`continuous_multinomial`、`gamma`。
 - GPU 随机 CSR：`rust/src/gpu/executor.rs` 的 `migrate_tick_stochastic`（受 `MAX_CSR_ROW` 限制）。
 - GPU route A 卷积：`rust/src/gpu/fft_migrate.rs`（`scatter_g` / `complex_mul` / `combine` / cuFFT 计划 / 逐平面 `migrate_inplace`）。
+
+## 附录 C：为什么是「二项出境 + Gamma/Dirichlet 分配」
+
+> 本附录单独回答一个设计问题：为什么先抽“走多少人”（二项 / Beta），再对目的地做一次 Gamma 归一化（多项 / Dirichlet）？它是 §2 的补充依据，不改变正文结构。
+
+### C.1 个体层面的两层随机决策
+
+- **第一层（出境量）**：每个个体独立决定“走不走”（概率 $\rho$）→ 走的总人数 $O_s$ 服从二项分布。
+- **第二层（目的地）**：给定有 $O_s$ 个个体要走，**每个移动个体再独立选择目的地**（概率 $w_{s,d}$）→ 目的地计数服从多项分布。
+
+Gamma 那一步不是额外处理，而是“给定出境量后，目的地选择仍然随机”的连续实现。
+
+### C.2 离散依据：多项分布的链式分解
+
+设一个源有 $N_s$ 个个体，每个个体有 $k+1$ 种结局：
+
+$$
+\text{留下：概率 }1-\rho;\qquad
+\text{去目的地 }d:\text{概率 }\rho w_{s,d},
+$$
+
+且概率之和 $(1-\rho)+\rho\sum_d w_{s,d}=1$。于是联合计数
+
+$$
+(R_s,\,X_{s,1},\dots,X_{s,k})
+\sim \mathrm{Multinomial}\big(N_s;\;1-\rho,\;\rho w_{s,1},\dots,\rho w_{s,k}\big).
+$$
+
+按概率的链式法则拆成两步：
+
+$$
+O_s:=N_s-R_s\sim\mathrm{Binomial}(N_s,\rho),
+$$
+
+$$
+(X_{s,1},\dots,X_{s,k})\mid O_s
+\sim\mathrm{Multinomial}\big(O_s;\;w_{s,1},\dots,w_{s,k}\big).
+$$
+
+所以“先抽走多少人、再抽去哪”**不是近似，而是离散模型的精确等价写法**。两步对应两种不同的随机性来源；由全方差公式，
+
+$$
+\mathrm{Var}[X_{s,d}]
+=\underbrace{\mathbb{E}\big[\mathrm{Var}(X_{s,d}\mid O_s)\big]}_{\text{目的地选择}}
++\underbrace{\mathrm{Var}\big(\mathbb{E}[X_{s,d}\mid O_s]\big)}_{\text{出境量}}.
+$$
+
+### C.3 连续依据：逐阶段矩匹配
+
+natal 的计数是连续实数（f64），所以用离散分布的连续版本，原则是**逐阶段匹配前两阶矩**。
+
+**第一层**：离散 $\mathrm{Binomial}(N_s,\rho)$ 的均值为 $N_s\rho$、方差为 $N_s\rho(1-\rho)$。取
+
+$$
+O_s=N_s B_s,\qquad
+B_s\sim\mathrm{Beta}\big(\rho(N_s-1),(1-\rho)(N_s-1)\big),
+$$
+
+则 $\mathbb{E}[O_s]=N_s\rho$、$\mathrm{Var}[O_s]=N_s\rho(1-\rho)$，且 $O_s\in[0,N_s]$。参数里的 $N_s-1$ 正是为了让 Beta 方差分母中的 $(\alpha+\beta+1)$ 恰好等于 $N_s$，从而精确匹配二项方差。
+
+**第二层**：离散 $\mathrm{Multinomial}(O_s,w_{s,\cdot})$ 的均值为 $O_s w_{s,d}$、方差为 $O_s w_{s,d}(1-w_{s,d})$、协方差为 $-O_s w_{s,d}w_{s,d'}$。取
+
+$$
+G_{s,d}\sim\mathrm{Gamma}\big(w_{s,d}(O_s-1),1\big),\qquad
+S_s=\sum_d G_{s,d},\qquad
+X_{s,d}=O_s\frac{G_{s,d}}{S_s}.
+$$
+
+独立 Gamma 归一化即 **Dirichlet 分布**的标准构造；浓度 $w_{s,d}(O_s-1)$ 使均值/方差/协方差逐项等于多项分布，同时 $\sum_d X_{s,d}=O_s$ 严格成立（守恒）。参数里的 $O_s-1$ 同样是为了方差匹配。
+
+### C.4 一个最小数值例子
+
+取 $N_s=10$、$\rho=0.5$、两个目的地 $w_{s,1}=0.7$、$w_{s,2}=0.3$。联合多项概率为：留下 $0.5$、去 1 号 $0.35$、去 2 号 $0.15$。
+
+- 第一步：$O_s\sim\mathrm{Binomial}(10,0.5)$，$\mathbb{E}[O_s]=5$，$\mathrm{Var}[O_s]=2.5$。
+- 第二步：给定 $O_s$，$(X_{s,1},X_{s,2})\sim\mathrm{Multinomial}(O_s;(0.7,0.3))$。
+
+于是
+
+$$
+\mathbb{E}[X_{s,1}]=0.7\cdot5=3.5,\qquad
+\mathrm{Var}[X_{s,1}]=10\cdot0.35\cdot0.65=2.275,
+$$
+
+与直接对 $(R_s,X_{s,1},X_{s,2})$ 做多项分布的 $Np_1(1-p_1)$ 一致；协方差
+
+$$
+\mathrm{Cov}[X_{s,1},X_{s,2}]=-10\cdot0.35\cdot0.15=-0.525
+$$
+
+也与两阶段公式 $-\rho^2N_s w_{s,1}w_{s,2}$ 一致。可见两阶段拆分**不改变前两阶矩**，只是把联合抽样拆成两个更自然、更适配 CSR 行结构的步骤。
+
+### C.5 与单阶段 Dirichlet 的关系（设计选择的边界）
+
+若直接对 $(R_s,X_{s,1},\dots,X_{s,k})$ 做**单阶段**连续化，可用
+
+$$
+N_s\cdot\mathrm{Dirichlet}\big((N_s-1)(1-\rho),\;(N_s-1)\rho w_{s,1},\dots\big),
+$$
+
+它同样匹配多项分布的均值/协方差。可以验证：**两阶段 Beta+Dirichlet 与这个单阶段 Dirichlet 的无条件前两阶矩完全相同**（$\mathbb{E}$、$\mathrm{Var}$、$\mathrm{Cov}$ 都对得上）。
+
+差别在**给定 $O_s$ 之后的条件分布**：
+
+- 两阶段用浓度 $O_s-1$（对应离散链式法则里“用已实现的出境量作为试验数”）；
+- 单阶段 Dirichlet 的条件浓度是 $\rho(N_s-1)$（先验移动强度），不是 $O_s-1$。
+
+所以 natal 选两阶段，依据是：
+
+1. **机制上**对应两个独立的个体决策（走不走、去哪）；
+2. **数学上**是多项分布的链式分解；
+3. **连续化上**逐阶段矩匹配，且无条件前两阶矩与单阶段 Dirichlet 一致；
+4. **工程上**把“迁移率”与“核权重”解耦，天然适配 CSR 行、逐源守恒与实数计数。
+
+它不是某个唯一数学极限，但它是**有明确依据、与离散个体模型逐阶段对应**的连续松弛。

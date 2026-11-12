@@ -1,0 +1,136 @@
+{
+  "config": {
+    "name": "large",
+    "arena": 31,
+    "kernel_size": 11,
+    "avd": 1.5,
+    "ticks": 40,
+    "reps": 10,
+    "scale": 100.0
+  },
+  "selected_demes": [
+    [
+      15,
+      15
+    ],
+    [
+      17,
+      15
+    ],
+    [
+      22,
+      15
+    ],
+    [
+      0,
+      15
+    ],
+    [
+      10,
+      10
+    ]
+  ],
+  "coverage": {
+    "cpu": {
+      "thr_0.1": {
+        "final_count_mean": 600.8,
+        "final_count_std": 25.07677101311978
+      },
+      "thr_0.5": {
+        "final_count_mean": 33.2,
+        "final_count_std": 13.846780612594877
+      },
+      "thr_0.9": {
+        "final_count_mean": 0.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m0": {
+      "thr_0.1": {
+        "final_count_mean": 599.1,
+        "final_count_std": 35.67896984063426
+      },
+      "thr_0.5": {
+        "final_count_mean": 28.6,
+        "final_count_std": 22.49049181814889
+      },
+      "thr_0.9": {
+        "final_count_mean": 0.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m1": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 0.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 0.0,
+        "final_count_std": 0.0
+      }
+    }
+  },
+  "front": {
+    "cpu": {
+      "final_mean": 5.223417650275186,
+      "final_std": 1.1135069978294612,
+      "mean_over_time": 0.23029740770370827
+    },
+    "m0": {
+      "final_mean": 4.027239359282417,
+      "final_std": 1.9383105883006424,
+      "mean_over_time": 0.1452872099605737
+    },
+    "m1": {
+      "final_mean": 0.0,
+      "final_std": 0.0,
+      "mean_over_time": 0.0
+    }
+  },
+  "total": {
+    "cpu": {
+      "final_mean": 201766.15827731934,
+      "final_std": 374.9533572330727,
+      "mean_over_time": 201923.0548072639
+    },
+    "m0": {
+      "final_mean": 202069.4023408325,
+      "final_std": 458.3086399975418,
+      "mean_over_time": 202366.63624016193
+    },
+    "m1": {
+      "final_mean": 201756.8236013785,
+      "final_std": 302.53516201777165,
+      "mean_over_time": 201897.99759438337
+    }
+  },
+  "drive_final_selected": {
+    "cpu": [
+      0.5404690523382538,
+      0.5427058865495353,
+      0.32107390191546026,
+      0.05960451686532621,
+      0.24743331132044372
+    ],
+    "m0": [
+      0.5404877275633313,
+      0.5233618882961096,
+      0.3172678888603146,
+      0.05634833406679411,
+      0.2283484242978921
+    ],
+    "m1": [
+      0.2611858563537782,
+      0.25659907635088197,
+      0.2262557127103213,
+      0.22500854215817126,
+      0.2192418149432119
+    ]
+  },
+  "html": "compare_strategies_large.html",
+  "line_plot": "selected_demes.png"
+}

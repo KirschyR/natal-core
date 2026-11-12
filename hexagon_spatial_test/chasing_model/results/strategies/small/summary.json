@@ -1,0 +1,136 @@
+{
+  "config": {
+    "name": "small",
+    "arena": 15,
+    "kernel_size": 7,
+    "avd": 0.8,
+    "ticks": 40,
+    "reps": 20,
+    "scale": 100.0
+  },
+  "selected_demes": [
+    [
+      7,
+      7
+    ],
+    [
+      9,
+      7
+    ],
+    [
+      10,
+      7
+    ],
+    [
+      0,
+      7
+    ],
+    [
+      5,
+      5
+    ]
+  ],
+  "coverage": {
+    "cpu": {
+      "thr_0.1": {
+        "final_count_mean": 223.75,
+        "final_count_std": 1.8317377426626162
+      },
+      "thr_0.5": {
+        "final_count_mean": 168.7,
+        "final_count_std": 7.05691150575094
+      },
+      "thr_0.9": {
+        "final_count_mean": 0.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m0": {
+      "thr_0.1": {
+        "final_count_mean": 224.2,
+        "final_count_std": 1.3218806379747876
+      },
+      "thr_0.5": {
+        "final_count_mean": 167.35,
+        "final_count_std": 4.782368935117716
+      },
+      "thr_0.9": {
+        "final_count_mean": 0.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m1": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 0.0,
+        "final_count_std": 0.0
+      }
+    }
+  },
+  "front": {
+    "cpu": {
+      "final_mean": 9.899494936611664,
+      "final_std": 1.8225036628030615e-15,
+      "mean_over_time": 1.472576353781683
+    },
+    "m0": {
+      "final_mean": 9.899494936611664,
+      "final_std": 1.8225036628030615e-15,
+      "mean_over_time": 1.33549219560028
+    },
+    "m1": {
+      "final_mean": 9.899494936611664,
+      "final_std": 1.8225036628030615e-15,
+      "mean_over_time": 1.4870807153144936
+    }
+  },
+  "total": {
+    "cpu": {
+      "final_mean": 47081.48441929808,
+      "final_std": 130.271041800698,
+      "mean_over_time": 47230.681350388
+    },
+    "m0": {
+      "final_mean": 47239.14713735869,
+      "final_std": 124.86937438651943,
+      "mean_over_time": 47299.37488587249
+    },
+    "m1": {
+      "final_mean": 47138.34884123634,
+      "final_std": 140.81531296836775,
+      "mean_over_time": 47206.539919056406
+    }
+  },
+  "drive_final_selected": {
+    "cpu": [
+      0.8182504565131223,
+      0.7913713314829292,
+      0.7481544478858974,
+      0.6021266518986669,
+      0.7270902822886448
+    ],
+    "m0": [
+      0.802700089481139,
+      0.7783056934818401,
+      0.7461502831018888,
+      0.5721940306055161,
+      0.7050421278499355
+    ],
+    "m1": [
+      0.7505454947400023,
+      0.7512700093643776,
+      0.7506067012590875,
+      0.7185728049324068,
+      0.7417188928574756
+    ]
+  },
+  "html": "compare_strategies_small.html",
+  "line_plot": "selected_demes.png"
+}

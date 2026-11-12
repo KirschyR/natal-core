@@ -111,7 +111,8 @@ results/                         # JSON（HTML/PNG 受全局 ignore）
 
 - [x] V1：确定性 CPU CSR vs GPU FFT 多配置对照（2026-11-12，全通过）
 - [x] V2a：算子级 M0/M1 vs CPU CSR（含 lag 平均协方差）
-- [ ] V2b：整模型 CPU CSR vs M0/M1（GPU FFT 版）
+- [x] V2b：整模型 CPU CSR/M0/M1 数据比较（NumPy 原型，small/large，mean±SD + HTML，2026-11-12）
+- [~] 算子拆模块 / M1 边界精修：用户暂缓（当前不做）
 - [ ] V3：随机 CPU vs GPU 分布统计检验
 - [ ]（可选，另审批）随机 route A 产品化
 - [ ] S0：随机 hex 冒烟（CPU CSR）
@@ -181,10 +182,12 @@ results/                         # JSON（HTML/PNG 受全局 ignore）
 - **G3 整模型**：M0/M1 与 CPU 的覆盖曲线 CI 重叠、前沿速度无系统偏差；差异如实记录。
 - **G4 chasing**：晚期共存 ≥ `N_coexist`、前沿严格增长、不全局固定。
 
-### 10.4 执行顺序
+### 10.4 执行顺序（2026-11-12 更新）
 
-1. `migration_models.py` + 单测（守恒、均值/方差/lag 协方差、CPU-GPU 一致）。
-2. 精修 M1 边界/非均匀 N，扩展 `compare_migration_models.py`（多初始场、多参数）。
-3. `model.py` 全模型 + 与 natal CPU CSR 的跨引擎校验。
-4. `run_chasing.py compare-full` + `metrics.py` + `viz_html.py`。
-5. `chase` 实验（小范围 → 放大）。
+- **已完成**：三策略全模型数据比较（`compare_strategies.py`；small 15²/k7/avd0.8/R20 + large 31²/k11/avd1.5/R10；`scale=100`；mean±SD + 三策略 HTML）。
+- **用户暂缓/当前不做**：① 算子单独抽模块（不必要）；② M1 边界/M4 精修（不在当前计划）。
+- **下一步**：
+  1. **NumPy 全模型 CPU CSR vs natal 引擎跨引擎校验**（确定性轨迹 + 随机矩），确认 CPU 参考的可信度。
+  2. 若校验通过：用 **M0**（空间形态更接近 CPU）或 CPU CSR 做 chasing 初探（S1/S2）。
+  3. 通用 `viz_html`/`run_chasing`（当前 HTML 已内联在 `compare_strategies.py`）。
+  4. `chase` 实验（小范围 → 放大）。

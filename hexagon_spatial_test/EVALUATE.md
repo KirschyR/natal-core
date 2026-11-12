@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §27（§26 计划评审）= **NOT APPROVED**（仅计划文本修订，未涉产品代码） |
-| 待回执 | §28→§29（计划）；§30→§31（确定性 route A 对照） |
-| 主 agent 处理 | M5 收尾；chasing 计划 v3；**§30 已完成多配置确定性 CPU CSR vs GPU FFT 对照（全通过）** |
-| 待 evaluator 动作 | 复核 §28 计划与 §30 确定性对照 |
+| 待回执 | §28→§29（计划）；§30→§31（确定性对照）；§32→§33（三策略比较） |
+| 主 agent 处理 | M5 收尾；chasing 计划 v3；§30 确定性对照；**§32 完成三策略（CPU/M0/M1）小+大全模型数据比较** |
+| 待 evaluator 动作 | 复核 §28/§30/§32 |
 
 ---
 
@@ -653,6 +653,66 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 3. tick-0 age0 瞬态的解释与 non-egg/adult 口径是否成立。
 4. 初始/释放口径（age0=0、仅雄纯合 `Drive|Drive`、中心圆 radius 3、无 burn-in）与 event-seq 的一致性是否记录清楚。
 5. 结论边界：仅确定性 + 3 型最小模型；未覆盖 stochastic、hooks+fft、5 型/抗性、长跑/大规模；不构成对 chasing 随机结论的认可。
+
+
+## §32 — 三策略随机模拟数据比较（CPU CSR / M0 / M1）
+
+### 32.1 执行内容
+- 脚本：`hexagon_spatial_test/chasing_model/compare_strategies.py`（**不拆算子模块**；三策略内联）。
+- 全模型：R-S-A 年龄结构 hex（NumPy 原型，连续采样 stochastic）、homing 3 型、**age0=0**、uniform WT、仅雄纯合 `Drive|Drive`（中心圆 r=3，0.5×age2 WT 雄）、无 burn-in。
+- 生命周期与迁移使用**独立 RNG 流**：三种策略共享同一 lifecycle 噪声，只替换迁移算子（配对比较）。
+- 场景（类似确定性对照的小/大）：
+  - `small`：15×15、kernel 7、avd 0.8、40 tick、R=20、scale=100；
+  - `large`：31×31、kernel 11、avd 1.5、40 tick、R=10、scale=100。
+- `scale=100` 同时放大初始态与 `DENSITY_REF`（否则每平面计数 ≤1，连续采样退化为均值，CPU≈M0 且无随机性）。
+- **M1 可运行性 sanity**：非负截断 + 按平面总量重归一化（保持守恒；**不是** `RandomnessRealization.md` 的 M4 边界精修）。
+- 运行约 1m54s，**EXIT=0**。
+- 旧 V2a/M0-M1 算子级比较项归档到 `results/operator_baselines.json`；旧 `routeA_deterministic.*`、`stochastic_fft_operator.*`、`compare_migration_models.*` 已删除。
+
+### 32.2 结果（终态；均值±SD；覆盖为 deme 数）
+
+**small（15×15, k7, avd0.8, R=20）**
+
+| 策略 | total | front | cov≥0.1 | cov≥0.5 | cov≥0.9 | drive@selected |
+|---|---|---|---|---|---|---|
+| cpu | 47081.5±130.3 | 9.90±0.00 | 223.8±1.8 | 168.7±7.1 | 0 | 0.818, 0.791, 0.748, 0.602, 0.727 |
+| m0 | 47239.1±124.9 | 9.90±0.00 | 224.2±1.3 | 167.3±4.8 | 0 | 0.803, 0.778, 0.746, 0.572, 0.705 |
+| m1 | 47138.3±140.8 | 9.90±0.00 | 225.0±0.0 | 225.0±0.0 | 0 | 0.751, 0.751, 0.751, 0.719, 0.742 |
+
+**large（31×31, k11, avd1.5, R=10）**
+
+| 策略 | total | front | cov≥0.1 | cov≥0.5 | cov≥0.9 | drive@selected |
+|---|---|---|---|---|---|---|
+| cpu | 201766.2±375.0 | 5.22±1.11 | 600.8±25.1 | 33.2±13.8 | 0 | 0.540, 0.543, 0.321, 0.060, 0.247 |
+| m0 | 202069.4±458.3 | 4.03±1.94 | 599.1±35.7 | 28.6±22.5 | 0 | 0.540, 0.523, 0.317, 0.056, 0.228 |
+| m1 | 201756.8±302.5 | 0.00±0.00 | 961.0±0.0 | 0.0±0.0 | 0 | 0.261, 0.257, 0.226, 0.225, 0.219 |
+
+### 32.3 说明了什么
+- **CPU 与 M0 接近**：总量、front、覆盖率、选定 deme 驱动率都相近（M0 略低/略平），符合“M0 保留均值与守恒、只缺行内竞争”的预期。
+- **M1 与二者差异显著**：
+  - small：M1 的驱动率场更均匀（cov≥0.5 覆盖全场 225，而 CPU/M0 为 ~168），选定 deme 驱动率更一致；
+  - large：M1 的**前沿未形成**（front=0、cov≥0.5=0），驱动率约 0.22–0.26 的均匀分布，而 CPU 仍有 5.2 的局部前沿。
+- 与算子级结论的关系：M1 在单步算子层面方差比≈1（二阶矩匹配），但全模型中 Gaussian 噪声 + 非负截断/重归一化把场**平滑化**，空间传播明显弱于 CPU；M0 虽方差偏低，但空间形态更接近 CPU。
+- 结论（当前实现）：**M1 不能直接替代 CPU CSR 做空间 chasing；M0 是更接近的空间近似，但需明确其方差不足**。M4 边界精修按用户要求暂缓。
+
+### 32.4 产物
+- `results/strategies/{small,large}/summary.json`
+- `results/strategies/{small,large}/series.npz`（逐重复、逐 tick 的选定 deme 指标）
+- `results/strategies/{small,large}/selected_demes.png`（mean±1 SD 折线）
+- `results/html/compare_strategies_{small,large}.html`（三策略同步六边形热图 + 时间滑块 + 选定 deme mean±1 SD；HTML 受全局 ignore，不入库）
+- `results/operator_baselines.json`（归档的算子级比较项）
+
+### 32.5 请 evaluator 核对点
+1. 脚本/配置可复现，`summary.json` 数值一致。
+2. RNG 分离是否正确（lifecycle 共享、migration 独立）；配对比较是否成立。
+3. M1 的「非负截断 + 重归一化」是否被清楚标注为 sanity（非 M4），是否影响结论解释。
+4. 结论边界：NumPy 全模型生命周期**尚未**与 natal 引擎交叉校验；CPU 参考是 NumPy 复刻的 natal 连续 CSR，不是 natal 引擎本身；不构成对 natal/GPU 的认可。
+5. 统计：R=20/10 较小，仅作描述性；未做显著性检验。
+
+### 32.6 残余
+- NumPy 全模型 vs natal 跨引擎校验未做（建议下一步）。
+- M1 边界/非均匀未精修（用户暂缓）；截断+重归一化是权宜。
+- `scale=100` 未做敏感性扫描；未测 chasing 指标（共存/前沿持续性）。
 
 ---
 

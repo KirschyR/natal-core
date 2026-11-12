@@ -614,28 +614,27 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 
 ### 30.1 执行内容
 - 脚本：`hexagon_spatial_test/chasing_model/verify_routeA_deterministic.py`（由单例重写为**多配置矩阵**）。
-- 模型：3 型 homing（等位 `WT/Drive`；迁移对照与基因型数无关）、年龄结构（`n_ages=10, adult=2`）、中心圆双性 `Drive|Drive` 释放、`deterministic`、`record_every=0`。
+- 模型：3 型 homing（等位 `WT/Drive`）、年龄结构（`n_ages=10, adult=2`）、`deterministic`、`record_every=0`。
+- 初始/释放：uniform WT（**age0=0**；age1 与成虫用设计好的稳定数，**无 burn-in**）；中心圆（**radius 3**）内**仅雄性、纯合 `Drive|Drive`、首个成虫龄 age2**，每 deme `0.5 × age2 WT 雄数`，初始化时投放。与 event-seq 的空间释放模式一致（仅雄/中心圆/成虫龄/纯合 dd）。
 - 每个配置用**同一初始态**分别跑：CPU `migration_execution="csr"`；GPU `"fft"` + `enable_gpu()`（route A cuFFT）；FFT 再跑一次验可复现。
 - 配置与 tick：
   `a15_k7_avd0.8`(40)、`a21_k7_avd1.0`(60)、`a31_k7_avd1.0`(80)、`a21_k11_avd1.5`(60)。
 - 环境：`.venv`（gpu 构建，RTX 5090）；`LD_LIBRARY_PATH` 含 cu13；运行约 30 s，**EXIT=0**。
 
-### 30.1b 记录对象与 tick-0 瞬态（本次优化）
-- 初始态采用参考 WT 平衡年龄向量，其中 **age0 = `eggs=40`（卵池密度）**；natal 的 R-S-A 在第一个 tick 的繁殖阶段会用新生**覆盖 age0**，因此这 40 在 tick 1 被丢弃：
-  - `all_ages` 在 tick 0 ≈ **42.1/deme**，tick 1 骤降到 ≈ **2.1/deme**（~20× 瞬态）；
-  - `non_egg`（age≥1）与 `adult`（age≥2）在 tick 0 就已是 ≈ **2.1 / 1.67 per deme**，无尖峰。
-- 为避免 tick-0 瞬态压缩纵轴、掩盖后续种群变化，**主对比指标改为 `non_egg` 与 `adult`**；`all_ages` 仅写入 JSON 并在 HTML 文字中说明。
+### 30.1b 记录对象（RSA 口径）
+- RSA 下 age0 只是**暂存槽**，本轮初始 **age0=0**，不再有参考卵池的 tick-0 瞬态；初始 `non_egg`（age≥1）≈ 2.1/deme、`adult`（age≥2）≈ 1.67/deme，与设计稳定态一致。
+- 主对比指标仍用 `non_egg` 与 `adult`；`all_ages` 仅写入 JSON。此前「tick0 总数 40/deme 骤降」的问题已通过 age0=0 消除。
 
 ### 30.2 结果（同一初始态；CPU vs GPU）
 
 | config | non-egg max rel | adult max rel | carrier max abs | final per-deme carrier abs | final state max abs | FFT repeat bit-identical |
 |---|---|---|---|---|---|---|
-| a15_k7_avd0.8 | 4.12e-7 | 4.96e-7 | 3.55e-7 | 3.91e-6 | 1.14e-6 | true |
-| a21_k7_avd1.0 | 1.60e-7 | 1.97e-7 | 3.42e-7 | 2.16e-6 | 1.78e-6 | true |
-| a31_k7_avd1.0 | 6.67e-8 | 9.09e-8 | 3.57e-6 | 8.04e-5 | 5.07e-5 | true |
-| a21_k11_avd1.5 | 1.96e-7 | 2.25e-7 | 5.22e-8 | 3.25e-9 | 1.46e-7 | true |
+| a15_k7_avd0.8 | 3.95e-7 | 4.72e-7 | 2.36e-7 | 3.08e-6 | 7.94e-7 | true |
+| a21_k7_avd1.0 | 1.57e-7 | 1.94e-7 | 7.27e-8 | 6.05e-7 | 6.87e-7 | true |
+| a31_k7_avd1.0 | 7.34e-8 | 9.84e-8 | 2.13e-6 | 3.29e-5 | 2.88e-5 | true |
+| a21_k11_avd1.5 | 1.86e-7 | 2.13e-7 | 1.43e-7 | 1.62e-9 | 1.31e-7 | true |
 
-- **全部通过**：`non-egg rel ≤ 4.2e-7`、`adult rel ≤ 5.0e-7`、`carrier abs ≤ 3.6e-6`、`final per-deme carrier abs ≤ 8.1e-5`、`final state abs ≤ 5.1e-5`；FFT 重复**逐位一致**。
+- **全部通过**：`non-egg rel ≤ 4.0e-7`、`adult rel ≤ 4.8e-7`、`carrier abs ≤ 2.2e-6`、`final per-deme carrier abs ≤ 3.3e-5`、`final state abs ≤ 2.9e-5`；FFT 重复**逐位一致**。
 - 近零元素的相对误差会被放大（a31 的 `final_state_max_rel_diff ≈ 1.99`，但绝对差仅 `5.1e-5`），故验收以**绝对差**为主，相对误差仅参考。
 
 ### 30.3 产物
@@ -644,15 +643,16 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - `hexagon_spatial_test/chasing_model/results/html/deterministic_compare.html`（自包含：表格 + 轨迹/差异图；HTML 受全局 `*.html` ignore，不入库）
 
 ### 30.4 说明了什么
-- **确定性下 route A（GPU cuFFT）与 CPU CSR 在 f32 精度内一致**（非逐位）；非卵/成虫轨迹相对误差 ≤5.0e-7，末态绝对 ≤5.1e-5；FFT 重复运行逐位可复现。
-- tick-0 的大总数是**参考初始 age0 卵池的瞬时记账**，不是真实站立种群；改用 non-egg/adult 后曲线可直接比较。
+- **确定性下 route A（GPU cuFFT）与 CPU CSR 在 f32 精度内一致**（非逐位）；非卵/成虫轨迹相对误差 ≤4.8e-7，末态绝对 ≤2.9e-5；FFT 重复运行逐位可复现。
+- 初始/释放已按 RSA 口径：age0=0、uniform WT、仅雄**纯合** `Drive|Drive`（中心圆 radius 3、0.5×age2 WT 雄）、无 burn-in；与 event-seq 的空间释放模式一致。
 - 这为后续随机方案（M0/M1 的 GPU 卷积版）提供了可信的确定性底座；CPU CSR 继续作为随机参考。
 
 ### 30.5 请 evaluator 核对点
 1. 配置/命令可独立复现，数值与 `summary.json` 一致。
 2. 验收口径（绝对差为主、相对误差参考、FFT 重复逐位）是否恰当。
 3. tick-0 age0 瞬态的解释与 non-egg/adult 口径是否成立。
-4. 结论边界：仅确定性 + 3 型最小模型；未覆盖 stochastic、hooks+fft、5 型/抗性、长跑/大规模；不构成对 chasing 随机结论的认可。
+4. 初始/释放口径（age0=0、仅雄纯合 `Drive|Drive`、中心圆 radius 3、无 burn-in）与 event-seq 的一致性是否记录清楚。
+5. 结论边界：仅确定性 + 3 型最小模型；未覆盖 stochastic、hooks+fft、5 型/抗性、长跑/大规模；不构成对 chasing 随机结论的认可。
 
 ---
 

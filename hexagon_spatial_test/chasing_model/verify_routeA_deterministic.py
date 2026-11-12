@@ -47,6 +47,8 @@ K_AGE1 = 4.0 / (F + 1)
 COMPETITION_STRENGTH = 5.0
 LOW_DENSITY_GROWTH_RATE = 5.0
 CARRIER_ZTYPES = (1, 2)  # WT|Drive, Drive|Drive for alleles [WT, Drive]
+RELEASE_RADIUS = 3.0
+RELEASE_MULTIPLE = 0.5  # per central deme: 0.5 x the age-2 WT male count
 
 _FEMALE_AGING = [1.0 - 1.0 / (F - i + 1) for i in range(1, F)]
 _MALE_AGING = [1.0 - 1.0 / (M - i + 1) for i in range(1, M)]
@@ -69,12 +71,17 @@ def age_vector() -> np.ndarray:
 
 
 def initial_states(m: int, n: int, radius: float, release_multiple: float) -> list[dict]:
-    """WT equilibrium everywhere plus a both-sex Drive|Drive disc at age 2."""
+    """Uniform WT community plus a male heterozygous-drive release in a central disc.
+
+    RSA note: age 0 is only a transient newborn/egg staging slot, so its initial
+    count is left at zero; the designed age-1 and adult counts are seeded
+    directly (no burn-in).  Release follows the event-seq spatial pattern
+    (male-only, first adult age, central disc) but uses a heterozygous
+    ``WT|Drive`` carrier rather than the event-seq ``Drive|Drive`` release.
+    """
     ages = age_vector()
     base_f = np.zeros(N_AGES)
     base_m = np.zeros(N_AGES)
-    base_f[0] = ages[0] * 0.5
-    base_m[0] = ages[0] * 0.5
     base_f[1] = ages[1] * 0.5
     base_m[1] = ages[1] * 0.5
     base_f[NEW_ADULT_AGE:] = ages[2 + M :]
@@ -88,14 +95,12 @@ def initial_states(m: int, n: int, radius: float, release_multiple: float) -> li
         for c in range(n):
             f = base_f.copy()
             mm = base_m.copy()
-            drive_f = np.zeros(N_AGES)
             drive_m = np.zeros(N_AGES)
             if disc[r, c]:
-                drive_f[NEW_ADULT_AGE] = release_multiple * base_f[NEW_ADULT_AGE]
                 drive_m[NEW_ADULT_AGE] = release_multiple * base_m[NEW_ADULT_AGE]
             states.append(
                 {
-                    "female": {"WT|WT": f.tolist(), "Drive|Drive": drive_f.tolist()},
+                    "female": {"WT|WT": f.tolist()},
                     "male": {"WT|WT": mm.tolist(), "Drive|Drive": drive_m.tolist()},
                 }
             )
@@ -119,7 +124,7 @@ def build(m: int, n: int, execution: str, kernel: np.ndarray, tag: str) -> nt.Sp
         fecundity_scaling=1.0,
         viability_scaling=1.0,
     )
-    states = initial_states(m, n, radius=2.0, release_multiple=0.5)
+    states = initial_states(m, n, radius=RELEASE_RADIUS, release_multiple=RELEASE_MULTIPLE)
     return (
         nt.SpatialPopulation.builder(
             species,
@@ -276,8 +281,11 @@ def run_config(cfg: dict, index: int) -> dict:
     diff = (cpu_res["final_carrier"] - gpu_res["final_carrier"]).reshape(m, n)
     limit = max(float(np.abs(diff).max()), 1e-12)
     im = axes[2].imshow(diff, cmap="RdBu_r", vmin=-limit, vmax=limit)
-    axes[2].set_title(f"Final carrier diff (max {final_carrier_abs:.2e})")
-    fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04)
+    axes[2].set_title(f"Final carrier diff (max |CPU-GPU| {final_carrier_abs:.2e})")
+    axes[2].set_xlabel("column")
+    axes[2].set_ylabel("row")
+    fig.colorbar(im, ax=axes[2], fraction=0.046, pad=0.04,
+                 label="CPU - GPU carrier fraction")
     fig.suptitle(
         f"{cfg['name']}: {m}x{n} hex, kernel {cfg['kernel_size']}, avd={cfg['avd']:g}\n"
         "tick 0 all-age total includes the initial age-0 egg pool"
@@ -332,11 +340,12 @@ table {{ border-collapse: collapse; }} td, th {{ border: 1px solid #999; padding
 floating-point tolerance, not bitwise. Trajectory errors are relative; the final
 stacked-state check uses absolute error because near-zero entries make relative
 error meaningless. FFT repeat bit-identity is required.</p>
-<p><b>Why tick 0 looks large:</b> the initial state uses the reference WT
-equilibrium age vector, whose age-0 slot is the egg pool (40 per deme). natal
-R-S-A overwrites age 0 at the first reproduction, so that 40 is discarded after
-one tick. The meaningful standing population is the non-egg (age >= 1) or adult
-(age >= 2) series; the all-age curve is shown in gray only for reference.</p>
+<p><b>Initial state / release:</b> under RSA the age-0 egg pool is only a
+transient staging slot, so it is initialized to zero; the designed age-1 and
+adult WT counts are seeded directly (no burn-in). Drive is released at
+initialization as <b>homozygous Drive|Drive adult males only</b> in a central
+disc (radius 3), each at 0.5x the age-2 WT male count (matching event-seq). The standing population
+is reported as non-egg (age >= 1) and adult (age >= 2).</p>
 <table><tr><th>config</th><th>arena</th><th>kernel</th><th>avd</th>
 <th>non-egg max rel</th><th>adult max rel</th><th>carrier max abs</th>
 <th>final state rel (floor 1e-3)</th><th>final state max abs</th>

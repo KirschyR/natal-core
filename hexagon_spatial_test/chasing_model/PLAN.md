@@ -109,7 +109,7 @@ results/                         # JSON（HTML/PNG 受全局 ignore）
 
 ## 8. 里程碑
 
-- [ ] V1：确定性 CPU CSR vs GPU FFT 折线图对照
+- [x] V1：确定性 CPU CSR vs GPU FFT 多配置对照（2026-11-12，全通过）
 - [x] V2a：算子级 M0/M1 vs CPU CSR（含 lag 平均协方差）
 - [ ] V2b：整模型 CPU CSR vs M0/M1（GPU FFT 版）
 - [ ] V3：随机 CPU vs GPU 分布统计检验

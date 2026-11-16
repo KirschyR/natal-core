@@ -896,6 +896,15 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
   3. **样本量**：R=100 时很小的差异也可被检测；p 随 R 变，不是生物常量。
 - 结论：M2 在统计上仍“可检测”，但效应量小；是否“生物学可合并”取决于 chasing 指标是否在容差内。M0 的方差差异更大，可能具有生物学相关性。**非显著 p 也不证明等价**，需 TOST/等价检验。
 
+
+### 36.10 HTML 计时/C2ST 展示精简（2026-11-16）
+- HTML 计时表只保留**每 replicate 的实际时间**（jobs=8）：
+  - `wall s / replicate = parallel wall / R`；
+  - `migration s / replicate = migration CPU sum / (R × jobs)`；
+  - 不再展示 sum/顺序探针列（仍保留在 `summary.json`）。
+- 值（wall / migration，秒/replicate）：small cpu `0.313 / 0.295`，m0 `0.034 / 0.026`，m1 `0.060 / 0.052`，m2 `0.066 / 0.057`；large cpu `2.739 / 2.617`，m0 `0.086 / 0.063`，m1 `0.138 / 0.113`，m2 `0.131 / 0.106`。均满足 wall ≥ migration。
+- C2ST 表**移除 permutation p**（p 仍是置换下限 0.048，非生物学量；仍保存在 `c2st.json`/`summary.json`）；HTML 只显示 accuracy/AUC + 下三角热图（对角线 self-split ≈0.5）。
+
 ---
 
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）

@@ -60,7 +60,7 @@ for name in ("small", "large"):
     (out / "selected_demes.png").write_bytes(base64.b64decode(m2.group(1)))
     c2st_table = "".join(
         f"<tr><td>{methods[i]} vs {methods[j]}</td><td>{acc[i, j]:.2f}</td>"
-        f"<td>{auc[i, j]:.2f}</td><td>{pval[i, j]:.3f}</td></tr>"
+        f"<td>{auc[i, j]:.2f}</td></tr>"
         for i in range(len(methods))
         for j in range(i)
     )

@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §27（§26 计划评审）= **NOT APPROVED**（仅计划文本修订，未涉产品代码） |
-| 待回执 | §28→§29（计划）；§30→§31（确定性对照）；§32→§33（三策略比较）；§34→§35（M2 + 新 deme 选择） |
+| 待回执 | §28→§29；§30→§31；§32→§33；§34→§35；§36→§37（C2ST + R=100） |
 | 主 agent 处理 | M5 收尾；chasing 计划 v3；§30 确定性对照；§32 三策略比较；**§34 完成 M2（CPU/M0/M1/M2）、新 deme 选择；v1 结果已归档** |
-| 待 evaluator 动作 | 复核 §28/§30/§32/§34 |
+| 待 evaluator 动作 | 复核 §28/§30/§32/§34/§36 |
 
 ---
 
@@ -782,10 +782,11 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - **M1**：几乎均匀（`0.261→0.225`），无波前；边缘 SD 明显偏高（0.055 vs 0.017）。
 - 结论：**M2 是目前 FFT 框架下最有希望同时复现波前与方差的方法**；仍是近似（块边界/块大小）。
 
-### 34.4 产物
-- `results/strategies_v2/{small,large}/{summary.json,series.npz,selected_demes.png}`
-- `results/html/compare_strategies_v2_{small,large}.html`（4 策略同步热图 + 时间滑块 + 4 点 mean±SD + 计时表；HTML 不入库）
+### 34.4 产物（v2，R=20/10，已归档）
+- `results/strategies_v2_r20_r10/{small,large}/{summary.json,series.npz,selected_demes.png}`
+- `results/html/compare_strategies_v2_r20r10_{small,large}.html`
 - v1 归档：`results/strategies_v1/`、`results/html/compare_strategies_v1_*`
+- v3（R=100 + C2ST）见 §36。
 
 ### 34.5 计时（全部 tick × R；NumPy/CPU）
 | config | cpu | m0 | m1 | m2 |
@@ -803,6 +804,61 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - 块大小/边界未调；未做 M4 精修。
 - 未做 GPU 版（M2 的 FFT/块多项可后续上 GPU）。
 - 未与 natal 引擎交叉校验。
+
+
+## §36 — C2ST 相似性检验（R=100）+ 下三角热图
+
+### 36.1 变更
+- **v2（R=20/10）归档**为 `results/strategies_v2_r20_r10/`、`html/compare_strategies_v2_r20r10_*`。
+- **v3**：`small`/`large` 均为 **R=100**；输出 `results/strategies_v3/`、`html/compare_strategies_v3_*`。
+- 展示策略 **CPU / M0 / M2**（M1 仍计算并保存在 `summary.json`，仅不展示）；仍用中心→边界沿线的 4 个 deme。
+- 计时表与 **C2ST 下三角 3×3 热图 + 表格**均写入 HTML（v3）。
+
+### 36.2 C2ST 设计
+- **样本单位**：每个 replicate 一个特征向量。
+- **特征**：tick 25/50/75/100 的逐 deme drive、覆盖（3 阈值）、front、total；drive 的 time-mean/SD；T50。
+- **分类器**：L2 逻辑回归（标准化），**5-fold × 5 repeats**；**置换零分布 20 次**；报告 accuracy / AUC / permutation p。
+- **判读**：accuracy/AUC 越接近 **0.5** 越不可分；p 为置换检验（20 次 → 最小 0.048）。**效应量（accuracy/AUC）优先于 p**；需预设等价边界（如 acc ≤0.6）才谈“可合并”。
+
+### 36.3 结果（R=100）
+
+| pair | small acc / AUC / p | large acc / AUC / p |
+|---|---|---|
+| m0 vs cpu | 0.773 / 0.848 / 0.048 | 0.920 / 0.974 / 0.048 |
+| **m2 vs cpu** | **0.581 / 0.618 / 0.048** | **0.591 / 0.604 / 0.048** |
+| m2 vs m0 | 0.838 / 0.910 / 0.048 | 0.960 / 0.996 / 0.048 |
+
+瞬态（drive@t40 沿线中心→边缘；SD；T50）：
+- small：cpu `0.808,0.784,0.664,0.587`；SD `0.031,0.039,0.043,0.052`；T50 36.6。
+  m0 `0.809,0.782,0.655,0.581`；SD `0.020,0.025,0.035,0.043`。
+  m2 `0.811,0.780,0.648,0.570`；SD `0.035,0.037,0.053,0.063`。
+- large：cpu `0.534,0.411,0.172,0.064`；SD `0.043,0.046,0.036,0.024`；T50 45.3。
+  m0 `0.528,0.411,0.165,0.061`；SD `0.031,0.030,0.024,0.017`。
+  m2 `0.530,0.401,0.172,0.060`；SD `0.050,0.046,0.038,0.026`。
+
+计时（R=100）：small cpu 31.27 s / m0 3.39 / m1 6.04 / m2 6.60；large cpu 273.91 s / m0 8.56 / m1 13.77 / m2 13.12。
+
+### 36.4 解释
+- **M2 与 CPU 最接近**：C2ST accuracy ~0.58–0.59（AUC ~0.60–0.62），接近“不可分”边界。
+- **M0 与 CPU 明显可分**：acc 0.77–0.92（AUC 0.85–0.97）。尽管均值接近，C2ST 主要抓到 **方差结构偏低**（M0 的 SD 明显小于 CPU）。
+- **M2 与 M0 也可分**（0.84–0.96），说明两者分布差异大。
+- **p 值注意**：20 次置换的分辨率下限为 0.048；即使 acc~0.59 也 p≈0.048。不能只看 p，应结合 accuracy/AUC 与预设等价边界。C2ST 检测的是“任何差异”，**可分 ≠ 实际不可合并**；最终仍需下游 chasing 指标的等价检验。
+
+### 36.5 产物
+- `results/strategies_v3/{small,large}/{summary.json, series.npz, c2st.json, c2st.png, selected_demes.png}`
+- `results/html/compare_strategies_v3_{small,large}.html`（3 策略热图 + 滑块 + 沿线 4 点 mean±SD + 计时表 + C2ST 下三角热图/表；HTML 不入库）
+- 归档：`results/strategies_v1/`、`results/strategies_v2_r20_r10/`
+
+### 36.6 请 evaluator 核对点
+1. C2ST 特征/分类器/CV/置换实现是否正确；R=100 是否确为两场景。
+2. 下三角热图与表格数值是否一致；对角线/上三角是否正确屏蔽。
+3. 结论边界：可分 ≠ 不可合并；p 分辨率（20 次）；特征选择/分类器敏感性；仅 NumPy/CPU；未做下游 chasing 等价检验。
+4. v2 归档路径与 §34.4 是否一致。
+
+### 36.7 残余
+- 置换次数 20 → p 下限 0.048；可增至 100+。
+- 特征集/分类器未做敏感性；可加 MMD/energy distance 作为无模型对照。
+- 未做下游 chasing 指标（共存/前沿/固定概率）的等价检验。
 
 ---
 

@@ -1,0 +1,247 @@
+{
+  "config": {
+    "name": "small",
+    "arena": 15,
+    "kernel_size": 7,
+    "avd": 0.8,
+    "ticks": 100,
+    "reps": 100,
+    "scale": 100.0
+  },
+  "selected_demes": [
+    [
+      7,
+      7
+    ],
+    [
+      5,
+      7
+    ],
+    [
+      2,
+      7
+    ],
+    [
+      0,
+      7
+    ]
+  ],
+  "coverage": {
+    "cpu": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m0": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m1": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m2": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      }
+    }
+  },
+  "front": {
+    "cpu": {
+      "final_mean": 9.899494936611662,
+      "final_std": 3.570611593983174e-15,
+      "mean_over_time": 6.479881580019909
+    },
+    "m0": {
+      "final_mean": 9.899494936611662,
+      "final_std": 3.570611593983174e-15,
+      "mean_over_time": 6.434565829071578
+    },
+    "m1": {
+      "final_mean": 9.899494936611662,
+      "final_std": 3.570611593983174e-15,
+      "mean_over_time": 6.484225326517655
+    },
+    "m2": {
+      "final_mean": 9.899494936611662,
+      "final_std": 3.570611593983174e-15,
+      "mean_over_time": 6.496684261966951
+    }
+  },
+  "total": {
+    "cpu": {
+      "final_mean": 47151.62694953932,
+      "final_std": 139.7515227202267,
+      "mean_over_time": 47165.26037615252
+    },
+    "m0": {
+      "final_mean": 47220.092314913665,
+      "final_std": 124.33357332510357,
+      "mean_over_time": 47260.37576965436
+    },
+    "m1": {
+      "final_mean": 47124.37117727787,
+      "final_std": 135.87310376180903,
+      "mean_over_time": 47170.57038542509
+    },
+    "m2": {
+      "final_mean": 47105.84575126516,
+      "final_std": 132.1139071003969,
+      "mean_over_time": 47140.316194539555
+    }
+  },
+  "drive_final_selected": {
+    "cpu": [
+      0.9999999991976499,
+      0.9999999912469665,
+      0.9999999958338057,
+      0.9999999999233044
+    ],
+    "m0": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "m1": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "m2": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "timing": {
+    "cpu": {
+      "wall_seconds": 31.265982736833394,
+      "per_replicate_seconds": 0.3126598273683339,
+      "migration_seconds": 235.6120033664629,
+      "reps": 100,
+      "ticks": 100
+    },
+    "m0": {
+      "wall_seconds": 3.389285683631897,
+      "per_replicate_seconds": 0.03389285683631897,
+      "migration_seconds": 21.16664265934378,
+      "reps": 100,
+      "ticks": 100
+    },
+    "m1": {
+      "wall_seconds": 6.038978009484708,
+      "per_replicate_seconds": 0.060389780094847086,
+      "migration_seconds": 41.336251880042255,
+      "reps": 100,
+      "ticks": 100
+    },
+    "m2": {
+      "wall_seconds": 6.59804951492697,
+      "per_replicate_seconds": 0.0659804951492697,
+      "migration_seconds": 45.45749090332538,
+      "reps": 100,
+      "ticks": 100
+    }
+  },
+  "c2st": {
+    "methods": [
+      "cpu",
+      "m0",
+      "m2"
+    ],
+    "accuracy": [
+      [
+        1.0,
+        0.7730000000000001,
+        0.581
+      ],
+      [
+        0.7730000000000001,
+        1.0,
+        0.838
+      ],
+      [
+        0.581,
+        0.838,
+        1.0
+      ]
+    ],
+    "auc": [
+      [
+        1.0,
+        0.8484,
+        0.6184000000000001
+      ],
+      [
+        0.8484,
+        1.0,
+        0.9103000000000001
+      ],
+      [
+        0.6184000000000001,
+        0.9103000000000001,
+        1.0
+      ]
+    ],
+    "p": [
+      [
+        1.0,
+        0.047619047619047616,
+        0.047619047619047616
+      ],
+      [
+        0.047619047619047616,
+        1.0,
+        0.047619047619047616
+      ],
+      [
+        0.047619047619047616,
+        0.047619047619047616,
+        1.0
+      ]
+    ]
+  },
+  "html": "compare_strategies_v3_small.html",
+  "line_plot": "selected_demes.png"
+}

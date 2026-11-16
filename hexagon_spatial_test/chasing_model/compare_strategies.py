@@ -70,8 +70,8 @@ SURVIVAL = np.array(
 )
 
 CONFIGS = [
-    {"name": "small", "arena": 15, "kernel_size": 7, "avd": 0.8, "ticks": 40, "reps": 20, "scale": 100.0},
-    {"name": "large", "arena": 31, "kernel_size": 11, "avd": 1.5, "ticks": 40, "reps": 10, "scale": 100.0},
+    {"name": "small", "arena": 15, "kernel_size": 7, "avd": 0.8, "ticks": 100, "reps": 20, "scale": 100.0},
+    {"name": "large", "arena": 31, "kernel_size": 11, "avd": 1.5, "ticks": 100, "reps": 10, "scale": 100.0},
 ]
 STRATEGIES = ("cpu", "m0", "m1")
 COLORS = {"cpu": "tab:blue", "m0": "tab:orange", "m1": "tab:green"}

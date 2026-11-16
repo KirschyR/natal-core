@@ -4,7 +4,7 @@
     "arena": 15,
     "kernel_size": 7,
     "avd": 0.8,
-    "ticks": 40,
+    "ticks": 100,
     "reps": 20,
     "scale": 100.0
   },
@@ -33,29 +33,29 @@
   "coverage": {
     "cpu": {
       "thr_0.1": {
-        "final_count_mean": 223.75,
-        "final_count_std": 1.8317377426626162
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
       },
       "thr_0.5": {
-        "final_count_mean": 168.7,
-        "final_count_std": 7.05691150575094
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
       },
       "thr_0.9": {
-        "final_count_mean": 0.0,
+        "final_count_mean": 225.0,
         "final_count_std": 0.0
       }
     },
     "m0": {
       "thr_0.1": {
-        "final_count_mean": 224.2,
-        "final_count_std": 1.3218806379747876
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
       },
       "thr_0.5": {
-        "final_count_mean": 167.35,
-        "final_count_std": 4.782368935117716
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
       },
       "thr_0.9": {
-        "final_count_mean": 0.0,
+        "final_count_mean": 225.0,
         "final_count_std": 0.0
       }
     },
@@ -69,7 +69,7 @@
         "final_count_std": 0.0
       },
       "thr_0.9": {
-        "final_count_mean": 0.0,
+        "final_count_mean": 225.0,
         "final_count_std": 0.0
       }
     }
@@ -78,80 +78,80 @@
     "cpu": {
       "final_mean": 9.899494936611664,
       "final_std": 1.8225036628030615e-15,
-      "mean_over_time": 1.472576353781683
+      "mean_over_time": 6.478666601007414
     },
     "m0": {
       "final_mean": 9.899494936611664,
       "final_std": 1.8225036628030615e-15,
-      "mean_over_time": 1.33549219560028
+      "mean_over_time": 6.423018576399122
     },
     "m1": {
       "final_mean": 9.899494936611664,
       "final_std": 1.8225036628030615e-15,
-      "mean_over_time": 1.4870807153144936
+      "mean_over_time": 6.484554510144496
     }
   },
   "total": {
     "cpu": {
-      "final_mean": 47081.48441929808,
-      "final_std": 130.271041800698,
-      "mean_over_time": 47230.681350388
+      "final_mean": 47195.944220859834,
+      "final_std": 110.09210076509274,
+      "mean_over_time": 47167.62192101155
     },
     "m0": {
-      "final_mean": 47239.14713735869,
-      "final_std": 124.86937438651943,
-      "mean_over_time": 47299.37488587249
+      "final_mean": 47211.19254053999,
+      "final_std": 111.60168562180077,
+      "mean_over_time": 47255.76889476565
     },
     "m1": {
-      "final_mean": 47138.34884123634,
-      "final_std": 140.81531296836775,
-      "mean_over_time": 47206.539919056406
+      "final_mean": 47100.422588010035,
+      "final_std": 103.32769368504127,
+      "mean_over_time": 47163.17337847247
     }
   },
   "drive_final_selected": {
     "cpu": [
-      0.8182504565131223,
-      0.7913713314829292,
-      0.7481544478858974,
-      0.6021266518986669,
-      0.7270902822886448
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
     ],
     "m0": [
-      0.802700089481139,
-      0.7783056934818401,
-      0.7461502831018888,
-      0.5721940306055161,
-      0.7050421278499355
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
     ],
     "m1": [
-      0.7505454947400023,
-      0.7512700093643776,
-      0.7506067012590875,
-      0.7185728049324068,
-      0.7417188928574756
+      1.0,
+      1.0,
+      1.0,
+      1.0,
+      1.0
     ]
   },
   "timing": {
     "cpu": {
-      "wall_seconds": 18.483263856731355,
-      "per_replicate_seconds": 0.9241631928365678,
-      "migration_seconds": 18.0317506166175,
+      "wall_seconds": 46.05770414508879,
+      "per_replicate_seconds": 2.3028852072544397,
+      "migration_seconds": 45.0236379513517,
       "reps": 20,
-      "ticks": 40
+      "ticks": 100
     },
     "m0": {
-      "wall_seconds": 2.1102625066414475,
-      "per_replicate_seconds": 0.10551312533207238,
-      "migration_seconds": 1.7034264542162418,
+      "wall_seconds": 4.826209944672883,
+      "per_replicate_seconds": 0.24131049723364412,
+      "migration_seconds": 3.926129164174199,
       "reps": 20,
-      "ticks": 40
+      "ticks": 100
     },
     "m1": {
-      "wall_seconds": 3.5158174326643348,
-      "per_replicate_seconds": 0.17579087163321674,
-      "migration_seconds": 3.074689124710858,
+      "wall_seconds": 8.618713017553091,
+      "per_replicate_seconds": 0.43093565087765456,
+      "migration_seconds": 7.667347790673375,
       "reps": 20,
-      "ticks": 40
+      "ticks": 100
     }
   },
   "html": "compare_strategies_small.html",

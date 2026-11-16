@@ -161,7 +161,16 @@
       "migration_seconds": 235.6120033664629,
       "reps": 100,
       "ticks": 100,
-      "jobs": 8
+      "jobs": 8,
+      "sequential": {
+        "wall_seconds": 2.303541624608139,
+        "migration_seconds": 2.254050260720154,
+        "seeds": [
+          0,
+          1,
+          2
+        ]
+      }
     },
     "m0": {
       "wall_seconds": 3.389285683631897,
@@ -169,7 +178,16 @@
       "migration_seconds": 21.16664265934378,
       "reps": 100,
       "ticks": 100,
-      "jobs": 8
+      "jobs": 8,
+      "sequential": {
+        "wall_seconds": 0.24082509024689594,
+        "migration_seconds": 0.19564347279568514,
+        "seeds": [
+          0,
+          1,
+          2
+        ]
+      }
     },
     "m1": {
       "wall_seconds": 6.038978009484708,
@@ -177,7 +195,16 @@
       "migration_seconds": 41.336251880042255,
       "reps": 100,
       "ticks": 100,
-      "jobs": 8
+      "jobs": 8,
+      "sequential": {
+        "wall_seconds": 0.426043433137238,
+        "migration_seconds": 0.37942940431336564,
+        "seeds": [
+          0,
+          1,
+          2
+        ]
+      }
     },
     "m2": {
       "wall_seconds": 6.59804951492697,
@@ -185,7 +212,16 @@
       "migration_seconds": 45.45749090332538,
       "reps": 100,
       "ticks": 100,
-      "jobs": 8
+      "jobs": 8,
+      "sequential": {
+        "wall_seconds": 0.46390516062577564,
+        "migration_seconds": 0.4163320753723383,
+        "seeds": [
+          0,
+          1,
+          2
+        ]
+      }
     }
   },
   "c2st": {

@@ -867,6 +867,35 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - **计时口径**：`wall_seconds` 是 `jobs=8` 的**并行墙钟**；`migration_seconds` 是**所有 replicate 的 migration 调用时间之和（CPU 时间）**。并行时墙钟 ≈ 总 CPU 时间 / workers，因此 **wall < migration 总和是正常的**。HTML 计时表已改为「wall s (parallel) / s per replicate / migration CPU-s (sum) / migration s per replicate」并加注。
 - 热图深色格子的数字改为自适应浅色/深色，避免深底黑字看不清。
 
+
+### 36.9 再澄清：计时口径与 p 的生物学含义
+
+**计时（R=100，jobs=8；最后两列为 3 个种子的顺序探针）**
+
+| config | strategy | par wall | par wall/reps | mig CPU sum | mig/reps | seq wall/rep | seq mig/rep |
+|---|---|---|---|---|---|---|---|
+| small | cpu | 31.27 | 0.313 | 235.61 | 2.356 | 2.304 | 2.254 |
+| small | m0 | 3.39 | 0.034 | 21.17 | 0.212 | 0.241 | 0.196 |
+| small | m1 | 6.04 | 0.060 | 41.34 | 0.413 | 0.426 | 0.379 |
+| small | m2 | 6.60 | 0.066 | 45.46 | 0.455 | 0.464 | 0.416 |
+| large | cpu | 273.91 | 2.739 | 2093.40 | 20.934 | 19.604 | 19.457 |
+| large | m0 | 8.56 | 0.086 | 50.27 | 0.503 | 0.583 | 0.455 |
+| large | m1 | 13.77 | 0.138 | 90.11 | 0.901 | 0.953 | 0.819 |
+| large | m2 | 13.12 | 0.131 | 84.74 | 0.847 | 0.909 | 0.773 |
+
+- 正确关系：`wall × jobs ≥ migration CPU-s (sum)`；`par wall/reps × jobs` 应和 `migration/reps` 比（small cpu 2.50 vs 2.36；large cpu 21.9 vs 20.9）。
+- **不要把 `s/replicate × jobs` 与 `migration CPU-s (sum)` 比**：后者是 100 次重复之和，量级差 R 倍。之前的“wall < migration”正是这个口径混用。
+- **顺序探针（同一时钟）确认 `seq wall ≥ seq mig`**：small cpu 2.304 ≥ 2.254；large cpu 19.604 ≥ 19.457；M0/M1/M2 亦然（见上表）。
+- 顺序探针只取 3 个种子，`seq mig` 与并行跑的 `mig/reps` 有约 7% 的种子/运行差异，属正常。
+
+**p 值的生物学含义**
+- p 是置换检验的**统计可检测性**，不是效应量或生物学重要性。20 次置换的 p 下限是 0.048；全为 0.048 只说明观测准确率高于所有零值（p<~0.05），**无法**区分 p=0.01 与 p=0.049。
+- 生物学判断应看：
+  1. **效应量**：accuracy/AUC（M2 0.58–0.59 / AUC 0.60–0.62；M0 0.77–0.92 / AUC 0.85–0.97）；
+  2. **下游 chasing 指标**（波前速度、覆盖率、共存时长、固定概率）与**预设生物学容差**的等价检验；
+  3. **样本量**：R=100 时很小的差异也可被检测；p 随 R 变，不是生物常量。
+- 结论：M2 在统计上仍“可检测”，但效应量小；是否“生物学可合并”取决于 chasing 指标是否在容差内。M0 的方差差异更大，可能具有生物学相关性。**非显著 p 也不证明等价**，需 TOST/等价检验。
+
 ---
 
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）

@@ -764,11 +764,15 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict,
           c2st_png: Path, c2st_table: str) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
     c2st_uri = base64.b64encode(c2st_png.read_bytes()).decode("ascii")
+    def _seq(s, key):
+        return timing[s].get("sequential", {}).get(key)
     timing_rows = "".join(
         f"<tr><td>{s}</td><td>{timing[s]['wall_seconds']:.2f}</td>"
         f"<td>{timing[s]['per_replicate_seconds']:.3f}</td>"
         f"<td>{timing[s]['migration_seconds']:.2f}</td>"
-        f"<td>{timing[s]['migration_seconds'] / max(timing[s].get('reps', 1), 1):.3f}</td></tr>"
+        f"<td>{timing[s]['migration_seconds'] / max(timing[s].get('reps', 1), 1):.3f}</td>"
+        f"<td>{_seq(s, 'wall_seconds'):.3f}</td>"
+        f"<td>{_seq(s, 'migration_seconds'):.3f}</td></tr>"
         for s in DISPLAY if s in timing
     )
     meta = next(iter(timing.values()))
@@ -777,9 +781,9 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict,
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
-<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks, {meta.get('jobs', 1)} workers (NumPy/CPU). wall = parallel elapsed; migration CPU-s = sum over replicates (so wall can be smaller when workers &gt; 1). M1 is computed but omitted from this display.</h4>
+<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks, {meta.get('jobs', 1)} workers (NumPy/CPU). parallel wall = elapsed; migration CPU-s = sum over ALL replicates (compare it to wall x workers, NOT to s/replicate x workers). The last two columns are a 3-replicate sequential probe (same clock), so wall &gt;= migration there. M1 is computed but omitted from this display.</h4>
 <table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
-<tr><th>strategy</th><th>wall s (parallel)</th><th>s / replicate</th><th>migration CPU-s (sum)</th><th>migration s / replicate</th></tr>
+<tr><th>strategy</th><th>wall s (parallel)</th><th>parallel s / replicate</th><th>migration CPU-s (sum)</th><th>migration s / replicate</th><th>sequential wall s / replicate</th><th>sequential migration s / replicate</th></tr>
 {timing_rows}
 </table>
 <img id="frame" src="data:image/png;base64,{frames[0]}">
@@ -860,6 +864,17 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
             "reps": cfg["reps"],
             "ticks": cfg["ticks"],
             "jobs": jobs,
+        }
+        probe_wall, probe_mig = [], []
+        for seed in (0, 1, 2):
+            t0 = time.perf_counter()
+            r = run_replicate(strategy, cfg, seed, selected, tensor, csr, kernel)
+            probe_wall.append(time.perf_counter() - t0)
+            probe_mig.append(r["migration_seconds"])
+        timing[strategy]["sequential"] = {
+            "wall_seconds": float(np.mean(probe_wall)),
+            "migration_seconds": float(np.mean(probe_mig)),
+            "seeds": [0, 1, 2],
         }
         per_strategy[strategy] = {
             "drive": np.stack([r["drive"] for r in reps]),

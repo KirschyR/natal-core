@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 from pathlib import Path
 
 import numpy as np
@@ -31,8 +32,24 @@ for name in ("small", "large"):
     c2st = {"methods": methods, "accuracy": acc.tolist(), "auc": auc.tolist(), "p": pval.tolist()}
     (out / "c2st.json").write_text(json.dumps(c2st, indent=2), encoding="utf-8")
     summary["c2st"] = c2st
+    kernel = v3.hex_gaussian(cfg["kernel_size"], cfg["avd"])
+    csr = v3.build_csr(cfg["arena"], cfg["arena"], kernel)
+    tensor = v3.homing_tensor()
     for s in summary["timing"]:
         summary["timing"][s]["jobs"] = 8
+        if "sequential" in summary["timing"][s]:
+            continue
+        walls, migs = [], []
+        for seed in (0, 1, 2):
+            t0 = time.perf_counter()
+            rep = v3.run_replicate(s, cfg, seed, summary["selected_demes"], tensor, csr, kernel)
+            walls.append(time.perf_counter() - t0)
+            migs.append(rep["migration_seconds"])
+        summary["timing"][s]["sequential"] = {
+            "wall_seconds": float(sum(walls) / len(walls)),
+            "migration_seconds": float(sum(migs) / len(migs)),
+            "seeds": [0, 1, 2],
+        }
     (out / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
 
     html_path = HTML / f"compare_strategies_v3_{name}.html"

@@ -885,7 +885,9 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
     line_png = out_dir / "selected_demes.png"
     line_plot(mean, std, cfg["ticks"], selected, line_png)
 
-    mean_fields = {s: per_strategy[s]["fields"].mean(axis=0) for s in STRATEGIES}
+    mean_fields = {
+        s: per_strategy[s]["fields"][:5].mean(axis=0) for s in STRATEGIES
+    }
     frames = render_frames(mean_fields, rows, cols, cfg["name"])
 
     ticks = [max(1, cfg["ticks"] // 4), cfg["ticks"] // 2, 3 * cfg["ticks"] // 4, cfg["ticks"]]

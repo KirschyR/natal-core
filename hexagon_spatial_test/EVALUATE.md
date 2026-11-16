@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §27（§26 计划评审）= **NOT APPROVED**（仅计划文本修订，未涉产品代码） |
-| 待回执 | §28→§29；§30→§31；§32→§33；§34→§35；§36→§37（C2ST + R=100） |
-| 主 agent 处理 | M5 收尾；chasing 计划 v3；§30 确定性对照；§32 三策略比较；**§34 完成 M2（CPU/M0/M1/M2）、新 deme 选择；v1 结果已归档** |
-| 待 evaluator 动作 | 复核 §28/§30/§32/§34/§36 |
+| 最近回执 | §29/§31/§33/§35/§37 = **APPROVED（含非阻断 findings）**；§27 的计划 NOT APPROVED 已由 PLAN v3 闭环 |
+| 待回执 | —（下一阶段 S1/S2 或跨引擎校验另立 §38→§39） |
+| 主 agent 处理 | §28–§36 已提交并复核（PLAN v3、§30 确定性对照、§32 三策略、§34 M2、§36 C2ST）；按回执非阻断 findings 修订文档/口径；下一步 S1/S2 或跨引擎校验 |
+| 待 evaluator 动作 | —（下一交接后复核） |
 
 ---
 
@@ -2077,3 +2077,164 @@ reproduction→survival→aging（`rust/src/kernels/age_structured.rs:1087-1088`
 
 > 审查期间未改任何产品源码、`.gitignore` 或数据；仅追加本回执。工作树在追加前 clean，追加后仅
 > `hexagon_spatial_test/EVALUATE.md` 有本回执改动，未 commit/push。
+
+## §29 — §28 PLAN v2/v3 复核回执（evaluator）
+
+### 29.0 裁定
+
+**APPROVED（计划文本；附非阻断 notes）**
+
+- 审查对象：`hexagon_spatial_test/chasing_model/PLAN.md` v3（§28 + §28.5）。§27 的 F1–F8 已闭环：
+  - F1：`PLAN.md:5`/`:25`/`:78` 明确随机实验用 CPU CSR；route A/`fft` 仅确定性，stochastic 产品化另走根
+    `EVALUATE.md`；S5 改为 101×101 CPU CSR（route A 仅确定性对照）。与 §27.1 的引擎事实一致（`fft` 拒
+    stochastic；`size=7` CSR 行宽 48 > 32）。
+  - F2：`PLAN.md:55` 明确 `scaling_factor s` 同时乘初始年龄向量与 `age_1_carrying_capacity`，并记录
+    `s/K/expected_comp`；与 §27.1 的 `expected_comp=42.222`、`expected_survival_rate=1/90` 自洽。
+  - F3：`PLAN.md:60-62` 增加成功/失败判据（`N_coexist`/`N_stall`）与 fallback。
+  - F4：`PLAN.md:49` 钉死 5 型（等位 `[WT,Drive,Res]`，carrier=`{dd,dw,dr}`），复用 M1 映射。
+  - F5：`PLAN.md:10` 写为 R-S-A → migration（tick 末尾）。
+  - F6/F7/F8：`PLAN.md:48` burn-in + 排除 age0；`:92` 逐 tick `record_every=0` 只存 per-deme 频率；
+    `:93` 统一 JSON。
+- 非阻断 notes（建议在主 agent 下一轮文档修订中处理）：
+  1. `PLAN.md:33` 仍写 `results/routeA_deterministic.json`；§30 实际产物是
+     `results/deterministic_compare/summary.json`，请更新。
+  2. `PLAN.md:78` 的 S5 “CPU CSR 与 route A 各自” 对 stochastic 仍有歧义：route A 随机尚未产品化，
+     建议写成 “random = CPU CSR；route A = deterministic-only 对照 / 脚本原型”。
+  3. `PLAN.md:60` “前沿半径随时间严格增长” 对随机模型过强；建议与 `:61` 的 `N_stall` 对齐，改为
+     “窗口内趋势增长/不降”的统计判据。
+  4. §2 的 5 型 homing 与 §30/§32/§34/§36 的 3 型最小原型不同；建议在 PLAN 明示 “V1/V2/V3 原型可用 3 型
+     最小模型，S1+ chasing 用 5 型”，避免读者误以为已有结果覆盖 5 型。
+- 残余：homing chasing 仍待 S1/S2 验证；F3 的决策门已写入计划，非阻断。
+
+## §31 — §30 确定性 route A 复核回执（evaluator）
+
+### 31.0 裁定
+
+**APPROVED（数值结论可复现；附非阻断文档修订）**
+
+### 31.1 独立证据
+
+- 独立导入 `verify_routeA_deterministic.py`，只跑 `a15_k7_avd0.8`（40 tick，CPU + GPU + FFT repeat）：
+  `non_egg_max_rel=3.9487902407915926e-07`、`adult_max_rel=4.720489622492812e-07`、
+  `carrier_max_abs=2.3598730602980567e-07`、`final_per_deme_carrier_abs=3.0843980290962136e-06`、
+  `final_state_max_abs=7.944858966268953e-07`、`fft_repeat_bit_identical=true`；与
+  `results/deterministic_compare/summary.json` 的 a15 条目逐值一致。
+- `summary.json` 与 §30.2 表格一致：4/4 配置 `all_passed=true`；`non_egg/adult rel ≤4.8e-7`、
+  `carrier abs ≤2.2e-6`、`final state abs ≤2.9e-5`、FFT repeat 全 true。
+- 初始/释放代码与 §30.1/§30.1b 一致：`age0=0`、uniform WT、仅雄 `Drive|Drive` age2、中心圆 r=3、
+  `0.5×age2 WT 雄`；`verify_routeA_deterministic.py` 的 HTML 文本（:346）也写 homozygous。
+
+### 31.2 非阻断 findings
+
+- **F1（文档）**：`verify_routeA_deterministic.py:74/79` 的 docstring 写 “heterozygous `WT|Drive`”，但代码
+  （`initial_states`，约 :105）与 §30.1/HTML 都是 **homozygous `Drive|Drive`**；修正 docstring。
+- **F2（文档）**：`:175` 与 figure suptitle `:291` 仍说 “tick 0 all-age total includes the initial age-0 egg
+  pool”，但本脚本初始 `age0=0`，§30.1b 已说明无此瞬态；删除或改写。
+- **F3（数值文本）**：§30.2 `EVALUATE.md:638` 说 a31 的绝对差 “仅 5.1e-5”，但同表 `:634` 与
+  `summary.json` 是 `2.88e-5`；统一为 `2.88e-5`。
+- **F4（低）**：只检查了 FFT 重复逐位；CPU CSR 重复未做逐位检查。可补一次 CPU 重复，或在报告中说明
+  确定性 CPU 单次结果即为基准。
+- **F5（范围）**：3 型最小模型、无 hooks；§30.5#5 已披露，非阻断。V1 不覆盖 5 型/随机/hooks+fft。
+
+## §33 — §32 三策略 v1 复核回执（evaluator）
+
+### 33.0 裁定
+
+**APPROVED（描述性比较数值可复现；附使用前需澄清项）**
+
+### 33.1 独立证据
+
+- 从 `results/strategies_v1/{small,large}/series.npz` 独立复算（selected deme 平均）：
+  - small `drive@t40`：cpu `0.7374±0.0238`、m0 `0.7209±0.0242`、m1 `0.7425±0.0239`；
+    `T50_selected` `35.95/36.25/36.05`；`T50_cov(0.5)` `37.65/37.60/36.70`。
+  - large `drive@t40`：cpu `0.3423±0.0207`、m0 `0.3332±0.0279`、m1 `0.2377±0.0327`；
+    `T50_selected` `44.2/44.4/45.0`；`T50_cov(0.5)` `47.4/47.5/45.3`。
+  - 与 §32.2/§32.3 表一致；100 tick 终态三策略均固定（coverage=全场，front=角落距离）。
+- `summary.json` 的 coverage/front/total/timing 与 §32.2/§32.7 一致。
+- 独立调用当前 `compare_strategies.py::run_replicate`（small，seed=0，cpu/m0/m1）：`drive/non_egg/front/total`
+  与 `series.npz` 对应 seed 的 **max abs=0.0**，说明归档数据可由当前脚本逐位复现。
+
+### 33.2 非阻断 findings
+
+- **F1（中，模型语义）**：`compare_strategies.py:192-206` 用 `_v_poisson` 生成总卵数，但 `PLAN.md:51`
+  设定 `fixed_egg_count=True`；natal 在该开关下对每个交配对返回**确定**的 `total_lambda`
+  （`rust/src/kernels/age_structured.rs:311-320`），不做 Poisson。原型还绕过 mating/sperm，用成虫基因型
+  频率直接算后代。故 “CPU” 是 **NumPy 简化生命周期**，不是 natal 引擎；报告 §32.5#5 已说未做跨引擎校验，
+  但应显式写出 “Poisson 卵数 vs fixed_egg_count=True” 的差异，并在跨引擎校验前不要把它当作 natal CPU
+  参考。该差异对三策略共享，故不推翻“策略间瞬态差异”的比较结论。
+- **F2（中，指标）**：`record()`（`:418-425`）用索引空间欧氏距离
+  `sqrt((r-c)^2+(s-c)^2)` 计算 front，不是六边形度量；`event-seq` HANDOFF §3.2 已警告这会拉伸/扭曲波前。
+  三策略共用同一 front，故相对比较仍成立，但 §32.2 的“front=9.9/21.2”与 C2ST 的 front 特征应标为
+  “index-space”或改用 hex 度量。
+- **F3（低，carrier 定义）**：`record()` 用 `drive`（`dd`）算 coverage/front，而 `PLAN.md:60` 写
+  `carrier`；`compare_strategies.py:54` 的 `CARRIER=(1,2)` 未被 `record` 使用。请明确 “dd 作为保守代理”
+  或改用 carrier。
+- **F4（低，配对）**：`rng_life`/`rng_mig` 分离正确（`:442-443`），但“共享 lifecycle 噪声”只是同
+  seed/同流；迁移差异导致状态分叉后，lifecycle 抽样序列也会分叉，配对降方差是部分的，不是严格 CRN。
+  报告措辞宜改为 “same seed/stream”。
+- **F5（低，路径）**：脚本写 `results/strategies` 与 `compare_strategies_{small,large}.html`（`:38-39`、
+  `:644`），归档路径却是 `results/strategies_v1/` 与 `compare_strategies_v1_*`；请补 `--out` 或记录归档
+  `mv` 步骤，否则复跑不会落到归档路径。
+
+## §35 — §34 M2 复核回执（evaluator）
+
+### 35.0 裁定
+
+**APPROVED（M2 原型数值可复现；附需补充的全局误差证据）**
+
+### 35.1 独立证据
+
+- 从 `results/strategies_v2_r20_r10/{small,large}/series.npz` 复算 `drive@t40` 均值/SD，与 §34.3 表逐值
+  一致（large m2 `0.549/0.412/0.151/0.062`；small m2 `0.808/0.763/0.651/0.566` 等）。
+- 独立调用当前 `compare_strategies_m2.py::run_replicate`（small，seed=0，cpu/m0/m1/m2）：`drive/non_egg/front/total`
+  与 v2 `series.npz` 对应 seed 的 **max abs=0.0**。
+- 独立守恒检查（15×15，kernel 7，rate=1，单平面，CPU/M0/M1/M2 各一次，相同初始场）：
+  `total before == after`，相对差 `0.0`（四策略全局总量均守恒）。
+- 独立 M2 平均场检查（15×15，kernel 7，rate=1，R=200，单 tick）：M2 vs CPU 平均场
+  `max rel = 5.82%`、`median rel = 1.42%`（总均值相同）。→ 全局局部均值并非无偏；报告未给该指标。
+
+### 35.2 非阻断 findings
+
+- **F1（中，守恒口径）**：M2 的 `tb ~ Gamma(mb)` + 全局 `total/Σtb` 缩放（`:422-467`）保证的是
+  **全局总量**守恒，不是 per-source 守恒；`§34.6#1` 的“是否守恒”应写明“global only”，并说明块间可
+  搬移质量。
+- **F2（中，缺失指标）**：上述 `max rel 5.82% / median 1.42%` 的平均场误差未报告；§34.3 的 selected
+  deme 均值会掩盖局部偏差。建议在 §34 增加 per-deme mean-field max/median rel diff（至少 1 tick），
+  并报告块大小敏感性。
+- **F3（低）**：块大小固定为 kernel 直径（7/11），未扫；§34.2/§34.7 已承认，非阻断。
+- **F4（低，模型范围）**：仍为 3 型最小原型；PLAN v3 §2 的 chasing 模型是 5 型。建议在 §34/§36 明示。
+- **F5（低，路径）**：脚本写 `results/strategies_v2`（`:38`），归档是 `results/strategies_v2_r20_r10/`；
+  补 `--out` 或记录归档步骤。
+
+## §37 — §36 C2ST 复核回执（evaluator）
+
+### 37.0 裁定
+
+**APPROVED（C2ST 数值/热图可复现；附统计口径说明）**
+
+### 37.1 独立证据
+
+- 从 `results/strategies_v3/{small,large}/series.npz` 重建 `_feature_matrix` 并调用
+  `_c2st_matrices(seed=0)`：与 `c2st.json`/`summary.json` 的 accuracy/AUC/p **max abs diff = 0.0**
+  （small/large 均如此）；对角线 self-split 复现 small `0.458/0.432/0.538`、large `0.426/0.568/0.522`。
+- 特征敏感性：去掉 `front` 特征后，`m2 vs cpu` accuracy/AUC 不变
+  （small `0.581/0.6184`；large `0.591/0.6042`），说明 §33 F2 的 index-space front 不驱动该结论。
+- 热图下三角/对角线屏蔽与 `_plot_c2st`（`:747-760`）一致；`c2st.json` 与 HTML 的 `acc (AUC)` 一致。
+- 独立调用当前 `compare_strategies_v3.py::run_replicate`（small，seed=0，cpu/m0/m1/m2）：`drive/non_egg/front/total`
+  与 v3 `series.npz` 对应 seed 的 **max abs=0.0**。
+
+### 37.2 非阻断 findings
+
+- **F1（中，置换检验）**：`_c2st_pair`（`:706-718`）观测统计用 `_cv_scores(..., repeats=5)`（`:709`），
+  但置换零分布用 `repeats=2`（`:714`）。严格置换检验应让零分布与观测统计使用同一 CV 管线；当前 p 值
+  可比性略弱（p 分辨率 0.048 已在 §36.8 说明）。建议统一 repeats 或明确记录该差异。
+- **F2（低）**：`front` 特征沿用 §33 F2 的 index-space 度量；本次 no-front 检查显示不影响结论，但仍应
+  修正或标注。
+- **F3（低，模型范围）**：仍为 3 型最小原型；PLAN v3 的 chasing 用 5 型。建议在 §36.1/§36.6 明示。
+- **F4（低）**：对角线 self-split 用半样本（R=100 → 50/50），pairwise 用 100/100，不可直接比较；
+  报告已说明对角线仅作 null 检查，非阻断。
+- **F5（低）**：特征集/分类器敏感性未做；§36.7 已列为残余。R=100、置换 20 次；p 只作可检测性，
+  effect size 优先的解读正确。
+
+> 本轮仅复核复现计划/脚本/归档结果，未运行产品全量门禁（未触产品代码）；数值证据均来自当前工作树
+> 的归档 `summary.json`/`series.npz` 与独立小范围复跑。未 commit/push。

@@ -550,7 +550,7 @@ def _html(frames: list[str], line_png: Path, title: str) -> str:
 <script>
 const frames=[{','.join(f'"{f}"' for f in frames)}];let i=0,timer=null;
 const img=document.getElementById('frame'),sl=document.getElementById('slider'),lbl=document.getElementById('lbl');
-function show(k){{i=k;img.src=frames[i];sl.value=i;lbl.textContent='tick '+i;}}
+function show(k){{i=k;img.src='data:image/png;base64,'+frames[i];sl.value=i;lbl.textContent='tick '+i;}}
 sl.oninput=()=>show(+sl.value);
 document.getElementById('play').onclick=function(){{if(timer){{clearInterval(timer);timer=null;this.textContent='Play';}}else{{this.textContent='Pause';timer=setInterval(()=>show((i+1)%frames.length),300);}}}};
 </script></body></html>"""

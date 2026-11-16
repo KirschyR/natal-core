@@ -714,6 +714,22 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - M1 边界/非均匀未精修（用户暂缓）；截断+重归一化是权宜。
 - `scale=100` 未做敏感性扫描；未测 chasing 指标（共存/前沿持续性）。
 
+
+### 32.7 计时（全部 tick × R 次重复；NumPy/CPU）
+
+| config | strategy | wall s | s/replicate | migration-only s |
+|---|---|---|---|---|
+| small (R=20) | cpu | 18.48 | 0.924 | 18.03 |
+| small (R=20) | m0 | 2.11 | 0.106 | 1.70 |
+| small (R=20) | m1 | 3.52 | 0.176 | 3.07 |
+| large (R=10) | cpu | 78.93 | 7.893 | 78.33 |
+| large (R=10) | m0 | 2.34 | 0.234 | 1.83 |
+| large (R=10) | m1 | 3.89 | 0.389 | 3.30 |
+
+- 环境：本机 CPU（NumPy 实现）；**M0/M1 用 NumPy FFT，不是 GPU**。确定性 route A 的 GPU 计时是另一条线。
+- CPU CSR 主导耗时（逐行循环）；M0/M1 的 FFT 实现快约 8–35×（large 约 34×）。
+- HTML 已加入该计时表；`summary.json` 的 `timing` 字段含同数据。
+
 ---
 
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）

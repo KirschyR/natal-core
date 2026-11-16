@@ -20,6 +20,7 @@ import argparse
 import base64
 import io
 import json
+import time
 from pathlib import Path
 
 import matplotlib
@@ -451,6 +452,7 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
     front = np.zeros(ticks + 1)
     total = np.zeros(ticks + 1)
     fields = np.zeros((ticks + 1, rows, cols))
+    migration_seconds = 0.0
 
     def capture(t: int) -> None:
         rec = record(data, selected)
@@ -468,12 +470,14 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
         event_r(data, newborns, rng_life)
         event_s(data, density_ref, rng_life)
         event_a(data)
+        t0 = time.perf_counter()
         if strategy == "cpu":
             cpu_migrate(data, csr, MIGRATION_RATE, rng_mig)
         elif strategy == "m0":
             m0_migrate(data, kernel, MIGRATION_RATE, rng_mig)
         else:
             m1_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+        migration_seconds += time.perf_counter() - t0
         capture(t)
     return {
         "drive": drive,
@@ -483,6 +487,7 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
         "front": front,
         "total": total,
         "fields": fields,
+        "migration_seconds": migration_seconds,
     }
 
 
@@ -534,13 +539,25 @@ def render_frames(mean_fields: dict[str, np.ndarray], rows: int, cols: int, titl
     return frames
 
 
-def _html(frames: list[str], line_png: Path, title: str) -> str:
+def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
+    timing_rows = "".join(
+        f"<tr><td>{s}</td><td>{t['wall_seconds']:.2f}</td>"
+        f"<td>{t['per_replicate_seconds']:.3f}</td>"
+        f"<td>{t['migration_seconds']:.2f}</td></tr>"
+        for s, t in timing.items()
+    )
+    meta = next(iter(timing.values()))
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>{title}</title>
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
+<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks (all strategies are NumPy/CPU; M0/M1 use NumPy FFT)</h4>
+<table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
+<tr><th>strategy</th><th>wall seconds</th><th>seconds / replicate</th><th>migration seconds</th></tr>
+{timing_rows}
+</table>
 <img id="frame" src="data:image/png;base64,{frames[0]}">
 <div id="bar"><button id="play">Play</button>
 <input id="slider" type="range" min="0" max="{len(frames)-1}" value="0">
@@ -591,9 +608,20 @@ def run_config(cfg: dict) -> dict:
     tensor = homing_tensor()
     selected = select_demes(rows, cols)
     per_strategy = {}
+    timing = {}
     for strategy in STRATEGIES:
+        t0 = time.perf_counter()
         reps = [run_replicate(strategy, cfg, seed, selected, tensor, csr, kernel)
                 for seed in range(cfg["reps"])]
+        wall = time.perf_counter() - t0
+        migration = sum(r["migration_seconds"] for r in reps)
+        timing[strategy] = {
+            "wall_seconds": wall,
+            "per_replicate_seconds": wall / cfg["reps"],
+            "migration_seconds": migration,
+            "reps": cfg["reps"],
+            "ticks": cfg["ticks"],
+        }
         per_strategy[strategy] = {
             "drive": np.stack([r["drive"] for r in reps]),
             "non_egg": np.stack([r["non_egg"] for r in reps]),
@@ -615,7 +643,7 @@ def run_config(cfg: dict) -> dict:
     frames = render_frames(mean_fields, rows, cols, cfg["name"])
     html = HTML_DIR / f"compare_strategies_{cfg['name']}.html"
     HTML_DIR.mkdir(parents=True, exist_ok=True)
-    html.write_text(_html(frames, line_png, f"strategies: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})"), encoding="utf-8")
+    html.write_text(_html(frames, line_png, f"strategies: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})", timing), encoding="utf-8")
 
     def summarize(arr: np.ndarray) -> dict:
         return {
@@ -642,6 +670,7 @@ def run_config(cfg: dict) -> dict:
         "drive_final_selected": {
             s: [float(mean[s]["drive"][-1, d]) for d in range(len(selected))] for s in STRATEGIES
         },
+        "timing": timing,
         "html": html.name,
         "line_plot": line_png.name,
     }

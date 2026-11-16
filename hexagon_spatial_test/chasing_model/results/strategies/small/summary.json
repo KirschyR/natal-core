@@ -131,6 +131,29 @@
       0.7417188928574756
     ]
   },
+  "timing": {
+    "cpu": {
+      "wall_seconds": 18.483263856731355,
+      "per_replicate_seconds": 0.9241631928365678,
+      "migration_seconds": 18.0317506166175,
+      "reps": 20,
+      "ticks": 40
+    },
+    "m0": {
+      "wall_seconds": 2.1102625066414475,
+      "per_replicate_seconds": 0.10551312533207238,
+      "migration_seconds": 1.7034264542162418,
+      "reps": 20,
+      "ticks": 40
+    },
+    "m1": {
+      "wall_seconds": 3.5158174326643348,
+      "per_replicate_seconds": 0.17579087163321674,
+      "migration_seconds": 3.074689124710858,
+      "reps": 20,
+      "ticks": 40
+    }
+  },
   "html": "compare_strategies_small.html",
   "line_plot": "selected_demes.png"
 }

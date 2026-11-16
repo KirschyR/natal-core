@@ -905,6 +905,13 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - 值（wall / migration，秒/replicate）：small cpu `0.313 / 0.295`，m0 `0.034 / 0.026`，m1 `0.060 / 0.052`，m2 `0.066 / 0.057`；large cpu `2.739 / 2.617`，m0 `0.086 / 0.063`，m1 `0.138 / 0.113`，m2 `0.131 / 0.106`。均满足 wall ≥ migration。
 - C2ST 表**移除 permutation p**（p 仍是置换下限 0.048，非生物学量；仍保存在 `c2st.json`/`summary.json`）；HTML 只显示 accuracy/AUC + 下三角热图（对角线 self-split ≈0.5）。
 
+
+### 36.11 HTML C2ST 展示：AUC 并入热图（2026-11-16）
+- 下三角热图每格改为 **`accuracy (AUC)`**；颜色仍表示 accuracy；对角线为 self-split。
+- 移除单独的 C2ST 表格；permutation p 仍保存在 `c2st.json` / `summary.json`。
+- 示例：large `m2 vs cpu = 0.591 (0.604)`、`m0 vs cpu = 0.920 (0.974)`；small `m2 vs cpu = 0.581 (0.618)`。
+- 代码：`compare_strategies_v3.py::_plot_c2st` 现在同时接收 `acc` 与 `auc`；HTML 只嵌入热图。
+
 ---
 
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）

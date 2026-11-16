@@ -28,7 +28,7 @@ for name in ("small", "large"):
     methods = list(v3.DISPLAY)
     acc, auc, pval = v3._c2st_matrices(feats, methods)
     c2st_png = out / "c2st.png"
-    v3._plot_c2st(acc, methods, c2st_png)
+    v3._plot_c2st(acc, auc, methods, c2st_png)
     c2st = {"methods": methods, "accuracy": acc.tolist(), "auc": auc.tolist(), "p": pval.tolist()}
     (out / "c2st.json").write_text(json.dumps(c2st, indent=2), encoding="utf-8")
     summary["c2st"] = c2st
@@ -58,15 +58,9 @@ for name in ("small", "large"):
     frames = json.loads("[" + m.group(1) + "]")
     m2 = re.search(r'<h3>Selected demes.*?</h3>\s*<img src="data:image/png;base64,([^"]+)"', html, re.S)
     (out / "selected_demes.png").write_bytes(base64.b64decode(m2.group(1)))
-    c2st_table = "".join(
-        f"<tr><td>{methods[i]} vs {methods[j]}</td><td>{acc[i, j]:.2f}</td>"
-        f"<td>{auc[i, j]:.2f}</td></tr>"
-        for i in range(len(methods))
-        for j in range(i)
-    )
     title = f"strategies v3: {name} ({cfg['arena']}x{cfg['arena']}, k{cfg['kernel_size']}, avd={cfg['avd']:g})"
     html_path.write_text(
-        v3._html(frames, out / "selected_demes.png", title, summary["timing"], c2st_png, c2st_table),
+        v3._html(frames, out / "selected_demes.png", title, summary["timing"], c2st_png),
         encoding="utf-8",
     )
     print(name, "diag", [round(acc[i, i], 3) for i in range(len(methods))],

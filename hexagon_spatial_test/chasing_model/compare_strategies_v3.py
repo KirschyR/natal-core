@@ -738,7 +738,7 @@ def _c2st_matrices(feats, methods, seed=0):
     return acc, auc, pval
 
 
-def _plot_c2st(acc, methods, out):
+def _plot_c2st(acc, auc, methods, out):
     n = len(methods)
     mask = np.triu(np.ones((n, n)), k=1).astype(bool)
     data = np.ma.masked_where(mask, acc)
@@ -751,17 +751,17 @@ def _plot_c2st(acc, methods, out):
         for j in range(i + 1):
             rgba = im.cmap(norm(acc[i, j]))
             lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
-            ax.text(j, i, f"{acc[i, j]:.2f}", ha="center", va="center",
-                    fontsize=9, color=("white" if lum < 0.5 else "black"))
-    fig.colorbar(im, ax=ax, label="C2ST accuracy (0.5 = indistinguishable)")
-    ax.set_title("C2ST (lower triangle)")
+            ax.text(j, i, f"{acc[i, j]:.2f}\n({auc[i, j]:.2f})", ha="center", va="center",
+                    fontsize=8.5, color=("white" if lum < 0.5 else "black"))
+    fig.colorbar(im, ax=ax, label="accuracy (0.5 = indistinguishable); cell = acc (AUC)")
+    ax.set_title("C2ST: accuracy (AUC), lower triangle")
     fig.tight_layout()
     fig.savefig(out, dpi=150)
     plt.close(fig)
 
 
 def _html(frames: list[str], line_png: Path, title: str, timing: dict,
-          c2st_png: Path, c2st_table: str) -> str:
+          c2st_png: Path) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
     c2st_uri = base64.b64encode(c2st_png.read_bytes()).decode("ascii")
     timing_rows = "".join(
@@ -788,11 +788,8 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict,
 <h3>Selected demes: drive fraction / non-egg population / juvenile fraction (mean +/- 1 SD)</h3>
 <img src="data:image/png;base64,{line_uri}">
 <h3>C2ST: are the two methods' replicate distributions separable? (lower triangle; 0.5 = indistinguishable)</h3>
+<p>Each cell = accuracy (AUC); color = accuracy; diagonal = self-split. Permutation p is in <code>c2st.json</code>/<code>summary.json</code>.</p>
 <img src="data:image/png;base64,{c2st_uri}">
-<table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
-<tr><th>pair</th><th>accuracy</th><th>AUC</th></tr>
-{c2st_table}
-</table>
 <script>
 const frames=[{','.join(f'"{f}"' for f in frames)}];let i=0,timer=null;
 const img=document.getElementById('frame'),sl=document.getElementById('slider'),lbl=document.getElementById('lbl');
@@ -896,15 +893,7 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
     methods = list(DISPLAY)
     c2st_acc, c2st_auc, c2st_p = _c2st_matrices(feats, methods)
     c2st_png = out_dir / "c2st.png"
-    _plot_c2st(c2st_acc, methods, c2st_png)
-    c2st_rows = []
-    for i in range(len(methods)):
-        for j in range(i):
-            c2st_rows.append((methods[i], methods[j], c2st_acc[i, j], c2st_auc[i, j], c2st_p[i, j]))
-    c2st_table = "".join(
-        f"<tr><td>{a} vs {b}</td><td>{ac:.2f}</td><td>{au:.2f}</td></tr>"
-        for a, b, ac, au, p in c2st_rows
-    )
+    _plot_c2st(c2st_acc, c2st_auc, methods, c2st_png)
     (out_dir / "c2st.json").write_text(
         json.dumps({"methods": methods, "accuracy": c2st_acc.tolist(),
                     "auc": c2st_auc.tolist(), "p": c2st_p.tolist()}, indent=2),
@@ -913,7 +902,7 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
 
     html = HTML_DIR / f"compare_strategies_v3_{cfg['name']}.html"
     HTML_DIR.mkdir(parents=True, exist_ok=True)
-    html.write_text(_html(frames, line_png, f"strategies v3: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})", timing, c2st_png, c2st_table), encoding="utf-8")
+    html.write_text(_html(frames, line_png, f"strategies v3: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})", timing, c2st_png), encoding="utf-8")
 
     def summarize(arr: np.ndarray) -> dict:
         return {

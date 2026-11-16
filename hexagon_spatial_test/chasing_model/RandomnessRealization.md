@@ -667,3 +667,164 @@ $$
 4. **工程上**把“迁移率”与“核权重”解耦，天然适配 CSR 行、逐源守恒与实数计数。
 
 它不是某个唯一数学极限，但它是**有明确依据、与离散个体模型逐阶段对应**的连续松弛。
+
+---
+
+## 附录 D：用 C2ST 检验两种策略是否「可混淆」
+
+### D.0 符号表（本附录新增）
+
+| 符号 | 含义 |
+|---|---|
+| \(A,B\) | 两种待比较的随机迁移策略 |
+| \(R\) | 每种策略的独立重复次数 |
+| \(q\) | 特征向量维数 |
+| \(\phi_i\in\mathbb R^q\) | 第 \(i\) 次重复的特征向量 |
+| \(\mathbb R^q\) | \(q\) 维实向量空间 |
+| \(\phi_i^A,\phi_j^B\) | 策略 \(A\) 的第 \(i\) 个、\(B\) 的第 \(j\) 个特征向量 |
+| \(T\) | 一次模拟的总 tick 数 |
+| \(t\) | tick 指标 |
+| \(g\) | deme 指标 |
+| \(\tau\) | 覆盖阈值 |
+| \(\text{drive}_g(t)\) | tick \(t\)、deme \(g\) 的 drive fraction |
+| \(\text{coverage}_\tau(t)\) | 阈值 \(\tau\) 下被覆盖的 deme 数 |
+| \(\text{front}(t)\) | tick \(t\) 的前沿半径 |
+| \(\text{total}(t)\) | tick \(t\) 的非卵总量 |
+| \(\overline{\text{drive}}_g\) | deme \(g\) 的 drive fraction 时间均值 |
+| \(\mathrm{SD}_t(\text{drive}_g)\) | 其时间标准差 |
+| \(T_{50}\) | 首次达到 0.5 的 tick |
+| \(X_A,X_B\) | 两组特征样本（各 \(R\) 个） |
+| \(X\) | 池化样本 \(X_A\cup X_B\) |
+| \(i,j\) | 样本 / 重复的下标 |
+| \(y_i\in\{0,1\}\) | 样本 \(i\) 的方法标签（0=A，1=B） |
+| \(N_{\mathrm{tot}}\) | 池化样本数 \(N_{\mathrm{tot}}=2R\) |
+| \(H_0,H_1\) | 零假设 / 备择假设 |
+| \(\mathcal F_{\mathrm{tr}},\mathcal F_{\mathrm{va}}\) | 训练 / 验证折的样本下标集合 |
+| \(N_{\mathrm{tr}}\) | 训练样本数 \(N_{\mathrm{tr}}=|\mathcal F_{\mathrm{tr}}|\) |
+| \(\#\{\cdot\},\ |\cdot|\) | 集合元素个数 |
+| \(\hat\mu_{\mathrm{tr}},\hat\sigma_{\mathrm{tr}}\) | 训练折的均值 / 标准差 |
+| \(\tilde\phi\) | 标准化后的特征 |
+| \(w,\beta\) | 逻辑回归权重向量 / 截距 |
+| \(\cdot^\top\) | 向量 / 矩阵转置 |
+| \(\|w\|^2\) | 权重向量的 L2 范数平方 |
+| \(\mathcal L\) | 逻辑回归损失函数 |
+| \(p_i\) | 模型给样本 \(i\) 的 \(y=1\) 概率 |
+| \(\mathbb P(\cdot)\) | 概率 |
+| \(\lambda\) | L2 正则强度 |
+| \(\hat y_i\) | 预测标签 |
+| \(\mathbb 1[\cdot]\) | 指示函数（条件成立为 1，否则 0） |
+| \(\mathrm{Acc}\) | 交叉验证准确率 |
+| \(\mathrm{AUC}\) | ROC 曲线下面积 |
+| \(K\) | 交叉验证折数 |
+| \(C\) | 交叉验证重复次数 |
+| \(B\) | 置换次数 |
+| \(b\) | 置换指标 |
+| \(\mathrm{Acc}^{(b)}\) | 第 \(b\) 次置换的准确率 |
+| \(p_{\mathrm{perm}}\) | 置换 p 值 |
+| \(p_{\min}\) | 给定 \(B\) 的最小置换 p，\(p_{\min}=1/(1+B)\) |
+| \(\mathcal S_1,\mathcal S_2\) | 同种 self-split 的两个重复子集 |
+| \(\delta\) | 等价边界（容差） |
+| \(\mathrm{MMD}^2\) | 平方最大均值差异 |
+| \(k(\cdot,\cdot)\) | 核函数 |
+| \(\mathcal H\) | 再生核 Hilbert 空间（RKHS） |
+| \(\|\cdot\|_{\mathcal H}\) | RKHS 范数 |
+
+### D.1 问题与零假设
+
+策略 \(A,B\) 各做 \(R\) 次独立重复，第 \(i\) 次重复压缩为特征向量 \(\phi_i\)。去掉方法标签后，问两组样本能否区分：
+
+$$
+H_0:\ \{\phi_i^A\}_{i=1}^R\ \text{与}\ \{\phi_j^B\}_{j=1}^R\ \text{同分布（可混淆）}
+\qquad\text{vs}\qquad
+H_1:\ \text{分布不同}.
+$$
+
+检验统计量取「分类器预测方法标签」的交叉验证准确率 \(\mathrm{Acc}\)：\(H_0\) 下应接近 \(0.5\)，越大越可分。这就是 **classifier two-sample test (C2ST)**。
+
+### D.2 每次重复的特征向量
+
+取 tick \(t\in\{T/4,T/2,3T/4,T\}\)（\(T\) 为总 tick 数）：
+
+$$
+\phi_i=\Big(
+\{\text{drive}_g(t)\}_{g,t},\ 
+\{\text{coverage}_\tau(t)\}_{\tau,t},\ 
+\{\text{front}(t)\}_t,\ 
+\{\text{total}(t)\}_t,\ 
+\{\overline{\text{drive}}_g\}_g,\ 
+\{\mathrm{SD}_t(\text{drive}_g)\}_g,\ 
+T_{50}
+\Big).
+$$
+
+其中 \(g\) 遍历选定 deme、\(\tau\) 遍历覆盖阈值；\(\{\cdot\}_{g,t}\) 表示把对应下标的量拼成向量。各项含义见 D.0。对高维场可先用 PCA/FPCA，或改用 D.7 的核两样本检验。
+
+### D.3 C2ST 的具体步骤
+
+1. **池化与标签**：\(X=X_A\cup X_B\)，\(y_i=0\)（\(A\)）或 \(1\)（\(B\)），共 \(N_{\mathrm{tot}}=2R\) 个样本。
+2. **折内标准化**：用训练折 \(\mathcal F_{\mathrm{tr}}\) 估计 \(\hat\mu_{\mathrm{tr}},\hat\sigma_{\mathrm{tr}}\)，得标准化特征
+   $$
+   \tilde\phi=(\phi-\hat\mu_{\mathrm{tr}})/\hat\sigma_{\mathrm{tr}}.
+   $$
+3. **分类器**：L2 逻辑回归
+   $$
+   \mathbb P(y=1\mid\phi)=\frac{1}{1+e^{-(w^\top\tilde\phi+\beta)}},
+   $$
+   最小化
+   $$
+   \mathcal L(w,\beta)=-\frac1{N_{\mathrm{tr}}}\sum_{i\in\mathcal F_{\mathrm{tr}}}
+   \big[y_i\log p_i+(1-y_i)\log(1-p_i)\big]+\frac{\lambda}{2}\|w\|^2,
+   $$
+   其中 \(p_i=1/(1+e^{-(w^\top\tilde\phi_i+\beta)})\)，\(N_{\mathrm{tr}}=|\mathcal F_{\mathrm{tr}}|\)，\(\lambda\) 为 L2 强度。
+4. **交叉验证**：重复 \(C\) 次分层 \(K\)-折；每折在 \(\mathcal F_{\mathrm{tr}}\) 上拟合、在 \(\mathcal F_{\mathrm{va}}\) 上预测，累计
+   $$
+   \mathrm{Acc}=\frac1{N_{\mathrm{tot}}}\sum_{i=1}^{N_{\mathrm{tot}}}\mathbb 1[\hat y_i=y_i],\qquad
+   \mathrm{AUC}=\mathbb P\big(p_i>p_j\mid y_i=1,\ y_j=0\big),
+   $$
+   其中 \(\hat y_i\) 为预测标签，\(p_i\) 为预测概率。
+5. **报告**：\(\mathrm{Acc}\)、\(\mathrm{AUC}\) 的交叉验证均值；越接近 \(0.5\) 越不可分。
+
+### D.4 置换零分布与 \(p_{\mathrm{perm}}\) 值
+
+在 \(H_0\) 下方法标签可交换。重复 \(B\) 次：随机打乱 \(y\)，重跑 D.3，得零分布 \(\{\mathrm{Acc}^{(b)}\}_{b=1}^B\)，则
+
+$$
+p_{\mathrm{perm}}=\frac{1+\#\{b:\mathrm{Acc}^{(b)}\ge \mathrm{Acc}\}}{1+B}.
+$$
+
+- \(B=20\) 时 \(p_{\min}=1/21\approx0.048\)；若所有置换都低于观测值，只能报 \(p_{\mathrm{perm}}\le0.048\)。要更细的 \(p_{\mathrm{perm}}\) 需增大 \(B\)（如 \(B=999\Rightarrow p_{\min}=0.001\)）。
+- \(p_{\mathrm{perm}}\) 只表示「可检测性」，不是效应量或生物学重要性；\(\mathrm{Acc}/\mathrm{AUC}\) 才表示差异大小。
+
+### D.5 对角线自校准（self-split）
+
+把同一方法的 \(R\) 次重复随机分成两个子集 \(\mathcal S_1,\mathcal S_2\)，再跑一次 C2ST：
+
+$$
+\text{self-split}(A)=\mathrm{C2ST}\big(\{\phi_i^A\}_{i\in\mathcal S_1},\ \{\phi_i^A\}_{i\in\mathcal S_2}\big)\approx0.5.
+$$
+
+它检验实现本身是否引入偏置（本项目 small \(0.458/0.432/0.538\)，large \(0.426/0.568/0.522\)）。下三角热图的对角线取此值，而不是人为置 \(1\)。
+
+### D.6 判读：可分 vs 可混淆
+
+- **效应量**：\(\mathrm{Acc},\mathrm{AUC}\to0.5\) 表示不可分（可混淆）；越大越可分。
+- **等价边界**：要声称「可合并」，需预先给定容差 \(\delta\)（如 \(\mathrm{Acc}\le0.5+\delta\)，\(\delta=0.1\)），并用置信区间/等价检验（TOST，两个单侧检验）确认落在边界内。
+- **\(p_{\mathrm{perm}}\) 的边界**：显著只说明统计上能检测到差异；\(R\) 越大，越小的差异也显著。不显著也不证明等价。
+- **生物学判断**：最终看下游 chasing 指标（波前速度、覆盖率、共存时长、固定概率）是否在预设生物学容差内，而不能只看 C2ST。
+
+### D.7 无模型补充（可选）
+
+对高维场或不想选特征时，可用核两样本检验：
+
+$$
+\mathrm{MMD}^2=\Big\|\frac1R\sum_{i=1}^R k(\phi_i^A,\cdot)-\frac1R\sum_{j=1}^R k(\phi_j^B,\cdot)\Big\|_{\mathcal H}^2,
+$$
+
+其中 \(k(\cdot,\cdot)\) 为核函数，\(\mathcal H\) 为再生核 Hilbert 空间（RKHS），\(\|\cdot\|_{\mathcal H}\) 为其范数；置换给 \(p_{\mathrm{perm}}\) 值。与 C2ST 互为补充。
+
+### D.8 本项目参数与结果
+
+- \(R=100\)；特征见 D.2；逻辑回归 \(\lambda=10^{-2}\)；\(K=5\)，\(C=5\)；\(B=20\)；对角线 self-split。
+- 结果（\(\mathrm{Acc}/\mathrm{AUC}\)）：**M2 vs CPU** small \(0.581/0.618\)、large \(0.591/0.604\)；**M0 vs CPU** small \(0.773/0.848\)、large \(0.920/0.974\)；\(p_{\mathrm{perm}}=0.048\)（置换下限）。
+- 解读：M2 与 CPU 的效应量接近不可分边界；M0 因方差结构偏低而明显可分。是否「生物学可合并」仍取决于下游 chasing 指标的等价检验。
+- 代码：`compare_strategies_v3.py` 的 `_feature_matrix`、`_fit_logreg`、`_cv_scores`、`_c2st_pair`、`_c2st_matrices`、`_plot_c2st`。

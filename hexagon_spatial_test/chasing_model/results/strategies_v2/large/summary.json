@@ -1,0 +1,189 @@
+{
+  "config": {
+    "name": "large",
+    "arena": 31,
+    "kernel_size": 11,
+    "avd": 1.5,
+    "ticks": 100,
+    "reps": 10,
+    "scale": 100.0
+  },
+  "selected_demes": [
+    [
+      15,
+      15
+    ],
+    [
+      10,
+      15
+    ],
+    [
+      5,
+      15
+    ],
+    [
+      0,
+      15
+    ]
+  ],
+  "coverage": {
+    "cpu": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m0": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m1": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      }
+    },
+    "m2": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      }
+    }
+  },
+  "front": {
+    "cpu": {
+      "final_mean": 21.213203435596427,
+      "final_std": 0.0,
+      "mean_over_time": 12.152328949737553
+    },
+    "m0": {
+      "final_mean": 21.213203435596427,
+      "final_std": 0.0,
+      "mean_over_time": 12.021807561925954
+    },
+    "m1": {
+      "final_mean": 21.213203435596427,
+      "final_std": 0.0,
+      "mean_over_time": 12.113904586430197
+    },
+    "m2": {
+      "final_mean": 21.213203435596427,
+      "final_std": 0.0,
+      "mean_over_time": 12.169974603579155
+    }
+  },
+  "total": {
+    "cpu": {
+      "final_mean": 201536.36813148911,
+      "final_std": 230.29715796454033,
+      "mean_over_time": 201796.2481643573
+    },
+    "m0": {
+      "final_mean": 202226.4864038525,
+      "final_std": 305.0821983494728,
+      "mean_over_time": 202261.18690508575
+    },
+    "m1": {
+      "final_mean": 201690.42678101687,
+      "final_std": 322.6139167055019,
+      "mean_over_time": 201768.96701034566
+    },
+    "m2": {
+      "final_mean": 201738.06405166705,
+      "final_std": 372.6139307680653,
+      "mean_over_time": 201705.0226874641
+    }
+  },
+  "drive_final_selected": {
+    "cpu": [
+      0.9999999999999352,
+      0.9999999999999964,
+      0.9999999999996593,
+      0.999999999758525
+    ],
+    "m0": [
+      0.9999996603296573,
+      0.9999982520534012,
+      0.9999987452269954,
+      0.9999995617819104
+    ],
+    "m1": [
+      0.9999999999922811,
+      0.9999999702133063,
+      0.9999999838363042,
+      0.9999997969985717
+    ],
+    "m2": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "timing": {
+    "cpu": {
+      "wall_seconds": 195.14587364252657,
+      "per_replicate_seconds": 19.514587364252655,
+      "migration_seconds": 193.61236269026995,
+      "reps": 10,
+      "ticks": 100
+    },
+    "m0": {
+      "wall_seconds": 5.88722260762006,
+      "per_replicate_seconds": 0.5887222607620061,
+      "migration_seconds": 4.59475320763886,
+      "reps": 10,
+      "ticks": 100
+    },
+    "m1": {
+      "wall_seconds": 9.630200991407037,
+      "per_replicate_seconds": 0.9630200991407036,
+      "migration_seconds": 8.273177928291261,
+      "reps": 10,
+      "ticks": 100
+    },
+    "m2": {
+      "wall_seconds": 9.147699177265167,
+      "per_replicate_seconds": 0.9147699177265167,
+      "migration_seconds": 7.773330580443144,
+      "reps": 10,
+      "ticks": 100
+    }
+  },
+  "html": "compare_strategies_v2_large.html",
+  "line_plot": "selected_demes.png"
+}

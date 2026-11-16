@@ -719,10 +719,17 @@ def _c2st_pair(Xa, Xb, seed=0, perms=20):
 
 def _c2st_matrices(feats, methods, seed=0):
     n = len(methods)
-    acc = np.eye(n)
-    auc = np.eye(n)
+    acc = np.full((n, n), np.nan)
+    auc = np.full((n, n), np.nan)
     pval = np.ones((n, n))
     for i in range(n):
+        # self-split: split the same method's replicates into two halves; C2ST ~0.5 under the null.
+        Xm = feats[methods[i]]
+        rng = np.random.default_rng(seed + 101 * (i + 1))
+        order = rng.permutation(len(Xm))
+        half = len(Xm) // 2
+        a, b, p = _c2st_pair(Xm[order[:half]], Xm[order[half : 2 * half]], seed=seed + 7 * i + 3)
+        acc[i, i], auc[i, i], pval[i, i] = a, b, p
         for j in range(i):
             a, b, p = _c2st_pair(feats[methods[i]], feats[methods[j]], seed=seed + 17 * (i + 1) + j)
             acc[i, j] = acc[j, i] = a
@@ -742,7 +749,10 @@ def _plot_c2st(acc, methods, out):
     ax.set_yticks(range(n)); ax.set_yticklabels(methods)
     for i in range(n):
         for j in range(i + 1):
-            ax.text(j, i, f"{acc[i, j]:.2f}", ha="center", va="center", fontsize=9)
+            rgba = im.cmap(norm(acc[i, j]))
+            lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+            ax.text(j, i, f"{acc[i, j]:.2f}", ha="center", va="center",
+                    fontsize=9, color=("white" if lum < 0.5 else "black"))
     fig.colorbar(im, ax=ax, label="C2ST accuracy (0.5 = indistinguishable)")
     ax.set_title("C2ST (lower triangle)")
     fig.tight_layout()
@@ -757,7 +767,8 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict,
     timing_rows = "".join(
         f"<tr><td>{s}</td><td>{timing[s]['wall_seconds']:.2f}</td>"
         f"<td>{timing[s]['per_replicate_seconds']:.3f}</td>"
-        f"<td>{timing[s]['migration_seconds']:.2f}</td></tr>"
+        f"<td>{timing[s]['migration_seconds']:.2f}</td>"
+        f"<td>{timing[s]['migration_seconds'] / max(timing[s].get('reps', 1), 1):.3f}</td></tr>"
         for s in DISPLAY if s in timing
     )
     meta = next(iter(timing.values()))
@@ -766,9 +777,9 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict,
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
-<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks (NumPy/CPU; M0/M2 use NumPy FFT). M1 is computed but omitted from this display.</h4>
+<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks, {meta.get('jobs', 1)} workers (NumPy/CPU). wall = parallel elapsed; migration CPU-s = sum over replicates (so wall can be smaller when workers &gt; 1). M1 is computed but omitted from this display.</h4>
 <table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
-<tr><th>strategy</th><th>wall seconds</th><th>seconds / replicate</th><th>migration seconds</th></tr>
+<tr><th>strategy</th><th>wall s (parallel)</th><th>s / replicate</th><th>migration CPU-s (sum)</th><th>migration s / replicate</th></tr>
 {timing_rows}
 </table>
 <img id="frame" src="data:image/png;base64,{frames[0]}">
@@ -848,6 +859,7 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
             "migration_seconds": migration,
             "reps": cfg["reps"],
             "ticks": cfg["ticks"],
+            "jobs": jobs,
         }
         per_strategy[strategy] = {
             "drive": np.stack([r["drive"] for r in reps]),

@@ -860,6 +860,13 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - 特征集/分类器未做敏感性；可加 MMD/energy distance 作为无模型对照。
 - 未做下游 chasing 指标（共存/前沿/固定概率）的等价检验。
 
+
+### 36.8 补充说明（对角线 / p 值 / 计时口径，2026-11-16）
+- **对角线**：此前错误地把 C2ST 矩阵对角线设为 1.0（显示约定，不是结果）。现改为**同种 self-split C2ST**：把同一方法的 R 次重复随机分成两半再比较，准确率应在 0.5 附近。实测对角线：small `0.458/0.432/0.538`，large `0.426/0.568/0.522`，与零假设一致。pairwise accuracy/AUC/p 不变。
+- **p 值**：置换检验。零假设是两组方法标签可交换（同一分布）；打乱标签后重算 CV 准确率得到零分布，`p=(1+#{null≥obs})/(1+n_perm)`。`n_perm=20` → 最小 `1/21≈0.048`；全为 0.048 表示观测准确率高于**所有**零值，p 已到分辨率下限；要分辨更小的 p 需更多置换（如 999 次 → 0.001）。p 只表示“可检测”，效应量看 accuracy/AUC。
+- **计时口径**：`wall_seconds` 是 `jobs=8` 的**并行墙钟**；`migration_seconds` 是**所有 replicate 的 migration 调用时间之和（CPU 时间）**。并行时墙钟 ≈ 总 CPU 时间 / workers，因此 **wall < migration 总和是正常的**。HTML 计时表已改为「wall s (parallel) / s per replicate / migration CPU-s (sum) / migration s per replicate」并加注。
+- 热图深色格子的数字改为自适应浅色/深色，避免深底黑字看不清。
+
 ---
 
 # evaluator 回执区（追加式；evaluator 写，主 agent 据此行动）

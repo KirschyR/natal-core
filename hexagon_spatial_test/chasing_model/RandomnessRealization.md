@@ -44,7 +44,10 @@
 
 | 符号 | 含义 |
 |---|---|
-| `n` | deme 总数（$n = \text{rows}\times\text{cols}$） |
+| `n` | 每个平面的 deme 总数（$n=\text{rows}\times\text{cols}$） |
+| `κ` | 核边长（奇数，例如 7 或 59）；一个源最多有 $\kappa^2-1$ 个有效目的地（去中心） |
+| `r_s` | 源 `s` 的有效目的地个数（CSR 行宽）；内部 $r_s=\kappa^2-1$，边界更少 |
+| `nnz` | CSR 非零边总数：$\mathrm{nnz}=\sum_s r_s$ |
 | `s, d` | 下标：`s` 是**源** deme（个体从这里出发），`d` 是**目的地** deme |
 | `f_s` | 源 deme `s` 在该平面上的个体数（非负实数） |
 | `ρ` | **迁移率**，$0\le\rho\le 1$；本 tick 中每个源有比例 $\rho$ 的个体参与迁移 |
@@ -344,17 +347,19 @@ $$
 
 $A$ 是**固定的、平移不变的线性算子**（核只依赖 $d-s$）。
 
+这里的“只依赖 $d-s$”指：原始权重是**位移向量** $u=d-s$ 的函数 $K'(u)$——把源和目的地**同时平移同一个向量**，权重不变，这就是平移不变的含义；它不是“任意 $d,s$ 配对都一样”。注意归一化权重 $w_{s,d}=K'(d-s)/Z_s$ 还依赖 $s$（通过边界归一化 $Z_s$），但 $Z_s$ 是确定性的，route A 通过“先逐点除以 $Z_s$，再卷积”精确处理它。
+
 ### 3.2 并行实现（为什么快）
 
-对一个平面，GPU 上分四步（`fft_migrate.rs`）：
+对一个平面，GPU 上分五步（`fft_migrate.rs`）：
 
-1. **`scatter_g`（逐格并行）**：把 $f_s$ 除以 $Z_s$、乘 $\rho$，零填充到 $(\text{rows}+k-1)\times(\text{cols}+k-1)$。每个格点一个线程。
+1. **`scatter_g`（逐格并行）**：把 $f_s$ 除以 $Z_s$、乘 $\rho$，零填充到 $(\text{rows}+\kappa-1)\times(\text{cols}+\kappa-1)$。每个格点一个线程。
 2. **cuFFT `r2c`**：实数平面 → 频域（cuFFT 内部并行）。
 3. **`complex_mul`（逐频点并行）**：频域逐点乘核的频谱（并折叠 $1/(f_rf_c)$）。
 4. **cuFFT `c2r`**：频域 → 实数域。
 5. **`combine`（逐格并行）**：$out_d=(1-\rho)f_d+\text{conv}_d$。
 
-多个平面（$\text{sex}\times\text{age}\times\text{genotype}$）由 host 循环依次提交到同一 CUDA stream。复杂度从 CSR 的 $O(\mathrm{nnz})=O(nk^2)$（$k$ = 核宽）降到 $O(n\log n)$；核越大、域越大，优势越明显。
+多个平面（$\text{sex}\times\text{age}\times\text{genotype}$，共 $P=2AZ+AZ^2$ 个）由 host 循环依次提交到同一 CUDA stream。每个平面的复杂度从 CSR 的 $O(\mathrm{nnz})=O(\sum_s r_s)$ 降到 $O(n\log n)$：这里 $n=\text{rows}\times\text{cols}$ 是该平面的 deme 数，$r_s$ 是源 $s$ 的有效目的地数（CSR 行宽），内部 $r_s\le\kappa^2-1$（$\kappa$ 为核边长）。若近似 $r_s\approx\kappa^2$，CSR 即 $O(n\kappa^2)$；总开销为 $O(P\,n\log n)$。核越大、域越大，FFT 优势越明显。
 
 ### 3.3 复刻阻碍：卷积“装不下”逐源随机归一化
 
@@ -381,10 +386,10 @@ $$
 对比边界掩膜：$Z_s$ 是**确定性**的、只依赖源位置、可以事先算好（$Z=K'\circledast m$，$m$ 为域指示），所以 route A 可以“先 $f/Z$ 再卷积”。而 $S_s$ 依赖每次抽到的 $G$，无法预计算，也无法写成“逐点缩放 + 固定卷积”。
 
 **阻碍 3：这不是平移不变的算子。**
-卷积核只依赖位移 $d-s$；随机权重 $G_{s,d}/S_s$ 依赖源 `s` 的整行（通过 $S_s$），**不是 $d-s$ 的函数**。一次固定卷积无法表达它。
+“平移不变”指权重只随**位移** $u=d-s$ 变化：$K'(u)$ 与源的绝对位置无关，把源、目的地同时平移同一向量时权重不变；它不是说“任意 $d,s$ 配对都一样”。随机权重 $G_{s,d}/S_s$ 额外依赖源 `s` 的整行（通过随机归一化 $S_s$），因此**不是 $u=d-s$ 的函数**，无法写成一次固定卷积。（边界归一化 $Z_s$ 也依赖 $s$，但它是确定性的，可先逐点除以 $Z_s$ 再卷积，所以不构成阻碍。）
 
 **阻碍 4：随机自由度是 $O(\mathrm{nnz})$。**
-每个源有约 $k$ 个独立 Dirichlet 自由度，全体源共 $O(nk)=O(\mathrm{nnz})$；FFT 是 $O(n\log n)$ 的确定性线性变换，无法在 $O(n\log n)$ 内生成这么多独立随机量。
+每个源有 $r_s$ 个目的地，对应约 $r_s-1$ 个独立 Dirichlet 比例自由度；全体源共 $\sum_s(r_s-1)=O(\mathrm{nnz})$（$\mathrm{nnz}=\sum_s r_s$）。FFT 是 $O(n\log n)$ 的确定性线性变换，无法在 $O(n\log n)$ 内生成这么多独立随机量。
 
 > 补充：**同步不是根本障碍**。逐源归一化只需要“行内归约”（每个源独立），GPU 用 segmented reduction/scatter 完全可以做；现有 GPU 随机 CSR 路径（`migrate_tick_stochastic`）就是这么做的，只是受 `MAX_CSR_ROW=32` 的 scratch 行宽限制（`size=7` 核的行宽是 48，因此被拒）。同步/并行能力不是问题，**表示方式**才是。
 
@@ -412,39 +417,47 @@ $$
 
 ### 4.1 M1 — 协方差匹配的 Gaussian 随机场（spectral synthesis）
 
-**思路**：不逐边抽样，直接构造零均值随机场 $\eta_d$，使其协方差等于 CPU 的协方差（在平移不变近似下）。
+**M1 近似的是什么。** 把 CPU 的随机涨落 $\eta_d=Y_d-\mathbb{E}[Y_d]$ 近似为**零均值 Gaussian 随机场**，并让它的**协方差**等于 CPU 涨落的协方差（在内部、$N_s\approx N$ 的平移不变近似下）。因此：
 
-**目标协方差**：在内部、$N_s\approx N$ 近似均匀时，由 §2.4 可把 $Y$ 的涨落协方差写成只依赖位移 $e=d'-d$ 的核
+- **均值精确**：$\mathbb{E}[Y_d]=(1-\rho)N_d+\mu_d$；
+- **方差/协方差匹配**：包括 Dirichlet 带来的行内负相关；
+- **不匹配**：边际分布（Gaussian 而非 Gamma/Dirichlet）与更高阶矩；边界/非均匀 $N_d$ 用近似处理。
+
+一句话：M1 不逐边抽样，而是直接“合成”一个具有正确二阶矩的相关噪声场。
+
+**为什么可行。** 由 §2.4，$Y$ 的涨落协方差只依赖 $N_s,\rho,w$；Dirichlet 的影响已经编码在协方差里。二阶矩是**卷积可表示**的（只涉及 $w$ 与 $w\star w$），所以能用 FFT 合成；只有逐边的精确分布不可卷积化。
+
+**目标协方差。** 在内部、$N_s\approx N$ 近似均匀时，把涨落协方差写成只依赖位移 $e=d'-d$ 的核：
 
 $$
 C(e)=[N\rho(1-\rho)+\mu]\,\delta_{e,0}-2N\rho(1-\rho)\,w(e)-\rho^2N\,(w\star w)(e),
 $$
 
-其中 $w(e)=w_{s,s+e}$，$(w\star w)(e)=\sum_u w(u)\,w(u+e)$ 是核的自相关，$\mu=\rho N$（内部列和为 1），$\delta_{e,0}$ 是同点指示。三项依次对应：保留量/泊松方差、保留-外流共享 $O_d$ 的负相关、同一源多项分配的负相关。
+其中 $w(e)=w_{s,s+e}$，$(w\star w)(e)=\sum_u w(u)\,w(u+e)$，$\mu=\rho N$（内部列和为 1），$\delta_{e,0}$ 是同点指示。三项依次是：保留量/泊松方差、保留-外流共享 $O_d$ 的负相关、同一源多项分配的负相关。
 
-**谱密度**：设 $\hat w(\omega)$ 为 $w$ 的频谱，则
+**谱密度与守恒。** 设 $\hat w(\omega)$ 为 $w$ 在（补零）网格上的离散傅里叶变换，则 $C$ 的谱密度为
 
 $$
 S(\omega)=[N\rho(1-\rho)+\mu]-2N\rho(1-\rho)\,\hat w(\omega)-\rho^2N\,|\hat w(\omega)|^2.
 $$
 
-$C$ 是合法协方差，故 $S(\omega)\ge 0$（离散化后负值截断到 0）。又因 $\hat w(0)=1$，
+$C$ 是合法协方差，故 $S(\omega)\ge 0$（离散化后负值截断到 0）。又因 $\hat w(0)=\sum_e w(e)=1$，
 
 $$
 S(0)=N\rho(1-\rho)+\rho N-2N\rho(1-\rho)-\rho^2N=0,
 $$
 
-即**总量守恒**（均匀模无涨落）。
+即均匀模没有涨落 → **总量守恒**。实践上：先在滞后网格上构造 $w(e)$ 与 $(w\star w)(e)$（后者一次 FFT），再对 $C(e)$ 做 FFT 得 $S(\omega)$；或直接用上式。
 
-**合成算法**（一次额外 FFT）：
+**合成算法**（每个平面一次额外 FFT）：
 
-1. 生成白噪声 $\zeta_d\sim\mathcal N(0,1)$；
-2. 频域滤波：$\eta=\mathrm{IFFT}\big(\sqrt{S(\omega)}\,\mathrm{FFT}(\zeta)\big)$，取实部；
+1. 生成白噪声 $\zeta_d\sim\mathcal N(0,1)$（与 $\eta$ 同尺寸）；
+2. 频域滤波：$\eta=\mathrm{IFFT}\big(\sqrt{S(\omega)}\odot\mathrm{FFT}(\zeta)\big)$，取实部（$\odot$ 为逐点乘）；
 3. 合成：$Y_d=(1-\rho)N_d+\mu_d+\eta_d$。
 
-边界/有限域用循环嵌入或零填充；非均匀 $N_d$ 用局部调制 $\eta_d\leftarrow\sqrt{N_d/N}\,\eta_d$（线性噪声近似，需再做零均值修正以保持守恒）。
+有限域用循环嵌入/零填充避免环绕；非均匀 $N_d$ 用局部调制 $\eta_d\leftarrow\sqrt{N_d/N}\,\eta_d$（线性噪声近似），再做零均值修正以保持守恒。
 
-**性质**：均值、方差、协方差（含 Dirichlet 负相关）在二阶矩意义下匹配；$O(n\log n)$。代价：边际是 Gaussian（非 Gamma/Dirichlet），小计数可能为负（需截断或边际变换）。它是 M1–M4 中**二阶矩最接近**的方案。
+**性质。** 均值、方差、协方差（含 Dirichlet 负相关）在二阶矩意义下匹配；每平面 $O(n\log n)$（$n$ 为该平面 deme 数）。代价：边际是 Gaussian，小计数可能为负（需截断或 M4 的边际变换）。它是 M1–M4 中**二阶矩最接近** CPU 的方案。
 
 ### 4.2 M2 — 局部/分块多项（block multinomial）
 

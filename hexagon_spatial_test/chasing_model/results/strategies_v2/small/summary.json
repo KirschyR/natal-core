@@ -156,30 +156,30 @@
   },
   "timing": {
     "cpu": {
-      "wall_seconds": 45.560352796688676,
-      "per_replicate_seconds": 2.2780176398344336,
-      "migration_seconds": 44.58520654030144,
+      "wall_seconds": 45.37184624839574,
+      "per_replicate_seconds": 2.268592312419787,
+      "migration_seconds": 44.414645943790674,
       "reps": 20,
       "ticks": 100
     },
     "m0": {
-      "wall_seconds": 4.834723114967346,
-      "per_replicate_seconds": 0.24173615574836732,
-      "migration_seconds": 3.93223041575402,
+      "wall_seconds": 4.756899953819811,
+      "per_replicate_seconds": 0.23784499769099057,
+      "migration_seconds": 3.8716293685138226,
       "reps": 20,
       "ticks": 100
     },
     "m1": {
-      "wall_seconds": 8.630579707212746,
-      "per_replicate_seconds": 0.43152898536063733,
-      "migration_seconds": 7.682389460504055,
+      "wall_seconds": 8.5130504546687,
+      "per_replicate_seconds": 0.425652522733435,
+      "migration_seconds": 7.5808729054406285,
       "reps": 20,
       "ticks": 100
     },
     "m2": {
-      "wall_seconds": 9.391812546178699,
-      "per_replicate_seconds": 0.4695906273089349,
-      "migration_seconds": 8.428022230044007,
+      "wall_seconds": 9.27829108107835,
+      "per_replicate_seconds": 0.4639145540539175,
+      "migration_seconds": 8.331479257903993,
       "reps": 20,
       "ticks": 100
     }

@@ -74,6 +74,7 @@ CONFIGS = [
     {"name": "large", "arena": 31, "kernel_size": 11, "avd": 1.5, "ticks": 100, "reps": 10, "scale": 100.0},
 ]
 STRATEGIES = ("cpu", "m0", "m1", "m2")
+DISPLAY = ("cpu", "m0", "m2")  # M1 is computed but omitted from the display
 COLORS = {"cpu": "tab:blue", "m0": "tab:orange", "m1": "tab:green", "m2": "tab:red"}
 
 
@@ -581,8 +582,8 @@ def render_frames(mean_fields: dict[str, np.ndarray], rows: int, cols: int, titl
     xmin, xmax, ymin, ymax = bounds
     frames: list[str] = []
     for t in range(next(iter(mean_fields.values())).shape[0]):
-        fig, axes = plt.subplots(1, len(STRATEGIES), figsize=(5.0 * len(STRATEGIES), 4.8), dpi=90)
-        for ax, strategy in zip(axes, STRATEGIES):
+        fig, axes = plt.subplots(1, len(DISPLAY), figsize=(5.0 * len(DISPLAY), 4.8), dpi=90)
+        for ax, strategy in zip(axes, DISPLAY):
             coll = PolyCollection(
                 vertices, array=mean_fields[strategy][t].ravel(), cmap="viridis",
                 clim=(0.0, 1.0), rasterized=True,
@@ -608,10 +609,10 @@ def render_frames(mean_fields: dict[str, np.ndarray], rows: int, cols: int, titl
 def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
     timing_rows = "".join(
-        f"<tr><td>{s}</td><td>{t['wall_seconds']:.2f}</td>"
-        f"<td>{t['per_replicate_seconds']:.3f}</td>"
-        f"<td>{t['migration_seconds']:.2f}</td></tr>"
-        for s, t in timing.items()
+        f"<tr><td>{s}</td><td>{timing[s]['wall_seconds']:.2f}</td>"
+        f"<td>{timing[s]['per_replicate_seconds']:.3f}</td>"
+        f"<td>{timing[s]['migration_seconds']:.2f}</td></tr>"
+        for s in DISPLAY if s in timing
     )
     meta = next(iter(timing.values()))
     return f"""<!DOCTYPE html>
@@ -619,7 +620,7 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
-<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks (all strategies are NumPy/CPU; M0/M1 use NumPy FFT)</h4>
+<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks (NumPy/CPU; M0/M2 use NumPy FFT). M1 is computed but omitted from this display.</h4>
 <table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
 <tr><th>strategy</th><th>wall seconds</th><th>seconds / replicate</th><th>migration seconds</th></tr>
 {timing_rows}
@@ -648,10 +649,10 @@ def line_plot(mean: dict, std: dict, ticks: int, selected, out: Path) -> None:
     for d in range(n_deme):
         for c, (key, name) in enumerate(zip(keys, names)):
             ax = axes[d, c]
-            for strategy in STRATEGIES:
+            for strategy in DISPLAY:
                 m = mean[strategy][key][:, d]
                 s = std[strategy][key][:, d]
-                ax.plot(t, m, color=COLORS[strategy], label=strategy, lw=1.6)
+                ax.plot(t, m, color=COLORS[strategy], label=strategy, lw=1.0)
                 ax.fill_between(t, m - s, m + s, color=COLORS[strategy], alpha=0.22)
             ax.grid(alpha=0.3)
             if d == 0:

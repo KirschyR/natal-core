@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §29/§31/§33/§35/§37 = **APPROVED（含非阻断 findings）**；§27 的计划 NOT APPROVED 已由 PLAN v3 闭环 |
-| 待回执 | —（下一阶段 S1/S2 或跨引擎校验另立 §38→§39） |
-| 主 agent 处理 | §28–§36 已提交并复核（PLAN v3、§30 确定性对照、§32 三策略、§34 M2、§36 C2ST）；按回执非阻断 findings 修订文档/口径；下一步 S1/S2 或跨引擎校验 |
-| 待 evaluator 动作 | —（下一交接后复核） |
+| 待回执 | §38（A0：GPU M2 基线）→ §39 |
+| 主 agent 处理 | §28–§36 已提交并复核（PLAN v3、§30 确定性对照、§32 三策略、§34 M2、§36 C2ST）；§38 A0 基线已完成（CUDA 环境 + CPU M2 计时）；下一步 GPU M2 算子（A1/A2） |
+| 待 evaluator 动作 | 复核 §38 |
 
 ---
 
@@ -911,6 +911,58 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - 移除单独的 C2ST 表格；permutation p 仍保存在 `c2st.json` / `summary.json`。
 - 示例：large `m2 vs cpu = 0.591 (0.604)`、`m0 vs cpu = 0.920 (0.974)`；small `m2 vs cpu = 0.581 (0.618)`。
 - 代码：`compare_strategies_v3.py::_plot_c2st` 现在同时接收 `acc` 与 `auc`；HTML 只嵌入热图。
+
+
+## §38 — A0：GPU M2 基线（CUDA 环境 + CPU FFT 基线，请复核）
+
+### 38.1 改动清单（均未触碰 natal 产品代码）
+- 新增 `hexagon_spatial_test/chasing_model/a0_baseline.py`：A0 基线脚本，`--mode cpu` 用仓库
+  `.venv`，`--mode cuda` 用 `/opt/conda/bin/python`（两个环境分离，避免把 torch 装进项目环境）。
+- 新增 `results/gpu_fft/a0_cpu.json`、`results/gpu_fft/a0_cuda.json`。
+- 未覆盖 `strategies_v1`/`strategies_v2_r20_r10`/`strategies_v3`；未 commit/push。
+
+### 38.2 执行内容
+- CPU 基线：`a0_baseline.py --mode cpu`；M2 单 replicate，seeds `0/1/2`；配置
+  `small = 15²/k7/avd0.8`、`large = 31²/k11/avd1.5`，`T=100`、`scale=100`（与 v3 一致）。
+- CUDA 环境：`a0_baseline.py --mode cuda`；记录 torch/CUDA/cuFFT，做 f64/f32 roundtrip 精度检查，
+  并测 batch 4/48 的 `rfft2 → irfft2` 纯变换耗时。
+- 环境：`git_head = b4904e3`；conda Python 3.11.6、torch 2.12.0+cu130、CUDA 13.0；
+  `.venv` Python 3.13.11。
+
+### 38.3 结果
+
+**CUDA / cuFFT**
+
+| 项 | 值 |
+|---|---|
+| GPU | NVIDIA GeForce RTX 5090 D v2，cap (12, 0)，23975 MiB |
+| torch / CUDA | 2.12.0+cu130 / 13.0 |
+| roundtrip max abs（f64 / f32） | `1.33e-15` / `7.15e-7` |
+| 纯变换耗时（batch 4 f32 / batch 48 f32 / batch 48 f64） | `0.016 / 0.016 / 0.036 ms` |
+
+**CPU FFT M2 单 replicate（3 seeds 均值）**
+
+| config | wall (s) | migration (s) | migration 占比 | final non-egg |
+|---|---|---|---|---|
+| small | 0.467（0.460–0.473） | 0.419（0.413–0.424） | 89.7% | ≈47.1k |
+| large | 0.927（0.922–0.934） | 0.778（0.775–0.782） | 83.9% | ≈202.0k |
+
+- CPU M2 的 wall 由迁移主导（84–90%）；cuFFT 纯变换只有 ~0.02 ms，理论上 FFT 本身不是瓶颈。
+- 但 A0 尚未测 **CPU↔GPU 传输** 与 GPU 端 M2 块抽样；能否真正加速取决于这两项。A1 会单独计时，
+  再决定是否需要更激进的批处理/驻留策略。
+- 以上计时为当前共享机器上的单次测量，只用于量级对照，不作为验收硬阈值。
+
+### 38.4 请 evaluator 核对点
+1. 用两个环境分别执行 `--mode cpu` 与 `--mode cuda`，JSON 字段/量级可复现（计时允许机器差异）。
+2. 确认 CPU 基线使用 v3 的 seeds/配置，且没有写入/覆盖 v1/v2/v3 归档。
+3. 确认环境边界：`.venv` 未安装 torch，GPU 检查仅用 conda；未新增生产依赖。
+4. `a0_baseline.py` 通过 `py_compile` 与 `ruff check`；无产品代码改动。
+5. 结论边界：A0 只测环境和 CPU 基线，未实现 GPU M2、未测传输、未做分布等价；不构成对 GPU 加速的结论。
+
+### 38.5 残余
+- A1：实现 `gpu_migration.py` 的 GPU M2，并分别记录 FFT、块抽样、CPU↔GPU 传输耗时。
+- A2：CPU/GPU M2 确定性均值场与随机矩等价性；A3：块大小/边界敏感性。
+- 未做产品化；natal 的随机 GPU FFT 仍需后续单独设计、批准与根 `EVALUATE.md`。
 
 ---
 

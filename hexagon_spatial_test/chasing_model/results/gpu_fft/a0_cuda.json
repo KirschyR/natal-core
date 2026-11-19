@@ -1,0 +1,44 @@
+{
+  "mode": "cuda",
+  "git_head": "b4904e36eeb69cd9c5e814c7fbd21fad1bc54d96",
+  "python": "3.11.6 | packaged by conda-forge | (main, Oct  3 2023, 10:40:35) [GCC 12.3.0]",
+  "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.35",
+  "torch": "2.12.0+cu130",
+  "torch_cuda": "13.0",
+  "cuda_available": true,
+  "device_count": 1,
+  "device": {
+    "name": "NVIDIA GeForce RTX 5090 D v2",
+    "capability": [
+      12,
+      0
+    ],
+    "total_memory_mib": 23975.875
+  },
+  "nvidia_smi": "NVIDIA GeForce RTX 5090 D v2, 24455 MiB, 18 MiB, 0 %",
+  "cufft_roundtrip_f64": {
+    "max_abs_roundtrip": 1.3322676295501878e-15,
+    "mean_abs_roundtrip": 2.457937869755914e-16
+  },
+  "cufft_roundtrip_f32": {
+    "max_abs_roundtrip": 7.152557373046875e-07,
+    "mean_abs_roundtrip": 1.3818208799420972e-07
+  },
+  "cufft_timing": [
+    {
+      "batch": 4,
+      "dtype": "float32",
+      "milliseconds_per_roundtrip": 0.015960223972797394
+    },
+    {
+      "batch": 48,
+      "dtype": "float32",
+      "milliseconds_per_roundtrip": 0.015974435955286026
+    },
+    {
+      "batch": 48,
+      "dtype": "float64",
+      "milliseconds_per_roundtrip": 0.03592116758227348
+    }
+  ]
+}

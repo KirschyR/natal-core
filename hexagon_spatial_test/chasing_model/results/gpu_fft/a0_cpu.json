@@ -1,0 +1,100 @@
+{
+  "mode": "cpu",
+  "git_head": "b4904e36eeb69cd9c5e814c7fbd21fad1bc54d96",
+  "python": "3.13.11 (main, Dec  6 2025, 08:52:51) [GCC 11.4.0]",
+  "platform": "Linux-7.0.0-31-generic-x86_64-with-glibc2.35",
+  "operator": "m2",
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "configs": {
+    "small": {
+      "config": {
+        "arena": 15,
+        "kernel_size": 7,
+        "avd": 0.8,
+        "ticks": 100,
+        "scale": 100.0
+      },
+      "runs": [
+        {
+          "seed": 0,
+          "wall_seconds": 0.4733746871352196,
+          "migration_seconds": 0.4244802761822939,
+          "migration_fraction": 0.8967109727627685,
+          "final_total_non_egg": 47115.47518529081,
+          "final_front": 9.899494936611665
+        },
+        {
+          "seed": 1,
+          "wall_seconds": 0.4687701379880309,
+          "migration_seconds": 0.42027799505740404,
+          "migration_fraction": 0.8965545392060255,
+          "final_total_non_egg": 46940.4892922449,
+          "final_front": 9.899494936611665
+        },
+        {
+          "seed": 2,
+          "wall_seconds": 0.45964546501636505,
+          "migration_seconds": 0.4127846462652087,
+          "migration_fraction": 0.8980500792072692,
+          "final_total_non_egg": 47104.04617511389,
+          "final_front": 9.899494936611665
+        }
+      ],
+      "wall_seconds_mean": 0.46726343004653853,
+      "wall_seconds_min": 0.45964546501636505,
+      "wall_seconds_max": 0.4733746871352196,
+      "migration_seconds_mean": 0.41918097250163555,
+      "migration_seconds_min": 0.4127846462652087,
+      "migration_seconds_max": 0.4244802761822939,
+      "migration_fraction_mean": 0.8971051970586877,
+      "initial_total_non_egg": 47822.22222222222
+    },
+    "large": {
+      "config": {
+        "arena": 31,
+        "kernel_size": 11,
+        "avd": 1.5,
+        "ticks": 100,
+        "scale": 100.0
+      },
+      "runs": [
+        {
+          "seed": 0,
+          "wall_seconds": 0.9216592302545905,
+          "migration_seconds": 0.7762869652360678,
+          "migration_fraction": 0.8422711342256438,
+          "final_total_non_egg": 202030.62904631652,
+          "final_front": 21.213203435596427
+        },
+        {
+          "seed": 1,
+          "wall_seconds": 0.9335313495248556,
+          "migration_seconds": 0.7754591098055243,
+          "migration_fraction": 0.8306728105062715,
+          "final_total_non_egg": 202039.89675241604,
+          "final_front": 21.213203435596427
+        },
+        {
+          "seed": 2,
+          "wall_seconds": 0.924720361828804,
+          "migration_seconds": 0.7817072151228786,
+          "migration_fraction": 0.8453444385899639,
+          "final_total_non_egg": 201647.0239656939,
+          "final_front": 21.213203435596427
+        }
+      ],
+      "wall_seconds_mean": 0.9266369805360833,
+      "wall_seconds_min": 0.9216592302545905,
+      "wall_seconds_max": 0.9335313495248556,
+      "migration_seconds_mean": 0.7778177633881569,
+      "migration_seconds_min": 0.7754591098055243,
+      "migration_seconds_max": 0.7817072151228786,
+      "migration_fraction_mean": 0.8394294611072931,
+      "initial_total_non_egg": 203200.0
+    }
+  }
+}

@@ -26,10 +26,10 @@
 |---|---|
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
-| 最近回执 | §29/§31/§33/§35/§37 = **APPROVED（含非阻断 findings）**；§27 的计划 NOT APPROVED 已由 PLAN v3 闭环 |
-| 待回执 | §38（A0：GPU M2 基线）→ §39 |
-| 主 agent 处理 | §28–§36 已提交并复核（PLAN v3、§30 确定性对照、§32 三策略、§34 M2、§36 C2ST）；§38 A0 基线已完成（CUDA 环境 + CPU M2 计时）；下一步 GPU M2 算子（A1/A2） |
-| 待 evaluator 动作 | 复核 §38 |
+| 最近回执 | §41（A1 GPU M2 算子）= **APPROVED（含非阻断 findings）**；此前 §39/§29/§31/§33/§35/§37 均 APPROVED |
+| 待回执 | §42（A1b：GPU 出境可行性）→ §43 |
+| 主 agent 处理 | A1/§41 已复核；§42 A1b 完成 GPU 出境可行性（rate=1 无差异、rate<1 分布等价、出境计时）；下一步 A2 生命周期等价、A3 块敏感性；产品化另走根 `EVALUATE.md` + 批准 |
+| 待 evaluator 动作 | 复核 §42 |
 
 ---
 
@@ -925,7 +925,7 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - CPU 基线：`a0_baseline.py --mode cpu`；M2 单 replicate，seeds `0/1/2`；配置
   `small = 15²/k7/avd0.8`、`large = 31²/k11/avd1.5`，`T=100`、`scale=100`（与 v3 一致）。
 - CUDA 环境：`a0_baseline.py --mode cuda`；记录 torch/CUDA/cuFFT，做 f64/f32 roundtrip 精度检查，
-  并测 batch 4/48 的 `rfft2 → irfft2` 纯变换耗时。
+  并测 batch 4/48 的 `rfft2 → irfft2` roundtrip wall（含 Python/launch，50 次平均）。
 - 环境：`git_head = b4904e3`；conda Python 3.11.6、torch 2.12.0+cu130、CUDA 13.0；
   `.venv` Python 3.13.11。
 
@@ -938,7 +938,7 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 | GPU | NVIDIA GeForce RTX 5090 D v2，cap (12, 0)，23975 MiB |
 | torch / CUDA | 2.12.0+cu130 / 13.0 |
 | roundtrip max abs（f64 / f32） | `1.33e-15` / `7.15e-7` |
-| 纯变换耗时（batch 4 f32 / batch 48 f32 / batch 48 f64） | `0.016 / 0.016 / 0.036 ms` |
+| roundtrip wall（含 launch；batch 4 f32 / batch 48 f32 / batch 48 f64） | `0.016 / 0.016 / 0.036 ms` |
 
 **CPU FFT M2 单 replicate（3 seeds 均值）**
 
@@ -947,7 +947,8 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 | small | 0.467（0.460–0.473） | 0.419（0.413–0.424） | 89.7% | ≈47.1k |
 | large | 0.927（0.922–0.934） | 0.778（0.775–0.782） | 83.9% | ≈202.0k |
 
-- CPU M2 的 wall 由迁移主导（84–90%）；cuFFT 纯变换只有 ~0.02 ms，理论上 FFT 本身不是瓶颈。
+- CPU M2 的 wall 由迁移主导（84–90%）；cuFFT roundtrip wall（含 launch）只有 ~0.02 ms，
+  真实 kernel 时间更小。注意这是 FFT 这一步，不是整个 M2 迁移；其余步骤仍占主导。
 - 但 A0 尚未测 **CPU↔GPU 传输** 与 GPU 端 M2 块抽样；能否真正加速取决于这两项。A1 会单独计时，
   再决定是否需要更激进的批处理/驻留策略。
 - 以上计时为当前共享机器上的单次测量，只用于量级对照，不作为验收硬阈值。
@@ -963,6 +964,152 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 - A1：实现 `gpu_migration.py` 的 GPU M2，并分别记录 FFT、块抽样、CPU↔GPU 传输耗时。
 - A2：CPU/GPU M2 确定性均值场与随机矩等价性；A3：块大小/边界敏感性。
 - 未做产品化；natal 的随机 GPU FFT 仍需后续单独设计、批准与根 `EVALUATE.md`。
+
+### 38.6 响应 §39（主 agent）
+- **F1**：已把 §38.3 的“纯变换耗时”改为“roundtrip wall（含 launch，50 次平均）”；结论仍成立且更保守。
+- **F2**：`a0_baseline.py` 已增加 `git_dirty` 与 `script` 元数据（供后续运行使用）；A0 归档 JSON 保留原
+  `git_head=b4904e3`，不复跑改写已复核的计时。
+- **F3–F5**：接受；A0 计时仅作量级参考，不作为 CI/验收；A1 会分项计时（传输/FFT/块抽样）并进入 A2 等价性。
+
+## §40 — A1：GPU M2 迁移算子（FFT + 块抽样，请复核）
+
+### 40.1 改动清单（未触碰 natal 产品代码）
+- 新增 `hexagon_spatial_test/chasing_model/gpu_migration.py`：纯 NumPy/torch 的 M2 迁移算子。
+  - `M2GPU`：源端出境可选 CPU/GPU；FFT 均值用 cuFFT；块总量 Gamma + 块内连续多项可在 GPU 或 CPU；
+  - `m2_reference_cpu`：与 GPU CPU-sampling 路径同 RNG 顺序的 NumPy 对照；
+  - `--out` 默认写 `results/gpu_fft/a1_gpu_m2.json`。
+- 新增 `results/gpu_fft/a1_gpu_m2.json`。
+- 未覆盖 v1/v2/v3；未改产品代码/依赖；未 commit/push。
+- 已响应 §39：§38.3 改为 roundtrip wall；`a0_baseline.py` 增加 `git_dirty`/`script` 元数据（见 §38.6）。
+
+### 40.2 执行内容
+- 环境：`/opt/conda/bin/python`；torch 2.12.0+cu130、CUDA 13.0、RTX 5090 D v2。
+- 命令：`/opt/conda/bin/python chasing_model/gpu_migration.py`。
+- 输入：合成成虫平面（`Z=3, S=2, A=10`，age 0/1 为 0，age 2–9 随机正数）；**不含生命周期**，
+  只测迁移算子本身。
+- 对照/路径：
+  1. `outbound=cpu, sample=cpu`：与 `m2_reference_cpu` 同 seed/同 RNG 顺序，f64 与 f32；
+  2. `outbound=gpu, sample=gpu`：完整 GPU 路径（出境+FFT+块抽样），f32，冷/热计时；
+  3. `outbound=cpu, sample=gpu`：隔离 CPU 出境瓶颈。
+
+### 40.3 结果
+
+**等价性（CPU-sampling 路径）**
+
+| case | f64 max abs | f32 max abs |
+|---|---|---|
+| small 15²/k7/avd0.8 | `1.07e-14` | `4.20e-6` |
+| large 31²/k11/avd1.5 | `1.95e-14` | `6.37e-6` |
+
+**完整 GPU 路径（warm）与 CPU M2 对照**
+
+| case | full GPU ms/tick | CPU M2 ms/tick（A0） | 约加速 |
+|---|---|---|---|
+| small | `0.606` | `4.19` | `~6.9×` |
+| large | `0.462` | `7.78` | `~16.8×` |
+
+- full GPU warm 分解（ms/tick）：
+  - small：transfer-in `0.078`、FFT `0.142`、sampling `0.341`、transfer-out `0.045`；
+  - large：transfer-in `0.055`、FFT `0.070`、sampling `0.292`、transfer-out `0.044`。
+- `outbound=cpu, sample=gpu`：small `2.01` ms/tick（其中 CPU 出境 `1.57`），large `3.89` ms/tick
+  （CPU 出境 `3.40`）。→ **CPU 出境是剩余瓶颈；完整 GPU 出境把总时间降到 ~0.46–0.61 ms/tick**。
+- A1 的 `_outbound_gpu` 对 `rate>=1` 走快速路径（直接返回源场），与 natal `sample_outbound` 的
+  `rate>=1` 语义一致；因此 `rate=1` 时 GPU 出境不再产生 Beta 抽样开销。
+- 守恒/有效性：adult in/out 差 small `5.7e-3`（相对 `1.1e-7`）、large `7.7e-3`（相对 `3.3e-8`）；
+  最小值为 `0`（无负值）、全部有限；同 seed 完整 GPU 重复运行 **逐位一致**。
+- 冷启动 transfer-in 可到 ~39 ms（CUDA 初始化），计时采用 warm 值；A0 的 CPU 值包含 100 tick，
+  这里是单 tick 算子调用，两者相除得到上表加速比。
+
+### 40.4 请 evaluator 核对点
+1. 用 conda 复跑 `gpu_migration.py`；核对 f64/f32 CPU-sampling 最大差与 `a1_gpu_m2.json` 一致。
+2. 核对 `m2_reference_cpu` 与 GPU CPU-sampling 路径的 RNG 顺序/块顺序一致；该对照是 v3 M2 数学的
+   同序重写，不是直接调用 `v3.m2_migrate`（后者 RNG 交错顺序不同）。完整模型分布等价留 A2。
+3. 核对 warm/cold 计时口径、分解项（transfer/FFT/sampling）和 CPU 出境瓶颈结论。
+4. 确认未改产品代码/归档，未新增依赖；`gpu_migration.py` 通过 `py_compile`/`ruff`。
+5. 结论边界：合成数据、单次算子调用；未含生命周期、未做 CPU/GPU 随机分布等价、未做块大小/边界扫描；
+   不能据此宣称完整 chasing 已加速。
+
+### 40.5 残余
+- A2：接回生命周期，CPU M2 vs 完整 GPU M2 的确定性轨迹 + 随机矩（总非卵、逐 deme drive、方差比、
+  lag 协方差），R=100–300。
+- A3：块大小 `{5,7,9,11,15}` 与边界模式；默认块大小。
+- natal 产品化（随机 GPU FFT 迁移）仍须单独设计、用户批准、根 `EVALUATE.md` 与全量门禁。
+
+
+
+## §42 — A1b：GPU 源端出境可行性（方法切换影响 + 性能）
+
+### 42.1 改动/产物（未触碰 natal 产品代码）
+- 新增 `chasing_model/validate_gpu_outbound.py` 与 `results/gpu_fft/a2_outbound_validation.json`。
+- `gpu_migration.py`：`_outbound_gpu` 增加 `rate >= 1` 快速路径（直接返回源场），与 natal
+  `sample_outbound` 的 `rate >= 1` 语义一致；未改产品代码/依赖，未 commit/push。
+- 响应 §41 findings：F1/F2/F3 在本验证中分别用**独立出境计时/50 次中位数/仅成人平面非负检查**处理；
+  F4 的 `rate=1` 短路已补到 GPU 出境；F6 的本产物 JSON 记录 `git_head/git_dirty/script`；
+  F5（3 型最小模型）、F7（A1 JSON 的 sample=cpu 计时字段）、F8（cold timing 措辞）留到 A2 统一。
+
+### 42.2 方法
+- 合成成人平面（`Z=3, S=2, A=10`），**不含生命周期**。
+- outbound-only：rate `1.0`（当前模型）与 `0.5`（一般随机）；CPU `_continuous_binomial_vec` vs
+  GPU `_outbound_gpu`；`R_outbound=400`。
+- full M2：`cpu_cpu`（参考）、`gpu_gpu`（GPU 出境+FFT+块抽样）、`gpu_cpu`（GPU 出境 + CPU 块抽样）；
+  `R_output=200`；比较逐 deme drive 代理、总 adult、成人最小值/有限性。
+- 计时：warmup 后 `R_timing=50`，报告 median；CPU/GPU 出境单独计时。
+
+### 42.3 结果
+
+**出境分布**
+
+| 项 | small | large |
+|---|---|---|
+| rate=1 同 seed max abs | `0` | `0` |
+| rate=1 mean rel / var ratio / KS | `0 / 1.000 / 0` | `0 / 1.000 / 0` |
+| rate=0.5 mean rel median（max） | `1.85e-2`（`0.21`） | `1.86e-2`（`0.25`） |
+| rate=0.5 var ratio median（p05–p95） | `1.0003`（0.884–1.134） | `1.0001`（0.884–1.129） |
+| rate=0.5 KS（p） | `0.0019`（0.879） | `0.0023`（0.651） |
+
+- **rate=1 时 CPU/GPU 出境逐位相同**：现有连续二项在 `rate=1` 下 Beta 分量的 `Gamma(EPS)` 分量下溢，
+  等价于“全部迁出”；这与 natal `sample_outbound` 的 `rate>=1` 直接返回一致。切换 GPU **不改变结果**。
+- **rate=0.5 时分布一致**：均值差在 MC 噪声内，方差比 ~1，KS ~0.002 且 p 不显著；同 seed 数值不同
+  只因 NumPy/torch RNG 流不同（同 seed max abs ~8.3 是独立的随机实现，不是偏差）。
+
+**完整 M2 输出（rate=1）**
+
+| 项 | small | large |
+|---|---|---|
+| gpu_gpu vs cpu_cpu drive mean diff median | `2.06e-3` | `1.94e-3` |
+| gpu_gpu vs cpu_cpu drive var ratio median | `0.998` | `1.002` |
+| gpu_cpu vs cpu_cpu drive mean diff median | `2.06e-3` | `2.07e-3` |
+| total mean rel（gpu_gpu/gpu_cpu） | ~`0` | ~`0` |
+| 成人最小值 / 有限 | >0 / true | >0 / true |
+
+**计时（median，ms/call）**
+
+| 路径 | small | large |
+|---|---|---|
+| CPU outbound-only（rate=1） | `1.43` | `3.19` |
+| GPU outbound-only（rate=1） | `0.002` | `0.002` |
+| CPU outbound-only（rate=0.5） | `1.32` | `2.79` |
+| GPU outbound-only（rate=0.5） | `0.057` | `0.057` |
+| full cpu_cpu | `6.99` | `10.20` |
+| full gpu_gpu | `0.358` | `0.424` |
+| full cpu-outbound / gpu-sampling | `1.90` | `3.82` |
+
+- 结论：**源端出境可以放 GPU**。当前 `rate=1` 时结果无差异、出境阶段 ~700×（小）/ ~1600×（大）快，
+  完整 M2 约 19×/24×；`rate<1` 时分布等价。A1 的 full GPU 数值在加入 `rate>=1` 快速路径后已更新，
+  以本节的 50 次中位数为准。
+- 边界：合成场、算子级；未接生命周期；不能据此宣称 chasing 结果已等价（A2）。
+
+### 42.4 请 evaluator 核对点
+1. 复跑 `validate_gpu_outbound.py`；确认 rate=1 逐位相同、rate=0.5 矩/KS、full M2 输出与计时。
+2. 核对 rate=1 “全部迁出”解释与 natal `sample_outbound` 一致性；确认不是去掉本应存在的随机性。
+3. 核对 adult-only 非负/有限检查、50 次 median 口径、CPU/GPU 出境独立计时。
+4. 确认未改产品代码/归档；脚本通过 `py_compile`/`ruff`；JSON 元数据完整。
+
+### 42.5 残余
+- A2：接回生命周期，CPU M2 vs GPU M2 的确定性轨迹 + 随机矩（R=100–300）；同时统一 A1 JSON 的
+  sample=cpu 计时字段和 cold/warm 标签。
+- A3：块大小/边界；产品化随机 GPU FFT 仍须根 `EVALUATE.md` + 用户批准。
+
 
 ---
 
@@ -2290,3 +2437,132 @@ reproduction→survival→aging（`rust/src/kernels/age_structured.rs:1087-1088`
 
 > 本轮仅复核复现计划/脚本/归档结果，未运行产品全量门禁（未触产品代码）；数值证据均来自当前工作树
 > 的归档 `summary.json`/`series.npz` 与独立小范围复跑。未 commit/push。
+
+## §39 — §38 A0（GPU M2 基线）复核回执（evaluator）
+
+### 39.0 裁定
+
+**APPROVED（A0 基线；附非阻断的计时/元数据说明）**
+
+### 39.1 独立证据
+
+- `py_compile`：`.venv/bin/python -m py_compile chasing_model/a0_baseline.py` → OK；
+  `.venv/bin/ruff check chasing_model/a0_baseline.py` → `All checks passed!`。
+- 环境边界：`.venv` `find_spec("torch") is None`；`/opt/conda/bin/python -c "import torch"` →
+  `2.12.0+cu130`、CUDA `13.0`、`torch.cuda.is_available() == True`。HEAD `a98489a` 的 `git show --stat`
+  只含 `EVALUATE.md`、`a0_baseline.py`、`results/gpu_fft/a0_cpu.json`、`a0_cuda.json`；无产品代码/依赖改动。
+- CPU 模式独立复跑（把 `a0_baseline.RESULTS` 指向临时目录后调用 `run_cpu()`，不覆盖归档）：
+  - small：wall `0.4776 s`（0.4650–0.4959），migration `0.4271 s`（89.4%），
+    final non-egg `[47115.47518529081, 46940.4892922449, 47104.04617511389]`；
+  - large：wall `0.9354 s`（0.9316–0.9413），migration `0.7820 s`（83.6%），
+    final non-egg `[202030.62904631652, 202039.89675241604, 201647.0239656939]`。
+  与 `a0_cpu.json`（small wall 0.467、large 0.927）在机器波动内一致；三 seed 的 final non-egg 与
+  `results/strategies_v3/{small,large}/series.npz` 的 `m2_total[seed,-1]` **逐值完全一致**，确认 A0 CPU
+  基线确实复用 v3 的 M2/seeds/configs，不是另一套实现。
+- CUDA 模式独立复跑（`/opt/conda/bin/python`，临时 RESULTS）：RTX 5090 D v2、cap (12,0)、
+  torch `2.12.0+cu130`；roundtrip f64 `1.33e-15`、f32 `7.15e-7`；timing
+  `batch4 f32 0.0160 / batch48 f32 0.0158 / batch48 f64 0.0352 ms`；与 `a0_cuda.json` 一致。
+- 归档未被覆盖：HEAD 只新增 `results/gpu_fft/a0_*.json`；`strategies_v1/`、`strategies_v2_r20_r10/`、
+  `strategies_v3/` 无改动。
+
+### 39.2 非阻断 findings
+
+- **F1（低，计时口径）**：`a0_baseline.py::_timing`（约 :196-218）测的是 50 次
+  `rfft2 → irfft2` Python 循环的**wall/iteration**，包含 kernel launch 与 Python 开销，不是 cuFFT 纯 kernel 时间。
+  §38.3 的“纯变换耗时”建议改为“roundtrip wall（含 launch）”，或改用 CUDA events；当前结论
+  “FFT 本身不是瓶颈”因此是保守的（真实 kernel 时间只会更小），不影响 A0 的方向判断。
+- **F2（低，元数据）**：归档 `a0_cpu.json`/`a0_cuda.json` 的 `git_head=b4904e3`（父提交），而脚本/结果提交在
+  `a98489a`；独立复跑时 `_git_head()` 会记录 `a98489a`。建议在 JSON 中同时记录 `git_dirty`/生成后提交说明，
+  或提交后重跑生成，避免“结果对应哪个脚本版本”歧义。
+- **F3（低，统计口径）**：CPU 基线是 3 个 seed 的**单 replicate**，min/max 不是 95% CI；用于计时量级合适，
+  报告中已说明“不作为验收硬阈值”，不要把它当作种群统计的置信区间。
+- **F4（低，可运行性）**：`run_cpu()` 通过 `import compare_strategies_v3 as v3` 依赖脚本目录在 `sys.path`；
+  从仓库根以 `python chasing_model/a0_baseline.py --mode cpu` 可运行，但 `python -m` 方式可能失败。
+  docstring 已给正确命令，非阻断。
+- **F5（范围）**：A0 未测 CPU↔GPU 传输、GPU 端 M2 块抽样或分布等价；§38.3/§38.5 已明确，不能据此得出
+  “GPU 加速已成立”的结论。
+
+### 39.3 核对点结论
+
+1. 两环境分别执行 + JSON 可复现：**PASS**（CPU/CUDA 均在临时目录独立复跑，量级/精度与归档一致）。
+2. CPU 基线使用 v3 seeds/configs 且不覆盖 v1/v2/v3：**PASS**（final non-egg 与 v3 M2 逐值一致；HEAD 未改
+   归档目录）。
+3. 环境边界/无新增生产依赖：**PASS**（`.venv` 无 torch；conda torch 仅用于 `--mode cuda`；pyproject/uv.lock
+   未变）。
+4. `py_compile`/`ruff check`/无产品代码改动：**PASS**（见 39.1）。
+5. 结论边界：**PASS**（A0 仅环境 + CPU 基线；未实现 GPU M2、未测传输、未做分布等价；§38.3/§38.5 已声明）。
+
+### 39.4 残余
+
+- A1：GPU M2 实现与 FFT/块抽样/传输分项计时；A2：CPU/GPU M2 确定性均值场与随机矩等价；A3：块大小/边界
+  敏感性。随机 GPU FFT 的 natal 产品化仍须单独设计、用户批准、根 `EVALUATE.md` 与全量门禁。
+- 本轮未运行产品全量门禁（未触产品代码）；未 commit/push。
+
+## §41 — §40 A1（GPU M2 迁移算子）复核回执（evaluator）
+
+### 41.0 裁定
+
+**APPROVED（A1 原型；附非阻断的计时/校验说明）**
+
+- 审查对象是**未提交工作树**：`gpu_migration.py`（新增）、`results/gpu_fft/a1_gpu_m2.json`（新增）、
+  `a0_baseline.py`（仅新增 `git_dirty`/`script` 元数据）与 `EVALUATE.md`（§38.6/§40）。未发现 natal 产品代码
+  或依赖改动；`a0_cpu.json`/`a0_cuda.json` 与 v1/v2/v3 归档未变。
+
+### 41.1 独立证据
+
+- `py_compile`：`.venv/bin/python -m py_compile chasing_model/gpu_migration.py chasing_model/a0_baseline.py`
+  → OK；`.venv/bin/ruff check ...` → `All checks passed!`。
+- conda 独立复跑（`/opt/conda/bin/python chasing_model/gpu_migration.py --out /tmp/...`，不覆盖归档）：
+  - small：f64 CPU-sampling max abs `1.066e-14`、f32 `4.195e-6`、full GPU warm `0.69 ms/tick`；
+  - large：f64 `1.954e-14`、f32 `6.373e-6`、full GPU warm `0.60 ms/tick`。
+  与 `a1_gpu_m2.json`（f64 `1.066e-14/1.954e-14`、f32 `4.195e-6/6.373e-6`、warm `0.645/0.485 ms`）
+  在机器波动内一致；f64 差异处于双精度舍入量级。
+- 归档 JSON 复核：adult in/out 差 small `5.700e-3`（相对 `1.056e-7`）、large `7.655e-3`（相对 `3.314e-8`）；
+  `finite=true`、`repeat_identical=true`；`outbound=cpu,sample=gpu` 的 CPU 出境 small `1.555 ms`、
+  large `3.429 ms`，与 §40.3 的“CPU 出境瓶颈”结论一致。
+- 代码核对：`m2_reference_cpu` 与 `M2GPU(sample_device="cpu", outbound_device="cpu")` 的
+  outbound→FFT→block 抽样顺序一致（`gpu_migration.py:139-177`、`:302-390`）；f64 `1e-14` 的最大差
+  支持“同序重写”的说法。完整 GPU 路径与 CPU 路径的 **RNG 不同**（torch vs NumPy），A2 再比分布。
+- 环境：`.venv` 无 torch；conda torch `2.12.0+cu130`/CUDA `13.0`；未新增生产依赖。
+
+### 41.2 非阻断 findings
+
+- **F1（中，计时标签）**：`migrate` 在 `outbound_device="gpu"` 时把 H2D `as_tensor` 与
+  `_outbound_gpu` 都计入 `transfer_in_s`（`:334-343`）。因此 §40.3 的 “transfer-in 0.174/0.131 ms”
+  实际是 **H2D + GPU 出境采样**，不是纯传输；“sampling” 仅是块抽样。请拆分或改标签
+  “transfer-in + GPU outbound”。这不影响总时间与“CPU 出境是瓶颈”的结论（后者由独立
+  `outbound=cpu,sample=gpu` 路径支持）。
+- **F2（中，计时稳健性）**：full GPU warm 值来自**一次** `migrate` 调用（`:436-441`），没有重复/CI；
+  `~6.5×/16×` 是点估计。建议 warmup 后重复 50 次，报告 median/min/max（A0 的 `_timing` 已用 50 次，口径应一致）。
+  另外，CPU M2 值来自 A0 的 100 tick 全模型，GPU 是合成成年平面的单 tick；输入分布/计数不同，加速比只能
+  作量级参考（§40.4#5 已声明“不构成完整 chasing 加速结论”）。
+- **F3（低，有效性检查）**：`negative_min = float(out_gpu.min())`（`:469`）因 age0/1 恒为 0 而必为 0，
+  不能证明成人平面无负值；应改为 `out_gpu[:, :, NEW_ADULT_AGE:].min()` 并同样限定 `finite` 检查范围。
+- **F4（低，语义）**：`_continuous_binomial_vec`（`:76-97`）与 `_outbound_gpu`（`:285-300`）没有 natal
+  `continuous_binomial` 的 `p >= 1-EPS → n` 短路；`rate=1` 时仍会抽 Beta 并引入极小噪声。该近似沿用 v3，
+  A1 的 CPU-sampling 对照使用同一近似，故等价性结论不受影响；但 A2/产品化对 natal 时应补短路或明确记录。
+- **F5（低，范围）**：`gpu_migration.py` 硬编码 `Z=3, S=2, A=10`（3 型最小模型），PLAN v3 的 chasing
+  是 5 型/6 ztype；A2 接回生命周期时需扩展或明确只验证 3 型。
+- **F6（低，元数据）**：`a1_gpu_m2.json` 的 `git_head=a98489a`，而 `gpu_migration.py` 当前未跟踪/未提交；
+  JSON 无 `git_dirty`/脚本哈希。建议提交后重跑或用与 `a0_baseline.py` 相同的 `git_dirty`/`script` 元数据。
+- **F7（低，计时字段）**：`sample_device="cpu"` 路径把 `sampling_s`/`transfer_out_s` 置 0（`:364-370`），
+  实际 CPU 抽样/下载仍发生；报告未用这些字段，但读 JSON 时易误解。可填实际值或标 N/A。
+- **F8（低，cold 数值）**：§40.3 写“冷启动 transfer-in 可到 ~39 ms”，归档 JSON 的首次调用 small 为
+  `33.7 ms`、large 首次已是 warm（`0.229 ms`）；建议统一为“small 首次调用 33.7 ms”或注明运行差异。
+
+### 41.3 核对点结论
+
+1. conda 复跑 + f64/f32 CPU-sampling 最大差与 JSON 一致：**PASS**（见 41.1）。
+2. `m2_reference_cpu` 与 GPU CPU-sampling 的 RNG/块顺序一致：**PASS（同序重写；f64 1e-14）**；
+   完整模型分布等价留 A2（报告已声明）。
+3. warm/cold 计时/分解/CPU 出境瓶颈：**PASS（结论）+ F1/F2/F8 标签与稳健性修订**。
+4. 未改产品代码/归档、未新增依赖、`py_compile`/`ruff`：**PASS**（见 41.1）。
+5. 结论边界：**PASS**（合成数据、单次算子调用；未含生命周期、未做 CPU/GPU 随机分布等价、未做块大小/
+   边界扫描；§40.4#5/§40.5 已声明）。
+
+### 41.4 残余
+
+- A2：接回生命周期，CPU M2 vs 完整 GPU M2 的确定性轨迹、随机矩（总非卵/逐 deme drive/方差比/lag 协方差），
+  R=100–300；A3：块大小/边界敏感性。随机 GPU FFT 的 natal 产品化仍须单独设计、用户批准、根
+  `EVALUATE.md` 与全量门禁。
+- 本轮未运行产品全量门禁（未触产品代码）；未 commit/push；审查基于未提交工作树。

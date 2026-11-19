@@ -1,0 +1,89 @@
+{
+  "git_head": "a98489a25c66721e2f64dbb4c69631a86fc7e887",
+  "torch": "2.12.0+cu130",
+  "torch_cuda": "13.0",
+  "device": "NVIDIA GeForce RTX 5090 D v2",
+  "note": "synthetic adult planes; no lifecycle; warm timings after one run",
+  "cases": {
+    "small": {
+      "rows": 15,
+      "kernel_size": 7,
+      "avd": 0.8,
+      "f64_cpu_sampling_max_abs": 1.0658141036401503e-14,
+      "f64_cpu_sampling_mean_abs": 1.1859095238741656e-15,
+      "f32_cpu_sampling_max_abs": 4.1950642319932285e-06,
+      "f32_cpu_sampling_mean_abs": 5.821248880315422e-07,
+      "gpu_full": {
+        "adult_in": 53982.833840787396,
+        "adult_out": 53982.82759008743,
+        "negative_min": 0.0,
+        "finite": true,
+        "repeat_identical": true,
+        "timing": {
+          "transfer_in_s": 0.004955600015819073,
+          "outbound_s": 0.0,
+          "fft_s": 0.00015988480299711227,
+          "sampling_s": 0.04706432297825813,
+          "transfer_out_s": 0.00010720361024141312,
+          "total_s": 0.05228701140731573
+        },
+        "timing_warm": {
+          "transfer_in_s": 7.825903594493866e-05,
+          "outbound_s": 0.0,
+          "fft_s": 0.00014197081327438354,
+          "sampling_s": 0.000341230072081089,
+          "transfer_out_s": 4.48860228061676e-05,
+          "total_s": 0.0006063459441065788
+        }
+      },
+      "cpu_outbound_gpu_sampling_timing": {
+        "outbound_s": 0.0015668142586946487,
+        "transfer_in_s": 3.874395042657852e-05,
+        "fft_s": 8.220598101615906e-05,
+        "sampling_s": 0.00028922129422426224,
+        "transfer_out_s": 2.982746809720993e-05,
+        "total_s": 0.0020068129524588585
+      }
+    },
+    "large": {
+      "rows": 31,
+      "kernel_size": 11,
+      "avd": 1.5,
+      "f64_cpu_sampling_max_abs": 1.9539925233402755e-14,
+      "f64_cpu_sampling_mean_abs": 1.5679108298817664e-15,
+      "f32_cpu_sampling_max_abs": 6.373179816776542e-06,
+      "f32_cpu_sampling_mean_abs": 6.277137221019529e-07,
+      "gpu_full": {
+        "adult_in": 231024.19208497112,
+        "adult_out": 231024.18981998414,
+        "negative_min": 0.0,
+        "finite": true,
+        "repeat_identical": true,
+        "timing": {
+          "transfer_in_s": 7.726717740297318e-05,
+          "outbound_s": 0.0,
+          "fft_s": 0.00010133255273103714,
+          "sampling_s": 0.0004369933158159256,
+          "transfer_out_s": 5.195941776037216e-05,
+          "total_s": 0.0006675524637103081
+        },
+        "timing_warm": {
+          "transfer_in_s": 5.457364022731781e-05,
+          "outbound_s": 0.0,
+          "fft_s": 7.043406367301941e-05,
+          "sampling_s": 0.0002924874424934387,
+          "transfer_out_s": 4.429370164871216e-05,
+          "total_s": 0.0004617888480424881
+        }
+      },
+      "cpu_outbound_gpu_sampling_timing": {
+        "outbound_s": 0.003403693437576294,
+        "transfer_in_s": 6.378069519996643e-05,
+        "fft_s": 8.21063295006752e-05,
+        "sampling_s": 0.000300602987408638,
+        "transfer_out_s": 3.725104033946991e-05,
+        "total_s": 0.0038874344900250435
+      }
+    }
+  }
+}

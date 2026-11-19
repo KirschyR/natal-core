@@ -47,6 +47,15 @@ def _git_head() -> str:
         return "unknown"
 
 
+def _git_dirty() -> str:
+    try:
+        return subprocess.check_output(
+            ["git", "status", "--porcelain"], cwd=HERE, text=True
+        ).strip()
+    except Exception:
+        return "unknown"
+
+
 def _jsonable(value: Any) -> Any:
     if isinstance(value, dict):
         return {str(k): _jsonable(v) for k, v in value.items()}
@@ -79,6 +88,8 @@ def run_cpu() -> Path:
     payload: dict[str, Any] = {
         "mode": "cpu",
         "git_head": _git_head(),
+        "git_dirty": _git_dirty(),
+        "script": Path(__file__).name,
         "python": sys.version,
         "platform": platform.platform(),
         "operator": "m2",
@@ -153,6 +164,8 @@ def run_cuda() -> Path:
     payload: dict[str, Any] = {
         "mode": "cuda",
         "git_head": _git_head(),
+        "git_dirty": _git_dirty(),
+        "script": Path(__file__).name,
         "python": sys.version,
         "platform": platform.platform(),
         "torch": torch.__version__,

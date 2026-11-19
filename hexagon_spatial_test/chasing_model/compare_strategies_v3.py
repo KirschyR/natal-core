@@ -31,9 +31,9 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.cm import ScalarMappable  # noqa: E402
 from matplotlib.collections import PolyCollection
+from matplotlib.colors import Normalize, TwoSlopeNorm  # noqa: E402
 from scipy.optimize import minimize
 from scipy.stats import rankdata  # noqa: E402
-from matplotlib.colors import Normalize, TwoSlopeNorm  # noqa: E402
 
 import natal as nt  # noqa: E402
 
@@ -510,6 +510,7 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
     rng_life = np.random.default_rng(seed)
     rng_mig = np.random.default_rng(seed + 100000)
     scale = float(cfg.get("scale", 1.0))
+    rate = float(cfg.get("migration_rate", MIGRATION_RATE))
     density_ref = DENSITY_REF * scale
     data = initial_state(rows, cols, RELEASE_RADIUS, RELEASE_MULTIPLE, scale)
     ticks = cfg["ticks"]
@@ -540,13 +541,13 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
         event_a(data)
         t0 = time.perf_counter()
         if strategy == "cpu":
-            cpu_migrate(data, csr, MIGRATION_RATE, rng_mig)
+            cpu_migrate(data, csr, rate, rng_mig)
         elif strategy == "m0":
-            m0_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+            m0_migrate(data, kernel, rate, rng_mig)
         elif strategy == "m1":
-            m1_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+            m1_migrate(data, kernel, rate, rng_mig)
         else:
-            m2_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+            m2_migrate(data, kernel, rate, rng_mig)
         migration_seconds += time.perf_counter() - t0
         capture(t)
     return {
@@ -745,8 +746,10 @@ def _plot_c2st(acc, auc, methods, out):
     norm = TwoSlopeNorm(vmin=0.4, vcenter=0.5, vmax=1.0)
     fig, ax = plt.subplots(figsize=(4.8, 4.2))
     im = ax.imshow(data, cmap="RdBu_r", norm=norm)
-    ax.set_xticks(range(n)); ax.set_xticklabels(methods)
-    ax.set_yticks(range(n)); ax.set_yticklabels(methods)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(methods)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(methods)
     for i in range(n):
         for j in range(i + 1):
             rgba = im.cmap(norm(acc[i, j]))

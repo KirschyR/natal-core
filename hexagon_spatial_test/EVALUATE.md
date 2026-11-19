@@ -27,9 +27,9 @@
 | 分支 | `recon/hex-model` |
 | 项目 | 复现 bioRxiv 2026 hex 基因驱动模型（首期：模块 1–3 波速/径向/线性） |
 | 最近回执 | §41（A1 GPU M2 算子）= **APPROVED（含非阻断 findings）**；此前 §39/§29/§31/§33/§35/§37 均 APPROVED |
-| 待回执 | §42（A1b：GPU 出境可行性）→ §43 |
-| 主 agent 处理 | A1/§41 已复核；§42 A1b 完成 GPU 出境可行性（rate=1 无差异、rate<1 分布等价、出境计时）；下一步 A2 生命周期等价、A3 块敏感性；产品化另走根 `EVALUATE.md` + 批准 |
-| 待 evaluator 动作 | 复核 §42 |
+| 待回执 | §42（A1b：GPU 出境可行性）+ §42.6（rate=0.5 完整 M2）→ §43；§44（A2a：rate=0.5 全模型）→ §45 |
+| 主 agent 处理 | §42/§42.6 完成 GPU 出境 + rate=0.5 完整 M2 一致性；§44 完成 rate=0.5 全模型 CPU/M0/M1/M2 一致性；下一步 A2b 生命周期等价、A3 块敏感性；产品化另走根 `EVALUATE.md` + 批准 |
+| 待 evaluator 动作 | 复核 §42/§42.6/§44 |
 
 ---
 
@@ -1108,6 +1108,75 @@ F2 报告统一标注 natal `(M,F,O)` 行和 vs 论文 `mats[(k,i),j]` 轴口径
 ### 42.5 残余
 - A2：接回生命周期，CPU M2 vs GPU M2 的确定性轨迹 + 随机矩（R=100–300）；同时统一 A1 JSON 的
   sample=cpu 计时字段和 cold/warm 标签。
+- A3：块大小/边界；产品化随机 GPU FFT 仍须根 `EVALUATE.md` + 用户批准。
+
+
+### 42.6 补充：rate=0.5 的完整 M2 一致性（GPU/CPU）
+
+- `validate_gpu_outbound.py` 已加入 rate=0.5 的 CPU-sampling 等价与完整 M2 输出/计时。
+- **CPU-sampling 等价**：f64 max abs small `1.07e-14`、large `1.24e-14`；f32 `2.99e-6`、`3.62e-6`。
+- **完整 M2（full gpu_gpu vs cpu_cpu）**：
+  - drive 均值差 median：small `1.77e-3`、large `1.81e-3`；
+  - 方差比 median：small `1.010`、large `1.003`；
+  - total 均值相对差：~`0`；`gpu_cpu` 同样接近（median `1.67e-3/1.80e-3`）。
+- **完整 M2 计时（median）**：CPU/CPU rate=0.5 small `6.61 ms`、large `10.10 ms`；GPU/GPU rate=0.5
+  small `0.415 ms`、large `0.559 ms`。
+- 结论：rate=0.5 时 GPU 出境/块抽样与 CPU M2 的分布一致；出境不再是确定性退化，GPU 路径仍保持加速。
+- 成人平面最小值 >0、有限；rate=0.5 的 outbound 分布见 §42.3。
+
+## §44 — A2a：完整模型 migration_rate=0.5 一致性（CPU/M0/M1/M2）
+
+### 44.1 背景与改动
+- 确认：此前完整模型脚本 `compare_strategies_v3.py` 的 `MIGRATION_RATE=1.0`，CPU/M0/M1/M2 四条策略
+  均以 rate=1 运行；归档 v1/v2/v3 不受影响。
+- 改动：`run_replicate` 参数化为 `cfg["migration_rate"]`（缺省仍为 1.0，保证 v3 可复现）；新增
+  `compare_rate05.py`，在 `results/strategies_rate05/` 用 `rate=0.5` 重跑：
+  - small：15²/k7/avd0.8，R=20；
+  - large：31²/k11/avd1.5，R=10。
+- 未覆盖 v1/v2/v3；HTML 写在 `results/html/compare_strategies_v3_*_rate05.html`；未改产品代码。
+
+### 44.2 结果
+
+**drive@t40（沿线中心→边缘）**
+
+| case | CPU | M0 | M1 | M2 |
+|---|---|---|---|---|
+| small | `0.904, 0.863, 0.575, 0.396` | `0.904, 0.856, 0.549, 0.372` | `0.848, 0.821, 0.694, 0.626` | `0.904, 0.846, 0.559, 0.380` |
+| large | `0.754, 0.539, 0.095, 0.0055` | `0.735, 0.502, 0.094, 0.0045` | `0.382, 0.312, 0.197, 0.204` | `0.759, 0.529, 0.103, 0.0050` |
+
+**与 CPU 的一致性**
+
+| case | M2 median/max abs diff | M0 | M1 | M2 总 adult 相对差 |
+|---|---|---|---|---|
+| small | `1.62e-2 / 1.74e-2` | `1.56e-2 / 2.62e-2` | `8.74e-2 / 0.229` | `+0.09%` |
+| large | `6.18e-3 / 9.91e-3` | `1.01e-2 / 3.62e-2` | `0.213 / 0.372` | `-0.01%` |
+
+- T50（均值）：small CPU `36.3`、M0 `36.3`、M1 `35.65`、M2 `36.1`；
+  large CPU `46.1`、M0 `46.4`、M1 `44.4`、M2 `46.5`。
+- final front 与 coverage（0.1/0.5/0.9）：四策略相同（small 全场 225，large 全场 961）。
+- **排序与 rate=1 一致**：M2 最接近 CPU，M0 次之，M1 明显偏离；M2/M0 的 T50 和总量仍在 CPU 邻域。
+
+**rate=0.5 vs rate=1（CPU 参考）**
+
+| case | drive@t40 变化（中心→边缘） | median/max abs diff | T50 | final total rel |
+|---|---|---|---|---|
+| small | `0.904,0.863,0.575,0.396` vs `0.808,0.784,0.664,0.587` | `9.26e-2 / 0.191` | `36.3` vs `36.6` | `+0.14%` |
+| large | `0.754,0.539,0.095,0.0055` vs `0.534,0.411,0.172,0.064` | `0.103 / 0.220` | `46.1` vs `45.3` | `+0.14%` |
+
+- 下调 rate 使波前**更陡**（中心更高、边缘更低），T50 仅小幅变化；总量/front/coverage 基本不变。
+- 这与“rate 控制迁移量、但不改变最终占满格局”的预期一致；策略间一致性结论不因 rate=0.5 改变。
+- C2ST（R=20/10）仅作探索，样本量不足以支撑等价/可区分结论，未用于本结论。
+
+### 44.3 请 evaluator 核对点
+1. 用 `.venv` 复跑 `compare_rate05.py`，核对 `results/strategies_rate05/consistency.json`、`series.npz` 与表值；
+   确认 v1/v2/v3 未被覆盖。
+2. 核对 `compare_strategies_v3.py` 的参数化缺省值仍为 1.0（v3 可复现），rate=0.5 只由新 config 触发。
+3. 核对 drive@t40/T50/total/front/coverage 的口径；R=20/10 为描述性，不当作显著性或等价检验。
+4. 结论边界：仍是 3 型、Poisson 生命周期的 NumPy 原型；未做 engine-matched 生命周期，也未把 GPU M2
+   接进完整生命周期；不能据此宣称 natal/chasing 已等价。
+
+### 44.4 残余
+- A2b：接回生命周期（engine-matched `fixed_egg_count` + 分层抽样），CPU M2 vs GPU M2 的确定性轨迹/随机矩；
 - A3：块大小/边界；产品化随机 GPU FFT 仍须根 `EVALUATE.md` + 用户批准。
 
 

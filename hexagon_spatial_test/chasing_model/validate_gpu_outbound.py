@@ -258,51 +258,78 @@ def run_case(name: str, rows: int, kernel_size: int, avd: float) -> dict[str, An
         )
         outbound[str(rate)] = summary
 
-    # --- full M2 output distribution ------------------------------------
+    # --- CPU-sampling equivalence at both rates --------------------------
+    sampling_equivalence: dict[str, Any] = {}
+    for rate in (1.0, 0.5):
+        ref = gm.m2_reference_cpu(data, kernel, rate=rate, seed=0)
+        entry: dict[str, Any] = {"rate": rate}
+        for dtype, tag in ((torch.float64, "f64"), (torch.float32, "f32")):
+            g = gm.M2GPU(rows, rows, kernel, dtype=dtype, seed=0)
+            out = g.migrate(
+                data, rate=rate, sample_device="cpu", outbound_device="cpu"
+            )
+            diff = np.abs(out - ref)
+            entry[f"{tag}_max_abs"] = float(diff.max())
+            entry[f"{tag}_mean_abs"] = float(diff.mean())
+        sampling_equivalence[str(rate)] = entry
+
+    # --- full M2 output distribution at both rates -----------------------
     m2 = gm.M2GPU(rows, rows, kernel, dtype=torch.float64, seed=0)
-    samples = {}
-    totals = {}
-    adult_stats = {}
     methods = ("cpu_cpu", "gpu_gpu", "gpu_cpu")
-    for method in methods:
-        drive = np.zeros((R_OUTPUT, rows * rows))
-        total = np.zeros(R_OUTPUT)
-        adult_min = np.inf
-        adult_finite = True
-        for seed in range(R_OUTPUT):
-            m2.np_rng = np.random.default_rng(seed)
-            m2.torch_gen.manual_seed(seed)
+    outputs: dict[str, Any] = {}
+    for rate in (1.0, 0.5):
+        samples: dict[str, np.ndarray] = {}
+        totals: dict[str, np.ndarray] = {}
+        adult_stats: dict[str, dict[str, Any]] = {}
+        for method in methods:
+            drive = np.zeros((R_OUTPUT, rows * rows))
+            total = np.zeros(R_OUTPUT)
+            adult_min = np.inf
+            adult_finite = True
+            for seed in range(R_OUTPUT):
+                m2.np_rng = np.random.default_rng(seed)
+                m2.torch_gen.manual_seed(seed)
+                if method == "cpu_cpu":
+                    out = m2.migrate(
+                        data,
+                        rate=rate,
+                        sample_device="cpu",
+                        outbound_device="cpu",
+                    )
+                elif method == "gpu_gpu":
+                    out = m2.migrate(
+                        data,
+                        rate=rate,
+                        sample_device="gpu",
+                        outbound_device="gpu",
+                    )
+                else:
+                    out = m2.migrate(
+                        data,
+                        rate=rate,
+                        sample_device="cpu",
+                        outbound_device="gpu",
+                    )
+                drive[seed] = _drive_proxy(out).ravel()
+                adult = out[:, :, NEW_ADULT_AGE:]
+                total[seed] = float(adult.sum())
+                adult_min = min(adult_min, float(adult.min()))
+                adult_finite = adult_finite and bool(np.isfinite(adult).all())
+            samples[method] = drive
+            totals[method] = total
+            adult_stats[method] = {"min": adult_min, "finite": adult_finite}
+        output = _compare_outputs(samples, totals, reference="cpu_cpu")
+        output["cpu_cpu"] = {
+            "reference": True,
+            "adult_min": adult_stats["cpu_cpu"]["min"],
+            "adult_finite": adult_stats["cpu_cpu"]["finite"],
+        }
+        for method in methods:
             if method == "cpu_cpu":
-                out = m2.migrate(
-                    data, sample_device="cpu", outbound_device="cpu"
-                )
-            elif method == "gpu_gpu":
-                out = m2.migrate(
-                    data, sample_device="gpu", outbound_device="gpu"
-                )
-            else:
-                out = m2.migrate(
-                    data, sample_device="cpu", outbound_device="gpu"
-                )
-            drive[seed] = _drive_proxy(out).ravel()
-            adult = out[:, :, NEW_ADULT_AGE:]
-            total[seed] = float(adult.sum())
-            adult_min = min(adult_min, float(adult.min()))
-            adult_finite = adult_finite and bool(np.isfinite(adult).all())
-        samples[method] = drive
-        totals[method] = total
-        adult_stats[method] = {"min": adult_min, "finite": adult_finite}
-    output = _compare_outputs(samples, totals, reference="cpu_cpu")
-    output["cpu_cpu"] = {
-        "reference": True,
-        "adult_min": adult_stats["cpu_cpu"]["min"],
-        "adult_finite": adult_stats["cpu_cpu"]["finite"],
-    }
-    for method in methods:
-        if method == "cpu_cpu":
-            continue
-        output[method]["adult_min"] = adult_stats[method]["min"]
-        output[method]["adult_finite"] = adult_stats[method]["finite"]
+                continue
+            output[method]["adult_min"] = adult_stats[method]["min"]
+            output[method]["adult_finite"] = adult_stats[method]["finite"]
+        outputs[str(rate)] = output
 
     # --- timing ----------------------------------------------------------
     m2_timing = gm.M2GPU(rows, rows, kernel, dtype=torch.float32, seed=0)
@@ -324,24 +351,29 @@ def run_case(name: str, rows: int, kernel_size: int, avd: float) -> dict[str, An
         timing[f"gpu_outbound_only_rate{tag}"] = _time_call(
             _gpu_call, R_TIMING
         )
-    timing["cpu_cpu_full"] = _time_call(
-        lambda: m2_timing.migrate(
-            data, sample_device="cpu", outbound_device="cpu"
-        ),
-        R_TIMING,
-    )
-    timing["gpu_gpu_full"] = _time_call(
-        lambda: m2_timing.migrate(
-            data, sample_device="gpu", outbound_device="gpu"
-        ),
-        R_TIMING,
-    )
-    timing["cpu_outbound_gpu_full"] = _time_call(
-        lambda: m2_timing.migrate(
-            data, sample_device="gpu", outbound_device="cpu"
-        ),
-        R_TIMING,
-    )
+    for rate in (1.0, 0.5):
+        tag = str(rate)
+
+        def _cpu_full(rate=rate):
+            return m2_timing.migrate(
+                data, rate=rate, sample_device="cpu", outbound_device="cpu"
+            )
+
+        def _gpu_full(rate=rate):
+            return m2_timing.migrate(
+                data, rate=rate, sample_device="gpu", outbound_device="gpu"
+            )
+
+        def _cpu_out_full(rate=rate):
+            return m2_timing.migrate(
+                data, rate=rate, sample_device="gpu", outbound_device="cpu"
+            )
+
+        timing[f"cpu_cpu_full_rate{tag}"] = _time_call(_cpu_full, R_TIMING)
+        timing[f"gpu_gpu_full_rate{tag}"] = _time_call(_gpu_full, R_TIMING)
+        timing[f"cpu_outbound_gpu_full_rate{tag}"] = _time_call(
+            _cpu_out_full, R_TIMING
+        )
     return {
         "rows": rows,
         "kernel_size": kernel_size,
@@ -349,7 +381,8 @@ def run_case(name: str, rows: int, kernel_size: int, avd: float) -> dict[str, An
         "R_outbound": R_OUTBOUND,
         "R_output": R_OUTPUT,
         "outbound": outbound,
-        "output": output,
+        "sampling_equivalence": sampling_equivalence,
+        "outputs": outputs,
         "timing": timing,
     }
 
@@ -383,23 +416,36 @@ def main() -> int:
                 f"same-seed max abs {stats['same_seed_max_abs_diff']:.3e}",
                 flush=True,
             )
-        for method, stats in case["output"].items():
-            if stats.get("reference"):
-                continue
+        for rate, eq in case["sampling_equivalence"].items():
             print(
-                f"  output {method}: drive mean diff "
-                f"{stats['drive_mean_abs_diff_median']:.3e}, "
-                f"var ratio {stats['drive_variance_ratio_median']:.3f}, "
-                f"total mean rel {stats['total_mean_rel_diff']:+.3e}",
+                f"  CPU-sampling equivalence rate {rate}: "
+                f"f64 {eq['f64_max_abs']:.3e}, f32 {eq['f32_max_abs']:.3e}",
                 flush=True,
             )
+        for rate, output in case["outputs"].items():
+            for method, stats in output.items():
+                if stats.get("reference"):
+                    continue
+                print(
+                    f"  output rate {rate} {method}: drive mean diff "
+                    f"{stats['drive_mean_abs_diff_median']:.3e}, "
+                    f"var ratio {stats['drive_variance_ratio_median']:.3f}, "
+                    f"total mean rel {stats['total_mean_rel_diff']:+.3e}",
+                    flush=True,
+                )
         print(
             f"  timing: cpu outbound(rate1) "
             f"{case['timing']['cpu_outbound_only_rate1.0']['median_ms']:.3f} ms, "
             f"gpu outbound(rate1) "
             f"{case['timing']['gpu_outbound_only_rate1.0']['median_ms']:.3f} ms, "
-            f"full cpu/cpu {case['timing']['cpu_cpu_full']['median_ms']:.3f} ms, "
-            f"full gpu/gpu {case['timing']['gpu_gpu_full']['median_ms']:.3f} ms",
+            f"full cpu/cpu rate1 "
+            f"{case['timing']['cpu_cpu_full_rate1.0']['median_ms']:.3f} ms, "
+            f"full gpu/gpu rate1 "
+            f"{case['timing']['gpu_gpu_full_rate1.0']['median_ms']:.3f} ms, "
+            f"full cpu/cpu rate0.5 "
+            f"{case['timing']['cpu_cpu_full_rate0.5']['median_ms']:.3f} ms, "
+            f"full gpu/gpu rate0.5 "
+            f"{case['timing']['gpu_gpu_full_rate0.5']['median_ms']:.3f} ms",
             flush=True,
         )
     RESULTS.mkdir(parents=True, exist_ok=True)

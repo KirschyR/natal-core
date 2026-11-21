@@ -198,7 +198,8 @@ results/                         # JSON（HTML/PNG 受全局 ignore）
 - **决策**：采用**直接 stencil + 方案 A**（逐边 counter-based RNG + 两遍重算），放弃方案 B（分块 stencil + 有界 scratch）。
 - **目标语义**：与 CPU CSR 相同的源端 Beta + 目的地 Dirichlet；内存 $O(n+\kappa^2)$；无原子加、固定种子可复现；代价约 2× Gamma 抽样。
 - **本轮口径**：`migration_rate=0.5`；对照目标是 **CPU CSR**；M0/M1/M2 的 GPU FFT 近似线暂停，不再扩展（仅保留历史结果）。
-- **原型顺序**：NumPy 语义原型（Philox4x32-10 + Gamma）→ 独立 GPU 原型（3A，不接产品）→ 全模型小规模 → 最后接入 natal 产品。
+- **原型顺序**：NumPy 语义原型（Philox4x32-10 + Marsaglia–Tsang）→ 独立 GPU 原型（3A，与 M2 原型相同：conda/torch 脚本，不接产品）→ playground 全模型对照 → 最后接入 natal 产品。
+- **Playground**：与既有 M0/M1/M2 demo 相同（small 15²/k7/avd0.8、large 31²/k11/avd1.5、3 型最小模型、rate=0.5、100 ticks）；demo 只把非 CSR 策略替换为 stencil；暂不做 chasing。
 - **执行计划**：见 `DirectStencilMigrationPlan.md`（策略、两遍算法、RNG、模板、GPU 实现、验证与开放问题）。
 - **关系**：直接 stencil 是“精确随机 + 省内存”的另一条线；M0/M1/M2 是 FFT 近似线，当前不作为本计划对照。
 

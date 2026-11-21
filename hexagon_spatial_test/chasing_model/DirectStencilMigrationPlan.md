@@ -104,9 +104,10 @@ $$
   - `outbound` 与 `gamma` 使用不同 role/site，避免相关；
   - Pass 1 与 Pass 2 的 `G_{s,d}` 必须使用**完全相同**的 key/site/tick/edge；
   - 同一 tick 内不同源的 O_s 与 G 不能共享同一 RNG 流。
-- **edge id 位宽**：现有设备 `RngState` 用 32-bit `cell` + 32-bit draw counter；小网格原型够用，但产品化
-  在 $n\kappa^2>2^{32}$ 时会碰撞。产品化方案需把 edge id 扩到 64-bit（或 128-bit counter/key 组合）；
-  本轮 NumPy 原型先明确 key 结构，GPU 原型再实现该扩展。
+- **edge id / counter 位宽**：edge id 是每个 `(tick, plane, s, d, role)` 的唯一键。现有设备 `RngState`
+  用 32-bit `cell` + 32-bit draw counter（最多约 4.29e9 条边）；当前 playground 远低于此，但大网格产品化
+  会碰撞。**建议原型就用 64-bit edge id + 64-bit draw counter**，接入 Philox 的 128-bit counter
+  （c0,c1=edge id，c2,c3=draw counter）；32-bit 只作小网格调试。这样不需要后续重新设计 key。
 - **同 seed 逐位一致的条件**：同一实现、同一设备、同一编译/内核、固定求和顺序、无原子加、无
   `atomicAdd`/不确定 reduction。跨 CPU/GPU、跨设备或不同编译选项时只要求分布一致。
 - **无原子加的保证**：Pass 2 每个目的地由一个线程（或固定顺序的 reduction）写出；Pass 1 每个源一个
@@ -133,11 +134,26 @@ $$
 
 ## 5. 原型与验证顺序
 
+### 5.0 Playground（与既有 demo 一致）
+
+- 沿用此前 M0/M1/M2 测试的同一 playground：
+  - `small`: 15² / kernel 7 / avd 0.8；
+  - `large`: 31² / kernel 11 / avd 1.5；
+  - `rate=0.5`；100 ticks；同一初始态/中心释放；无 chasing。
+- **三型最小模型**：沿用现有 v3 demo 的 3 个合子类型 `WT|WT, WT|Drive, Drive|Drive`
+  （两个等位基因 WT/Drive，无 resistance），不是新模型；5 型/chasing 留到后续。
+- **demo 策略**：CPU CSR vs **stencil**。把此前 demo 中的非 CSR 策略（M0/M1/M2）替换为 stencil；
+  CPU CSR 继续作为参考；M1 等不再展示。
+- **展示要求不变**：整 grid 时间滑块热图、沿线 4 deme 的 drive/non-egg/juvenile mean±SD、
+  coverage/front/T50、计时表；HTML 放 `results/html/`。
+- 样本量：demo 用 R=100（small）/ R=50（large）；若 stencil 原型过慢，可先降低并记录，但不改变
+  playground 配置。
+
 ### 5.1 Stage 1 — NumPy 语义原型（先做）
 
 - 新脚本 `direct_stencil_operator.py`（复现目录；暂不接产品）。
 - 先做**完整 kernel + 边界判断**版本（不做模板优化），实现 Pass 1/Pass 2；逐边 RNG 使用与后续 GPU
-  一致的 **Philox4x32-10 key 结构**，Gamma 用 Marsaglia–Tsang（或先逆 CDF 近似，需明确记录）。
+  一致的 **Philox4x32-10 key 结构**，Gamma 用 **Marsaglia–Tsang**（与后续 GPU 原型一致）。
 - 场景：`rate=0.5`；15²/k7/avd0.8、31²/k11/avd1.5；单平面；R=100–300。
 - 对照：CPU CSR 随机迁移（`compare_migration_models.py` / v3 的 `cpu_migrate`）。
 - 指标：per-deme 均值、方差比、lag 平均协方差、总种群 mean/std、负值比例、逐源守恒；
@@ -159,24 +175,27 @@ $$
 
 ### 5.3 Stage 3 — 独立 GPU 原型（3A，不接产品）
 
-- 先做**独立 GPU 原型**，不接入 natal 公共 API/会话；验证语义、复现性、内存/时间后再讨论产品化。
-- 复用现有 Philox/`sample_gamma` 设计；若用 natal 的 GPU 运行环境，建议以测试入口/独立 harness 形式，
-  不暴露新 API、不改默认路径。
-- 环境约束：当前容器 PATH 无 `nvcc`；natal GPU 路径使用 cudarc/NVRTC。3A 的具体承载方式（独立 Rust
-  crate、test-only kernel、或 torch 自定义实现）在实现前单独确认。
+- **承载方式：与 M2 GPU 原型一致**——在 `chasing_model/` 下写独立 Python/torch 脚本，用
+  `/opt/conda/bin/python` 运行；不接 natal 公共 API/会话，不改默认路径。
+- 在 torch 中实现 Philox4x32-10 + Marsaglia–Tsang；先在 f64 小网格验证语义，再用 f32 测性能/分布。
+- 精度：GPU 硬件支持 f64；现有 natal 随机 GPU 内核是 f32。原型以 **f32 为主**（与未来产品一致），
+  f64 用于语义/同实现逐位检查；CPU CSR（f64）与 GPU f32 只比分布。
 - 验证：
-  - GPU f64 与 CPU 直接 stencil：同 seed、同 key、同顺序时尽量逐位；若 f32，则只要求分布一致；
-  - 同 seed 两次 GPU 运行逐位一致（hash 输出）；
+  - 同 seed 两次 GPU 运行逐位一致（f32 同实现/同设备；hash 输出）；
   - 无原子加、固定 offset 顺序；
-  - GPU vs CPU CSR 的分布差异（均值/方差/lag 协方差/总量/负值）。
+  - GPU vs CPU CSR 的分布差异（均值/方差/lag 协方差/总量/负值）；
+  - f64 原型与 f32 原型的差异，用于估计 f32 容差。
 - 产物：独立 GPU 原型结果 JSON + 内存/时间表；不改产品代码。
 
-### 5.4 Stage 4 — 全模型小规模
+### 5.4 Stage 4 — 全模型 playground 对照
 
-- 将直接 stencil 接入现有 NumPy 全模型（或独立 GPU 原型的全模型入口），与 CPU CSR 比较：
-  - 覆盖曲线、前沿半径、T50、共存时长/固定概率；
-  - mean±SD、C2ST（R 足够大时）；
+- 在 5.0 的同一 playground（small/large、3 型、rate=0.5、100 ticks）上，用 NumPy stencil 原型
+  （或独立 GPU 原型的全模型入口）与 CPU CSR 比较：
+  - 覆盖曲线、前沿半径、T50、总量；
+  - 沿线 4 deme 的 drive/non-egg/juvenile mean±SD；
+  - C2ST（R 足够大时；小 R 的单次 split 不作结论）；
   - 内存/时间。
+- 本阶段不追求 chasing S1/S2；先看 stencil 与 full CSR 的差异。
 - 只有确认差异与收益后，才讨论产品化。
 
 ### 5.5 Stage 5 — 接入 natal 产品（最后一步，高风险）
@@ -236,11 +255,21 @@ $$
   不可复现问题。
 - RNG 方向：Philox4x32-10 counter-based + Marsaglia–Tsang Gamma；逐边 key。
 
-待确认（实现前）：
+已确认（补充）：
 
-1. GPU 独立原型的承载方式：独立 Rust/cudarc crate、natal test-only kernel（不接公开 API），还是
-   其他；当前环境无 `nvcc`，需确认 cudarc/NVRTC 路径。
-2. NumPy 原型的 Gamma：直接用 Marsaglia–Tsang（与 GPU 一致）还是先用逆 CDF（更快、但算法不同）。
-3. edge id / counter 位宽：先在原型用 32-bit cell，产品化再扩 64-bit，还是原型就实现 64-bit。
-4. 精度：GPU 原型先 f64 还是 f32；f32 的容差目标。
-5. 是否先用 3 型最小模型，还是直接 5 型 chasing；建议先 3 型语义，再扩 5 型。
+- Playground 与此前 M0/M1/M2 demo 完全一致：small 15²/k7/avd0.8、large 31²/k11/avd1.5、3 型最小模型、
+  rate=0.5、100 ticks、同一初始/释放；demo 只把非 CSR 策略替换为 stencil。
+- 独立 GPU 原型承载方式与 M2 原型一致：`chasing_model/` 下独立 Python/torch 脚本，用
+  `/opt/conda/bin/python`，不接 natal 产品。
+- Gamma 用 Marsaglia–Tsang。
+- edge id/counter：原型即用 64-bit edge id + 64-bit draw counter；32-bit 只作小网格调试。
+- 精度：f32 为主（与现有 GPU 随机路径一致），f64 用于语义与同实现检查；CPU CSR(f64) vs GPU(f32)
+  只比分布。
+- 先 3 型最小模型完成 playground 对照；不追求 chasing，5 型留到后续。
+
+待确认（实现前只剩）：
+
+1. 独立 GPU 原型的 torch 实现细节：Philox + Marsaglia–Tsang（含拒绝采样）在 torch 中的可行性与
+   性能；若过慢，只用于语义/小网格，性能另行优化。
+2. demo 的 R：计划 small R=100、large R=50；若 stencil 原型耗时过高，可先降低并记录。
+3. f64 GPU 原型是否必须（用于语义检查）；若只做 f32，需在报告中声明。

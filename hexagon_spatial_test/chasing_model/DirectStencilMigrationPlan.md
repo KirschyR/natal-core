@@ -1,26 +1,41 @@
 # 直接 stencil 随机迁移（方案 A）执行计划
 
-> 状态：**方案 A 已选定**（用户决策）；尚未实现/产品化。
+> 状态：**方案 A 已选定**（用户决策）；**尚未实现/产品化**。
+> 本轮冻结：迁移率 `rate=0.5`；对照目标是 **CPU CSR**；GPU FFT 近似线（M0/M1/M2）暂停。
+> 原型顺序：**NumPy 语义原型 → 独立 GPU 原型（3A，不接产品）→ 全模型小规模 → 最后接入 natal 产品**。
 > 关联：`RandomnessRealization.md` 附录 E（问题分析与 A/B 对比）、`PLAN.md`（chasing 总体计划）、M4 模板压缩设计。
-> 范围：`recon/hex-model`。原型先在复现脚本；若产品化，属高风险（根 `EVALUATE.md` + 全量门禁 + 独立复核）。
+> 范围：`recon/hex-model`。原型在复现脚本/独立 harness；产品化属高风险（根 `EVALUATE.md` + 全量门禁 + 独立复核）。
 
-## 0. 决策摘要
+## 0. 决策摘要（2026-11 更新）
 
-- **问题**：完整 CSR（以及随机路径的 forward scratch + reverse CSR）内存为 $O(n\kappa^2)$；当平面 deme 数 $n$ 和核边长 $\kappa$ 都很大时不可承受。
-- **选择**：**直接 stencil + 方案 A**（逐边 counter-based RNG + 两遍重算）。
-- **放弃方案 B**（分块 stencil + 有界 scratch）：抽样约一遍、内存 $O(n+\text{tile}\cdot\kappa^2)$，但 halo/块边界复杂，可复现性更难保证。
-- **目标语义**：与 CPU CSR **相同的随机模型**（源端 Beta 出境 + 目的地 Dirichlet 分配）；内存 $O(n+\kappa^2)$；无原子加；固定种子可复现。
-- **代价**：约两遍 Gamma 抽样；Gamma 采样器必须支持逐边独立 seed。
+- **问题**：完整 CSR（以及随机路径的 forward scratch + reverse CSR）内存为 $O(n\kappa^2)$；当平面 deme 数
+  $n$ 和核边长 $\kappa$ 都很大时不可承受。
+- **选择**：**直接 stencil + 方案 A**（逐边 counter-based RNG + 两遍重算）；放弃方案 B（分块 stencil +
+  有界 scratch）。
+- **目标语义**：与 CPU CSR **相同的随机模型**（源端 Beta 出境 + 目的地 Dirichlet 分配）；内存
+  $O(n+\kappa^2)$；无原子加；固定种子可复现；代价约 2× Gamma 抽样。
+- **rate**：本轮起测试与后续 chasing 一律使用 `migration_rate=0.5`；`rate=1.0` 只保留为历史对照或显式指定。
+- **精度/对照**：与 **CPU CSR** 比较分布；GPU FFT 近似路径（M0/M1/M2）不再是本计划的对照物。
+- **可复现性目标**：
+  - 同一实现、同一设备、同一 seed：**逐位一致**（依靠 counter RNG、固定求和顺序、无原子加）；
+  - CPU CSR vs 直接 stencil（RNG 流/求和顺序不同）、CPU vs GPU（f64 vs f32、设备/编译差异）：**分布一致**，
+    不要求逐位。
+- **原型顺序**：先做 NumPy 语义原型（使用与后续 GPU 一致的 RNG 设计），再独立 GPU 原型；**接入 natal
+  产品是最后一步**，之前不改产品公开 API。
 
 ## 1. 背景：为什么不用完整 CSR，也不用 FFT
 
-- 一个平面有 $n$ 个 deme（如 $N\times N$ 网格时 $n=N^2$）。源 $s$ 到目的地 $d$ 的有效位移集合为 $\mathrm{valid}(s)$；核边长记作 $\kappa$（奇数），去中心核 $K'(u)$ 只依赖位移 $u=d-s$。
-- 归一化权重 $w_{s,d}=K'(d-s)/Z_s$，其中 $Z_s=\sum_{u\in\mathrm{valid}(s)}K'(u)$ 是有效权重和。内部源有 $r_s=\kappa^2-1$ 个有效目的地，边界更少；CSR 非零边总数 $\mathrm{nnz}=\sum_s r_s=O(n\kappa^2)$。
-- FFT（route A）把确定性迁移降到 $O(n\log n)$，但它**无法承载逐边随机**（见 `RandomnessRealization.md` §3）。直接 stencil 保留精确随机语义，只用 $O(\kappa^2)$ 的核模板，不保存完整 CSR。
+- 一个平面有 $n$ 个 deme（如 $N\times N$ 网格时 $n=N^2$）。源 $s$ 到目的地 $d$ 的有效位移集合为
+  $\mathrm{valid}(s)$；核边长记作 $\kappa$（奇数），去中心核 $K'(u)$ 只依赖位移 $u=d-s$。
+- 归一化权重 $w_{s,d}=K'(d-s)/Z_s$，其中 $Z_s=\sum_{u\in\mathrm{valid}(s)}K'(u)$ 是有效权重和。内部源有
+  $r_s=\kappa^2-1$ 个有效目的地，边界更少；CSR 非零边总数 $\mathrm{nnz}=\sum_s r_s=O(n\kappa^2)$。
+- FFT（route A）把确定性迁移降到 $O(n\log n)$，但它**无法承载逐边随机**（见
+  `RandomnessRealization.md` §3）。直接 stencil 保留精确随机语义，只用 $O(\kappa^2)$ 的核模板，不保存
+  完整 CSR。
 
-## 2. 随机语义（必须与 CPU CSR 完全一致）
+## 2. 随机语义（与 CPU CSR 一致）
 
-沿用 `RandomnessRealization.md` §2 的 natal 连续采样：
+沿用 `RandomnessRealization.md` §2 的 natal 连续采样；本轮固定 `rate = rho = 0.5`。
 
 **出境量**：对源 $s$（计数 $N_s$，迁移率 $\rho$），
 
@@ -29,7 +44,8 @@ O_s=N_s B_s,\qquad
 B_s\sim\mathrm{Beta}\big(\rho(N_s-1),(1-\rho)(N_s-1)\big),
 $$
 
-即与 $\mathrm{Binomial}(N_s,\rho)$ 同均值、同方差的连续版本；$N_s\le 1$ 时取 $O_s=\rho N_s$。保留量 $R_s=N_s-O_s$。
+即与 $\mathrm{Binomial}(N_s,\rho)$ 同均值、同方差的连续版本；$N_s\le 1$ 时取 $O_s=\rho N_s$。保留量
+$R_s=N_s-O_s$。
 
 **目的地分配**：对源 $s$ 的每个有效目的地 $d$，
 
@@ -59,7 +75,8 @@ $$
 对每个源 $s$：
 
 1. 抽 $O_s$（用键 `(seed, tick, s, outbound)`）。
-2. 按模板遍历有效位移 $u$，目的地 $d=s+u$；抽 $G_{s,d}$（键 `(seed, tick, s, d, gamma)`），累加得到 $S_s$。
+2. 按模板遍历有效位移 $u$，目的地 $d=s+u$；抽 $G_{s,d}$（键 `(seed, tick, s, d, gamma)`），累加得到
+   $S_s$。
 3. **只保存** $O_s$、$S_s$、$Z_s$（各 $O(n)$）；不保存 $G_{s,d}$。
 
 ### 3.2 Pass 2（逐目的地 gather，重算并求和）
@@ -67,75 +84,163 @@ $$
 对每个目的地 $d$：
 
 1. 取保留量 $N_d-O_d$。
-2. 按模板（反向）遍历偏移 $u$，源 $s=d-u$；若该位移有效，则用**同一个逐边键** `(seed, tick, s, d, gamma)` 重新抽 $G_{s,d}$。
+2. 按模板（反向）遍历偏移 $u$，源 $s=d-u$；若该位移有效，则用**同一个逐边键**
+   `(seed, tick, s, d, gamma)` 重新抽 $G_{s,d}$。
 3. 计算 $X_{s,d}=O_sG_{s,d}/S_s$（若 $O_s\le 1$，用确定性 $O_s w_{s,d}$），按**固定偏移顺序**累加。
 4. 写出 $Y_d$。
 
 固定求和顺序 ⇒ 无原子加、固定种子可复现。
 
-### 3.3 RNG 设计
+### 3.3 RNG 设计（Philox + Marsaglia–Tsang）
 
-- 需要 **counter-based RNG**（计数器随机数发生器）：输出是键 `(seed, tick, s, d, role)` 的哈希，给定键即可 $O(1)$ 重放同一次抽样；不依赖顺序消耗的随机流。
-- 每条边构造一个独立的 RNG（由键 seed），再用它抽 Gamma；这样 Pass 1 与 Pass 2 得到相同 $G_{s,d}$。
-- 不同用途使用不同 `role`（如 `outbound`、`gamma`），避免相关性。
-- **风险**：常用 Gamma 采样器（如 Marsaglia–Tsang）会消耗不定长随机数；必须用“每条边独立 seed 的 RNG”或实现可重放的 counter-based Gamma。这是本方案最关键实现点。
+- **Philox4x32-10 是 counter-based RNG（计数器随机数发生器）**：给定 key（种子）与 counter（计数器），
+  直接哈希出 4 个 32-bit 均匀数；它不依赖“顺序消耗”的内部状态。因此同一 `(seed, tick, s, d, role)`
+  在任何线程、任何遍次都能重放出同一随机数。现有 natal GPU 代码
+  `rust/src/gpu/kernels.rs` 已有该实现（`RNG_SOURCE`/`RngState`）。
+- **Marsaglia–Tsang 是 Gamma 采样算法**：shape ≥ 1 时用正态/拒绝采样，shape < 1 时做 boost；它会消耗
+  **不定长**的均匀数。因为每条边有自己独立的 RNG 状态，Pass 1 与 Pass 2 从同一 `(key, counter)` 初始化，
+  变长消耗不影响重放。
+- **key/site 约定**：
+  - `outbound` 与 `gamma` 使用不同 role/site，避免相关；
+  - Pass 1 与 Pass 2 的 `G_{s,d}` 必须使用**完全相同**的 key/site/tick/edge；
+  - 同一 tick 内不同源的 O_s 与 G 不能共享同一 RNG 流。
+- **edge id 位宽**：现有设备 `RngState` 用 32-bit `cell` + 32-bit draw counter；小网格原型够用，但产品化
+  在 $n\kappa^2>2^{32}$ 时会碰撞。产品化方案需把 edge id 扩到 64-bit（或 128-bit counter/key 组合）；
+  本轮 NumPy 原型先明确 key 结构，GPU 原型再实现该扩展。
+- **同 seed 逐位一致的条件**：同一实现、同一设备、同一编译/内核、固定求和顺序、无原子加、无
+  `atomicAdd`/不确定 reduction。跨 CPU/GPU、跨设备或不同编译选项时只要求分布一致。
+- **无原子加的保证**：Pass 2 每个目的地由一个线程（或固定顺序的 reduction）写出；Pass 1 每个源一个
+  线程写自己的 `O_s/S_s`。不使用 scatter 原子加，因此相同 seed 的 GPU 运行可以做到逐位一致（在上述
+  条件下）。
 
 ### 3.4 边界与模板
 
-- 内部模板：$\kappa^2-1$ 个偏移与权重；边界源只需少量边界模板（数量约 $O(R^2)$，$R=(\kappa-1)/2$ 为核半径）。
-- 有效性与 $Z_s$：Pass 2 由源位置 $s=d-u$ 判断位移是否有效，并用 $Z_s$（$O(n)$ 预存或按位置算）归一化 $w_{s,d}=K'(u)/Z_s$。
+- 内部模板：$\kappa^2-1$ 个偏移与权重；边界源只需少量边界模板（数量约 $O(R^2)$，$R=(\kappa-1)/2$ 为
+  核半径）。
+- 有效性与 $Z_s$：Pass 2 由源位置 $s=d-u$ 判断位移是否有效，并用 $Z_s$（$O(n)$ 预存或按位置算）归一化
+  $w_{s,d}=K'(u)/Z_s$。
 - **不需要 reverse CSR**：gather 时枚举模板偏移即可。
+- 可复用 `hexagon_spatial_test/repro/m4_template_build.py` 的 `analytic_templates`；先验证其 offset/权重
+  与 CSR 一致，再用于 Pass 1。
 
 ## 4. 数据布局与复杂度
 
 - 每平面状态：$O(n)$；$O_s,S_s,Z_s$：各 $O(n)$；核/模板：$O(\kappa^2 + R^2)$；输出 $O(n)$。
 - 总计 **$O(n+\kappa^2)$ 每平面**；无 CSR、无 forward scratch、无 reverse CSR、无原子加。
-- 时间：每平面每 tick $O(n\kappa^2)$（Pass 1 抽 $n\kappa^2$ 个 Gamma，Pass 2 再抽一遍并求和）；约 **2× Gamma 抽样**。
+- 时间：每平面每 tick $O(n\kappa^2)$（Pass 1 抽 $n\kappa^2$ 个 Gamma，Pass 2 再抽一遍并求和）；约
+  **2× Gamma 抽样**。
 - 对比：CSR 随机也是 $O(n\kappa^2)$ 时间，但内存 $O(n\kappa^2)$；FFT 是 $O(n\log n)$ 时间但仅确定性。
 
-## 5. GPU 实现计划
+## 5. 原型与验证顺序
 
-- **Pass 1**：一个线程/线程块处理一个源（或一个 tile 的多个源）；模板放常量/共享内存；逐偏移抽 $G$，累加 $S_s$；写 $O_s,S_s$。
-- **Pass 2**：一个线程处理一个目的地；逐偏移重算 $G$ 并累加；写 $Y_d$。**无写冲突、无 atomics**。
-- 合并访问：模板偏移按行主序；输出按目的地连续写；gather 读 $O_s,S_s$ 可能跨源，注意缓存。
-- 可选：把 Pass 2 按 tile 分块以提升局部性（但仍是 gather，不是方案 B 的 scratch）。
-- 精度：CPU 参考用 f64；现有 GPU 随机 CSR 用 f32。原型先用 f64 验证分布；产品化需明确 f32/f64 与容差。
+### 5.1 Stage 1 — NumPy 语义原型（先做）
+
+- 新脚本 `direct_stencil_operator.py`（复现目录；暂不接产品）。
+- 先做**完整 kernel + 边界判断**版本（不做模板优化），实现 Pass 1/Pass 2；逐边 RNG 使用与后续 GPU
+  一致的 **Philox4x32-10 key 结构**，Gamma 用 Marsaglia–Tsang（或先逆 CDF 近似，需明确记录）。
+- 场景：`rate=0.5`；15²/k7/avd0.8、31²/k11/avd1.5；单平面；R=100–300。
+- 对照：CPU CSR 随机迁移（`compare_migration_models.py` / v3 的 `cpu_migrate`）。
+- 指标：per-deme 均值、方差比、lag 平均协方差、总种群 mean/std、负值比例、逐源守恒；
+  - 同 seed 两次运行逐位一致；
+  - Pass 1/Pass 2 的 `G_{s,d}` 重放一致（可在原型中直接断言）；
+  - 与 CPU CSR 只比分布，不比逐位。
+- 产物：JSON + 简短对照表；`EVALUATE.md` 交接。
+
+### 5.2 Stage 2 — 模板、边界与内存/时间
+
+- 接入 `analytic_templates`，验证：
+  - 每个源的 offset 集合/权重与 CSR 一致；
+  - `Z_s` 与模板归一化一致；
+  - Pass 2 结果与“完整 kernel 版本”逐位一致。
+- 内存：`O_s/S_s/Z_s/type_of`、模板 bytes；对比 CSR 的 `nnz` 内存与随机 CSR 的 forward scratch。
+- 时间：Pass 1/Pass 2/total、Gamma 次数；对比 CPU CSR；给出 n×κ 阶梯（15²/k7、31²/k11、60²/k11、
+  120²/k21、300²/k21/51 等）。
+- 目标不是预设“通过/失败”，而是量化直接 stencil 与全 CSR 的差异与优化空间。
+
+### 5.3 Stage 3 — 独立 GPU 原型（3A，不接产品）
+
+- 先做**独立 GPU 原型**，不接入 natal 公共 API/会话；验证语义、复现性、内存/时间后再讨论产品化。
+- 复用现有 Philox/`sample_gamma` 设计；若用 natal 的 GPU 运行环境，建议以测试入口/独立 harness 形式，
+  不暴露新 API、不改默认路径。
+- 环境约束：当前容器 PATH 无 `nvcc`；natal GPU 路径使用 cudarc/NVRTC。3A 的具体承载方式（独立 Rust
+  crate、test-only kernel、或 torch 自定义实现）在实现前单独确认。
+- 验证：
+  - GPU f64 与 CPU 直接 stencil：同 seed、同 key、同顺序时尽量逐位；若 f32，则只要求分布一致；
+  - 同 seed 两次 GPU 运行逐位一致（hash 输出）；
+  - 无原子加、固定 offset 顺序；
+  - GPU vs CPU CSR 的分布差异（均值/方差/lag 协方差/总量/负值）。
+- 产物：独立 GPU 原型结果 JSON + 内存/时间表；不改产品代码。
+
+### 5.4 Stage 4 — 全模型小规模
+
+- 将直接 stencil 接入现有 NumPy 全模型（或独立 GPU 原型的全模型入口），与 CPU CSR 比较：
+  - 覆盖曲线、前沿半径、T50、共存时长/固定概率；
+  - mean±SD、C2ST（R 足够大时）；
+  - 内存/时间。
+- 只有确认差异与收益后，才讨论产品化。
+
+### 5.5 Stage 5 — 接入 natal 产品（最后一步，高风险）
+
+- 默认关闭、显式 opt-in；不改变 CPU CSR 语义；`phase0` bit-identical。
+- 根 `EVALUATE.md`、中英文档、stub、双构建门禁、`cargo test`（含 gpu）、`pytest/ruff/pyright`、独立复核。
 
 ## 6. 与现有实现/文档的关系
 
-- CPU 精确参考：`rust/src/kernels/spatial.rs` 的 `migrate_csr_stochastic_rngs`（`sample_outbound` + `distribute_csr_outbound`）。
-- 现有 GPU 随机 CSR：`rust/src/gpu/executor.rs` 的 `migrate_tick_stochastic`（forward scratch + reverse CSR，无 atomics），受 `MAX_CSR_ROW` 与内存限制。
-- route A FFT：`rust/src/gpu/fft_migrate.rs`，确定性；随机近似见 `RandomnessRealization.md` §4 的 M1–M4。
-- 模板压缩：M4 的 `m4_template_build.py`（确定性）可复用。
+- CPU 精确参考：`rust/src/kernels/spatial.rs` 的 `migrate_csr_stochastic_rngs`
+  （`sample_outbound` + `distribute_csr_outbound`）。
+- 现有 GPU 随机 CSR：`rust/src/gpu/executor.rs` 的 `migrate_tick_stochastic`
+  （forward scratch + reverse CSR，无 atomics），受 `MAX_CSR_ROW` 与内存限制。
+- route A FFT：`rust/src/gpu/fft_migrate.rs`，确定性；随机近似 M1–M4 见
+  `RandomnessRealization.md` §4（**本计划暂停该近似线，除历史对照外不再扩展**）。
+- 模板压缩：`hexagon_spatial_test/repro/m4_template_build.py`（确定性），可复用。
+- 现有直接 stencil 分析：`RandomnessRealization.md` 附录 E。
 
 ## 7. 风险与未决
 
-1. **2× Gamma 抽样**：Gamma 采样较贵；需要基准测试确认可接受。
-2. **counter-based Gamma**：能否为每条边独立 seed 并保持统计正确；可能需要自定义采样器。
-3. **精度与可复现**：f32 与 f64 的差异；固定求和顺序；跨平台 RNG 一致性。
-4. **性能常数**：gather 访存不连续；小 $\kappa$ 时可能不如 CSR；大 $\kappa$ 时优于 CSR 内存但时间可能仍远高于 FFT。
-5. **与 CPU CSR 的关系**：RNG 键与求和顺序不同 ⇒ 目标是**分布一致**，不保证逐位等于 CPU CSR；若要求逐位，需要额外对齐 RNG 与求和顺序。
-6. **产品化**：高风险，需默认关闭、文档、双构建门禁、`phase0` bit-identical、独立复核。
+1. **2× Gamma 抽样**：Gamma 较贵；需要基准测试确认可接受；直接 stencil 的收益是内存，不保证时间。
+2. **counter-based Gamma / key 空间**：逐边独立 RNG 可重放，但 64-bit/128-bit edge id 的产品化设计需确认。
+3. **逐位 vs 分布**：同实现同设备可逐位；CPU CSR vs stencil、CPU vs GPU、跨设备只比分布。
+4. **f32 精度**：GPU 随机路径 f32 与 CPU f64 的 Gamma 差异；需明确容差。
+5. **性能常数**：gather 访存不连续；小 κ 可能不如 CSR；大 κ/大 n 时主要看内存是否可行。
+6. **产品化**：最后一步，需默认关闭、文档、双构建门禁、`phase0` bit-identical、独立复核。
+7. **不设“成功阈值”**：本轮以观察差异、量化内存/时间/分布为目标；是否产品化在 Stage 4 后决定。
 
-## 8. 验证计划
+## 8. 观察与验证清单（不预设通过/失败）
 
-1. **算子级原型**（最小）：固定随机场，CPU CSR vs 方案 A；比较 per-deme 均值、方差比、lag 平均协方差、总种群 mean/std、负值比例；R 次重复，报告 MC 误差。
-2. **可复现性**：固定种子两次运行逐位一致（固定求和顺序）。
-3. **内存/时间阶梯**：$n$ 与 $\kappa$ 的若干组合，测显存与每 tick 时间，对比 CSR 与 FFT。
-4. **整模型小规模**：CPU CSR vs 方案 A 的覆盖曲线、前沿、共存时长（分布对照）。
-5. **验收草案**：均值在 MC 误差内；方差比中位 0.9–1.1；lag 协方差接近 CPU；总量守恒；可复现。
+1. **语义**：CPU CSR vs 直接 stencil（rate=0.5）的 per-deme 均值、方差比、lag 平均协方差、总种群
+   mean/std、负值比例；报告 MC 误差与样本量。
+2. **复现**：同 seed 两次直接 stencil（同实现/设备）逐位一致；Pass 1/Pass 2 的 `G_{s,d}` 重放一致；
+   输出 hash/逐位比较。
+3. **模板/边界**：offset/权重与 CSR 一致；边界源、`O_s<=1`、`S_s<=EPS`、空行等分支。
+4. **内存**：每平面实际 bytes（状态、O/S/Z、模板、输出）与 CSR/forward scratch 对比。
+5. **时间**：Pass 1/Pass 2/总时间、Gamma 次数；对比 CPU CSR；给出 n×κ 阶梯与外推。
+6. **全模型**：覆盖/前沿/T50/共存/固定概率的差异；R 足够大时再用 C2ST/等价检验。
+7. **GPU 原型**：f32/f64、同 seed 逐位、CPU vs GPU 分布；无原子加；显存与每 tick 时间。
 
 ## 9. 里程碑
 
 - [x] 方案 A 选定（放弃 B）。
-- [ ] 算子级原型（`direct_stencil_operator.py` 或 Rust 原型）。
-- [ ] 内存/时间基准。
-- [ ] 整模型小规模分布对照。
-- [ ] （可选，高风险）产品化。
+- [ ] Stage 1：NumPy 语义原型（Philox + Gamma，完整 kernel 版本）。
+- [ ] Stage 2：模板/边界验证 + 内存/时间阶梯。
+- [ ] Stage 3：独立 GPU 原型（3A，不接产品）。
+- [ ] Stage 4：全模型小规模差异评估。
+- [ ] Stage 5（可选，最后）：接入 natal 产品（高风险）。
 
-## 10. 开放问题（需确认）
+## 10. 已确认与待确认
 
-- 原型语言：先用 NumPy/torch（快、易验证），还是直接 Rust/CUDA？
-- 精度：f32 还是 f64？（影响与 CPU CSR 的分布对照容差与产品化一致性。）
-- RNG：选用哪种 counter-based 生成器（Philox/Threefry/自研哈希）与 Gamma 采样器？
-- 是否要求与 CPU CSR **逐位一致**，还是只要求**分布一致**？
+已确认（本轮）：
+
+- `rate=0.5`；对照 CPU CSR；GPU FFT 近似线暂停。
+- 先 NumPy 语义原型；再独立 GPU 原型；产品接入最后。
+- 目标为分布一致；同实现同种子应逐位一致；直接 stencil **无原子加**，不存在原子加导致的同 seed
+  不可复现问题。
+- RNG 方向：Philox4x32-10 counter-based + Marsaglia–Tsang Gamma；逐边 key。
+
+待确认（实现前）：
+
+1. GPU 独立原型的承载方式：独立 Rust/cudarc crate、natal test-only kernel（不接公开 API），还是
+   其他；当前环境无 `nvcc`，需确认 cudarc/NVRTC 路径。
+2. NumPy 原型的 Gamma：直接用 Marsaglia–Tsang（与 GPU 一致）还是先用逆 CDF（更快、但算法不同）。
+3. edge id / counter 位宽：先在原型用 32-bit cell，产品化再扩 64-bit，还是原型就实现 64-bit。
+4. 精度：GPU 原型先 f64 还是 f32；f32 的容差目标。
+5. 是否先用 3 型最小模型，还是直接 5 型 chasing；建议先 3 型语义，再扩 5 型。

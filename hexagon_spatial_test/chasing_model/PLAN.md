@@ -191,3 +191,11 @@ results/                         # JSON（HTML/PNG 受全局 ignore）
   2. 若校验通过：用 **M0**（空间形态更接近 CPU）或 CPU CSR 做 chasing 初探（S1/S2）。
   3. 通用 `viz_html`/`run_chasing`（当前 HTML 已内联在 `compare_strategies.py`）。
   4. `chase` 实验（小范围 → 放大）。
+
+## 11. 直接 stencil 随机迁移（方案 A，已选定）
+
+- **背景**：完整 CSR（以及随机路径的 forward scratch + reverse CSR）内存为 $O(n\kappa^2)$，大 $n,\kappa$ 不可承受。
+- **决策**：采用**直接 stencil + 方案 A**（逐边 counter-based RNG + 两遍重算），放弃方案 B（分块 stencil + 有界 scratch）。
+- **目标语义**：与 CPU CSR 相同的源端 Beta + 目的地 Dirichlet；内存 $O(n+\kappa^2)$；无原子加、固定种子可复现；代价约 2× Gamma 抽样。
+- **执行计划**：见 `DirectStencilMigrationPlan.md`（策略、两遍算法、RNG、模板、GPU 实现、验证与开放问题）。
+- **关系**：M0/M1（route A 的 FFT 近似）仍保留；直接 stencil 是“精确随机 + 省内存”的另一条线，二者按瓶颈选型。

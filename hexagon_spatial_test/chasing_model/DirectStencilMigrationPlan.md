@@ -1,7 +1,8 @@
 # 直接 stencil 随机迁移（方案 A）执行计划
 
 > 状态：**方案 A 已选定**（用户决策）；**Stage 1 算子级 NumPy 原型已完成**（逐边 counter RNG）；
-> **NumPy CPU 全模型 demo 已产出**（small/large，HTML）；Rust/GPU/产品化未做。
+> **NumPy CPU 全模型 demo 已产出**；**PyTorch GPU stencil 已作为第三策略接入 demo**（f32）；
+> Rust 产品化未做。
 > 本轮冻结：迁移率 `rate=0.5`；对照目标是 **CPU CSR**；GPU FFT 近似线（M0/M1/M2）暂停。
 > 原型顺序：**NumPy 语义原型 → 独立 GPU 原型（3A，不接产品）→ 全模型小规模 → 最后接入 natal 产品**。
 > 关联：`RandomnessRealization.md` 附录 E（问题分析与 A/B 对比）、`PLAN.md`（chasing 总体计划）、M4 模板压缩设计。
@@ -242,8 +243,8 @@ $$
 - [x] 方案 A 选定（放弃 B）。
 - [x] Stage 1：NumPy 语义原型（Philox + Gamma，完整 kernel 版本）。
 - [~] Stage 2：模板/边界验证 + 内存/时间阶梯（NumPy 算子级已测；全阶梯/Rust 公平计时待补）。
-- [ ] Stage 3：独立 GPU 原型（3A，不接产品）。
-- [~] Stage 4：全模型小规模差异评估（NumPy CPU demo 已产出 small/large；R 暂为 small=30、large=3）。
+- [~] Stage 3：GPU stencil 原型（3A，不接产品）：PyTorch f32 已接入 demo；独立 operator 脚本/更细性能阶梯待补。
+- [~] Stage 4：全模型小规模差异评估（CPU CSR / NumPy stencil / GPU stencil；small R=50、large R=3）。
 - [ ] Stage 5（可选，最后）：接入 natal 产品（高风险）。
 
 ### 9.1 本轮产物（2026-11，NumPy CPU）
@@ -255,9 +256,10 @@ $$
 - `scripts/compare_stencil_demo.py`：复用 v3 生命周期与三型最小模型，仅替换 migration backend；
   `results/stencil_demo/{small,large}/` 与 `results/html/compare_stencil_demo_*.html`。
 - 当前结论（自测，待独立复核）：算子级 small/large 的均值、方差比、lag 协方差在 MC 误差内；
-  同实现同 seed 逐位一致。全模型 small/large 在 100 tick 均固定，CPU 与 stencil 的覆盖/前沿/总量
-  差异很小；small R=30 的 C2ST 未见显著可分（accuracy 0.61、AUC 0.642、置换 p=0.143），
-  large R=3 不做 C2ST。
+  同实现同 seed 逐位一致。全模型 small/large 在 100 tick 均固定，CPU CSR、NumPy stencil、GPU stencil
+  的覆盖/前沿/总量差异很小。small R=50 的 C2ST：CPU vs NumPy stencil AUC=0.614（置换 p=0.0476，
+  处于 20 次置换的下限）；CPU vs GPU stencil AUC=0.575（p=0.381）、NumPy vs GPU stencil AUC=0.497
+  （p=0.333），未见显著可分。large R=3 不做 C2ST。
 - **C2ST 口径**：`R < 30` 时跳过，因为 self-split 的 AUC 在 5–15 对样本下主要由抽样噪声主导
   （R=10 时 5 vs 5 的 AUC 零分布 SD≈0.19，AUC=0.28 完全不罕见）。
 - 残余：CPU golden 目前是 NumPy 镜像，尚未与 natal Rust CPU CSR 做一次分布交叉核对；Rust/GPU
@@ -335,3 +337,56 @@ $$
   stencil 的 2× Gamma、边界/权重重算与 gather 仍然存在——它换的是内存，不是时间。
 - 公平的编译版比较应使用**同语言**的 CSR 与 stencil（Rust vs Rust，或 CUDA vs CUDA），并分别报告
   per-replicate wall/migration、warmup 和 median/min/max。
+
+## 12. GPU stencil（PyTorch f32，第三策略）
+
+### 12.1 实现
+
+- 新增 `scripts/direct_stencil_migration_torch.py`：与 NumPy 版相同的两遍 offset-loop、逐边
+  Philox4x32-10 + Marsaglia–Tsang；GPU 上使用 **f32** 计算。
+- CUDA PyTorch 不支持 `uint32/uint64` 算术，因此 Philox 的 32-bit 字用 **int64 编码**，乘法的
+  高/低 32 位用 16-bit 拆分精确计算。
+- 为降低 kernel launch 开销，把若干 offset 拼成一个 batch 做 Gamma 抽样（目标约 `1.5e6` 条边/batch），
+  再按 offset 切片累加；这是有界的临时内存，不是完整 CSR。
+- 生命周期仍在 CPU；每个 tick 做 H2D → GPU 两遍迁移 → D2H。Demo 计时把 migration 拆成
+  `transfer_in / compute / transfer_out`，并计入总 migration。
+- GPU 策略在 demo 中**顺序执行**（不放进 CUDA 不安全的 fork 进程池）；CPU 策略仍可多 worker。
+- demo 用 `/opt/conda/bin/python` 运行；`compare_strategies_v3.homing_tensor` 在无 natal 时读取
+  `results/homing_tensor_3type_dc0.8.npy` 缓存，因此 CPU 生命周期不需要 natal。
+
+### 12.2 计时（exact，rate=0.5，100 ticks，per replicate mean）
+
+| 配置 | R | CPU CSR wall / migration | NumPy stencil wall / migration | GPU stencil wall / migration | GPU in / compute / out |
+|---|---|---|---|---|---|
+| small 15²/k7 | 50 | 2.574 / 2.521 s | 27.356 / 27.291 s | 5.956 / 5.888 s | 0.005 / 5.861 / 0.022 s |
+| large 31²/k11 | 3 | 20.752 / 20.600 s | 312.094 / 311.924 s | 22.503 / 22.312 s | 0.013 / 22.257 / 0.043 s |
+
+- small：GPU stencil 比 NumPy stencil 快约 4.6×，但仍比 CPU CSR 慢约 2.3×；小网格下 GPU 利用率/launch
+  开销占比高。
+- large：GPU stencil 比 NumPy stencil 快约 14×，与 CPU CSR 接近（慢约 8%）；传输占比很小。
+- 这些是 PyTorch f32 原型计时，不是 natal Rust/CUDA 的产品性能结论。
+
+### 12.3 语义/数值自测
+
+- Philox：GPU int64 实现 vs CPU uint32 实现，随机 counter/key 上**逐位相同**。
+- Gamma：GPU f64 vs NumPy f64，最大绝对差约 `8.9e-15`；GPU f32 vs NumPy f64 约 `3.7e-6`。
+- 单平面 stencil：GPU f64 vs NumPy exact 最大绝对差约 `7.1e-15`；f32 约 `5.7e-6`；同 seed
+  GPU f32 两次运行逐位一致。
+- 全模型：三策略最终覆盖一致（small 225/225、large 961/961）；总量均值差异约 0.1%–0.2%
+  （small CPU 47211.9 / NumPy stencil 47270.1 / GPU 47228.4；large 202263.7 / 201877.4 / 202153.8）。
+
+### 12.4 C2ST（small R=50）
+
+- CPU vs NumPy stencil：AUC=0.614，置换 p=0.0476（20 次置换的下限，仅能说明“可检测到差异”）。
+- CPU vs GPU stencil：AUC=0.575，p=0.381；NumPy vs GPU stencil：AUC=0.497，p=0.333。
+- self-split：CPU AUC=0.526、NumPy stencil AUC=0.307、GPU AUC=0.608；小样本 self-split 仍有较大噪声。
+- 结论边界：GPU 与两种 CPU 策略在当前 R 下未见显著可分；不能据此宣称等价。large R=3 跳过 C2ST。
+
+### 12.5 残余
+
+- 仅实现 f32；GPU f32 与 CPU f64 只比分布，不要求逐位。
+- offset batching 使用有界临时内存；若 κ 很大需调小 batch，尚未做显存阶梯。
+- GPU 顺序执行；未做多 GPU/多进程 CUDA 并行。
+- 未做独立 GPU operator 脚本（本轮用一次性 Philox/Gamma/单平面检查和 demo C2ST 验证）。
+- demo 在 conda 下复用 `results/homing_tensor_3type_dc0.8.npy`；该缓存需保留，或用 `.venv` 重新生成。
+- 未接入 natal 产品；未做 chasing S1/S2。

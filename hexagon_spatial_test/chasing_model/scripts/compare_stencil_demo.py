@@ -1,23 +1,21 @@
-"""Full-model NumPy CPU demo: natal-style CSR vs direct stencil.
+"""Full-model demo: CPU CSR, NumPy stencil, and PyTorch GPU stencil.
 
 Runs the same three-type RSA hex population as ``compare_strategies_v3.py``
 and swaps only the migration backend:
 
-* ``cpu``     -- NumPy mirror of natal's continuous CSR;
-* ``stencil`` -- the two-pass direct stencil (counter-based Philox + Marsaglia-Tsang).
+* ``cpu``         -- NumPy mirror of natal's continuous CSR;
+* ``stencil``     -- NumPy two-pass counter RNG stencil;
+* ``gpu_stencil`` -- the same two-pass stencil on CUDA with torch float32.
 
-The demo writes a self-contained HTML with synchronized hex heatmaps, a time
-slider, selected-deme curves, and an optional C2ST panel.  No Rust or GPU path
-is used here; timing is measured per replicate (wall and migration) for each
-strategy, so it is NumPy-vs-NumPy prototype timing, not a claim about natal's
-compiled CSR speed.
+The GPU lifecycle stays on the CPU, so each tick copies adult planes to the GPU
+and back.  Timing is per replicate; for ``gpu_stencil`` it includes H2D,
+GPU compute, and D2H, reported separately.
 
-Run from the repository root:
+The script does not require natal: the homing tensor is loaded from a cached
+``.npy`` when natal is unavailable.  Run it with the conda Python that has torch:
 
-    source .venv/bin/activate
-    unset PYTHONHOME PYO3_PYTHON PYTHONPATH
-    python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py \
-        --configs small --reps 10
+    /opt/conda/bin/python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py \
+        --configs small --reps 50 --jobs 8
 """
 
 from __future__ import annotations
@@ -39,9 +37,9 @@ import numpy as np  # noqa: E402
 HERE = Path(__file__).resolve().parent.parent
 RESULTS = HERE / "results" / "stencil_demo"
 HTML_DIR = HERE / "results" / "html"
-STRATEGIES = ("cpu", "stencil")
-DISPLAY = ("cpu", "stencil")
-COLORS = {"cpu": "tab:blue", "stencil": "tab:orange"}
+STRATEGIES = ("cpu", "stencil", "gpu_stencil")
+DISPLAY = ("cpu", "stencil", "gpu_stencil")
+COLORS = {"cpu": "tab:blue", "stencil": "tab:orange", "gpu_stencil": "tab:green"}
 MIN_C2ST_REPS = 30
 
 CONFIGS = [
@@ -51,7 +49,7 @@ CONFIGS = [
         "kernel_size": 7,
         "avd": 0.8,
         "ticks": 100,
-        "reps": 10,
+        "reps": 50,
         "scale": 100.0,
         "migration_rate": 0.5,
     },
@@ -82,6 +80,61 @@ def stencil_migrate_data(
     )
 
 
+def stencil_migrate_data_gpu(
+    data: np.ndarray, kernel: np.ndarray, rate: float, seed: int, tick: int
+) -> dict[str, float]:
+    """Migrate adult planes with the torch GPU stencil and time the transfers."""
+    import direct_stencil_migration_torch as gpu_stencil
+    import torch
+
+    rows, cols = data.shape[-2:]
+    planes = data[:, :, v3.NEW_ADULT_AGE :].reshape(-1, rows * cols)
+    device = torch.device("cuda")
+    t0 = time.perf_counter()
+    fields = torch.as_tensor(planes, dtype=torch.float32, device=device)
+    torch.cuda.synchronize()
+    t1 = time.perf_counter()
+    migrated, _ = gpu_stencil.stencil_migrate_planes_torch(
+        fields,
+        rows,
+        cols,
+        kernel,
+        rate,
+        seed,
+        tick,
+        dtype=torch.float32,
+        device=device,
+    )
+    torch.cuda.synchronize()
+    t2 = time.perf_counter()
+    migrated_np = migrated.to(device="cpu", dtype=torch.float64).numpy()
+    t3 = time.perf_counter()
+    data[:, :, v3.NEW_ADULT_AGE :] = migrated_np.reshape(
+        data.shape[0], data.shape[1], data.shape[2] - v3.NEW_ADULT_AGE, rows, cols
+    )
+    return {
+        "transfer_in": t1 - t0,
+        "compute": t2 - t1,
+        "transfer_out": t3 - t2,
+        "total": t3 - t0,
+    }
+
+
+def _gpu_warmup(rows: int, cols: int, kernel: np.ndarray) -> None:
+    """Initialize the CUDA context and geometry cache outside the timing loop."""
+    import direct_stencil_migration_torch as gpu_stencil
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("gpu_stencil requires CUDA, but torch.cuda.is_available() is false")
+    device = torch.device("cuda")
+    fields = torch.ones((1, rows * cols), dtype=torch.float32, device=device)
+    gpu_stencil.stencil_migrate_planes_torch(
+        fields, rows, cols, kernel, 0.5, 0, 0, dtype=torch.float32, device=device
+    )
+    torch.cuda.synchronize()
+
+
 def run_replicate(
     strategy: str,
     cfg: dict,
@@ -109,6 +162,9 @@ def run_replicate(
     total = np.zeros(ticks + 1)
     fields = np.zeros((ticks + 1, rows, cols))
     migration_seconds = 0.0
+    transfer_in_seconds = 0.0
+    compute_seconds = 0.0
+    transfer_out_seconds = 0.0
 
     def capture(t: int) -> None:
         rec = v3.record(data, selected)
@@ -129,9 +185,20 @@ def run_replicate(
         t0 = time.perf_counter()
         if strategy == "cpu":
             v3.cpu_migrate(data, csr, rate, rng_mig)
-        else:
+            elapsed = time.perf_counter() - t0
+            migration_seconds += elapsed
+            compute_seconds += elapsed
+        elif strategy == "stencil":
             stencil_migrate_data(data, kernel, rate, seed + 100000, t)
-        migration_seconds += time.perf_counter() - t0
+            elapsed = time.perf_counter() - t0
+            migration_seconds += elapsed
+            compute_seconds += elapsed
+        else:
+            parts = stencil_migrate_data_gpu(data, kernel, rate, seed + 100000, t)
+            migration_seconds += parts["total"]
+            transfer_in_seconds += parts["transfer_in"]
+            compute_seconds += parts["compute"]
+            transfer_out_seconds += parts["transfer_out"]
         capture(t)
     return {
         "drive": drive,
@@ -142,6 +209,11 @@ def run_replicate(
         "total": total,
         "fields": fields,
         "migration_seconds": migration_seconds,
+        "migration_parts": {
+            "transfer_in": transfer_in_seconds,
+            "compute": compute_seconds,
+            "transfer_out": transfer_out_seconds,
+        },
         "wall_seconds": time.perf_counter() - replicate_start,
     }
 
@@ -185,10 +257,19 @@ def _html(
             f"({entry[f'{prefix}_min']:.3f}-{entry[f'{prefix}_max']:.3f})"
         )
 
+    def _breakdown_cell(strategy: str) -> str:
+        entry = timing[strategy]
+        return (
+            f"{entry['migration_transfer_in_seconds_per_replicate_mean']:.3f} / "
+            f"{entry['migration_compute_seconds_per_replicate_mean']:.3f} / "
+            f"{entry['migration_transfer_out_seconds_per_replicate_mean']:.3f}"
+        )
+
     timing_rows = "".join(
         f"<tr><td>{s}</td>"
         f"<td>{_timing_cell(s, 'wall_seconds_per_replicate')}</td>"
-        f"<td>{_timing_cell(s, 'migration_seconds_per_replicate')}</td></tr>"
+        f"<td>{_timing_cell(s, 'migration_seconds_per_replicate')}</td>"
+        f"<td>{_breakdown_cell(s)}</td></tr>"
         for s in DISPLAY
         if s in timing
     )
@@ -196,7 +277,7 @@ def _html(
     if c2st_png is not None and c2st_png.exists():
         c2st_uri = base64.b64encode(c2st_png.read_bytes()).decode("ascii")
         c2st_section = (
-            "<h3>C2ST: CPU vs stencil (lower triangle; 0.5 = indistinguishable)</h3>"
+            "<h3>C2ST: CPU CSR vs NumPy stencil vs GPU stencil (lower triangle; 0.5 = indistinguishable)</h3>"
             f'<img src="data:image/png;base64,{c2st_uri}">'
         )
     elif c2st_note:
@@ -206,11 +287,12 @@ def _html(
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
-<h4>Timing per replicate (NumPy/CPU; mean with min-max over independent
-replicates). Migration is a subset of wall. This is a prototype comparison,
-not natal's compiled CSR speed.</h4>
+<h4>Timing per replicate (mean with min-max over independent replicates).
+Migration is a subset of wall. The breakdown is H2D / GPU-or-CPU compute / D2H;
+CPU strategies have zero transfer. This is a prototype comparison, not natal's
+compiled CSR speed.</h4>
 <table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
-<tr><th>strategy</th><th>wall s / replicate</th><th>migration s / replicate</th></tr>
+<tr><th>strategy</th><th>wall s / replicate</th><th>migration s / replicate</th><th>in / compute / out (s/rep)</th></tr>
 {timing_rows}
 </table>
 <img id="frame" src="data:image/png;base64,{frames[0]}">
@@ -260,10 +342,13 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
     selected = v3.select_demes(rows, cols)
     per_strategy: dict[str, dict[str, np.ndarray]] = {}
     timing: dict[str, dict] = {}
+    if "gpu_stencil" in STRATEGIES:
+        _gpu_warmup(rows, cols, kernel)
     for strategy in STRATEGIES:
-        if jobs > 1:
+        strategy_jobs = 1 if strategy == "gpu_stencil" else jobs
+        if strategy_jobs > 1:
             with ProcessPoolExecutor(
-                max_workers=jobs,
+                max_workers=strategy_jobs,
                 initializer=_worker_init,
                 initargs=(cfg, selected, tensor, csr, kernel),
             ) as pool:
@@ -280,6 +365,15 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
             ]
         walls = np.asarray([r["wall_seconds"] for r in reps], dtype=np.float64)
         migrations = np.asarray([r["migration_seconds"] for r in reps], dtype=np.float64)
+        transfer_in = np.asarray(
+            [r["migration_parts"]["transfer_in"] for r in reps], dtype=np.float64
+        )
+        compute = np.asarray(
+            [r["migration_parts"]["compute"] for r in reps], dtype=np.float64
+        )
+        transfer_out = np.asarray(
+            [r["migration_parts"]["transfer_out"] for r in reps], dtype=np.float64
+        )
         timing[strategy] = {
             "wall_seconds_per_replicate_mean": float(walls.mean()),
             "wall_seconds_per_replicate_median": float(np.median(walls)),
@@ -289,10 +383,13 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
             "migration_seconds_per_replicate_median": float(np.median(migrations)),
             "migration_seconds_per_replicate_min": float(migrations.min()),
             "migration_seconds_per_replicate_max": float(migrations.max()),
+            "migration_transfer_in_seconds_per_replicate_mean": float(transfer_in.mean()),
+            "migration_compute_seconds_per_replicate_mean": float(compute.mean()),
+            "migration_transfer_out_seconds_per_replicate_mean": float(transfer_out.mean()),
             "migration_fraction_of_wall_mean": float((migrations / walls).mean()),
             "reps": cfg["reps"],
             "ticks": cfg["ticks"],
-            "jobs": jobs,
+            "jobs": strategy_jobs,
         }
         per_strategy[strategy] = {
             key: np.stack([r[key] for r in reps])
@@ -337,7 +434,7 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
         _html(
             frames,
             line_png,
-            f"direct stencil demo: {cfg['name']} "
+            f"stencil demo (CPU/GPU): {cfg['name']} "
             f"({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g}, "
             f"rate={cfg['migration_rate']:g}, R={cfg['reps']})",
             timing,

@@ -5,7 +5,7 @@
     "kernel_size": 7,
     "avd": 0.8,
     "ticks": 100,
-    "reps": 30,
+    "reps": 50,
     "scale": 100.0,
     "migration_rate": 0.5
   },
@@ -55,30 +55,54 @@
         "final_count_mean": 225.0,
         "final_count_std": 0.0
       }
+    },
+    "gpu_stencil": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      }
     }
   },
   "front": {
     "cpu": {
       "final_mean": 9.899494936611667,
-      "final_std": 1.8067241133067846e-15,
-      "mean_over_time": 6.412549476562775
+      "final_std": 1.794391381352886e-15,
+      "mean_over_time": 6.41712766594262
     },
     "stencil": {
       "final_mean": 9.899494936611667,
-      "final_std": 1.8067241133067846e-15,
-      "mean_over_time": 6.421378632178416
+      "final_std": 1.794391381352886e-15,
+      "mean_over_time": 6.419461172537493
+    },
+    "gpu_stencil": {
+      "final_mean": 9.899494936611667,
+      "final_std": 1.794391381352886e-15,
+      "mean_over_time": 6.425798242441863
     }
   },
   "total": {
     "cpu": {
-      "final_mean": 47227.14506565305,
-      "final_std": 156.06416089464534,
-      "mean_over_time": 47268.07317214428
+      "final_mean": 47211.85063967515,
+      "final_std": 166.40719876406723,
+      "mean_over_time": 47261.853182543
     },
     "stencil": {
-      "final_mean": 47254.0395716754,
-      "final_std": 135.11321074808288,
-      "mean_over_time": 47271.03188127226
+      "final_mean": 47270.05510802501,
+      "final_std": 116.82740036678395,
+      "mean_over_time": 47268.50014200665
+    },
+    "gpu_stencil": {
+      "final_mean": 47228.39692746904,
+      "final_std": 142.79867162159115,
+      "mean_over_time": 47262.51034530144
     }
   },
   "drive_final_selected": {
@@ -90,74 +114,125 @@
     ],
     "stencil": [
       1.0,
-      1.0,
-      1.0,
+      0.9999999999999989,
+      0.9999999999999669,
+      0.999999999999841
+    ],
+    "gpu_stencil": [
+      0.999999999519994,
+      0.9999999999964169,
+      0.9999999999999999,
       1.0
     ]
   },
   "timing": {
     "cpu": {
-      "wall_seconds_per_replicate_mean": 2.474162219868352,
-      "wall_seconds_per_replicate_median": 2.459557002875954,
-      "wall_seconds_per_replicate_min": 2.3960921494290233,
-      "wall_seconds_per_replicate_max": 2.5718925334513187,
-      "migration_seconds_per_replicate_mean": 2.421107558316241,
-      "migration_seconds_per_replicate_median": 2.4064735020510852,
-      "migration_seconds_per_replicate_min": 2.346022888086736,
-      "migration_seconds_per_replicate_max": 2.515593284741044,
-      "migration_fraction_of_wall_mean": 0.9785644146799373,
-      "reps": 30,
+      "wall_seconds_per_replicate_mean": 2.574420987702906,
+      "wall_seconds_per_replicate_median": 2.58065241901204,
+      "wall_seconds_per_replicate_min": 2.4753755629062653,
+      "wall_seconds_per_replicate_max": 2.6152665447443724,
+      "migration_seconds_per_replicate_mean": 2.520556748062372,
+      "migration_seconds_per_replicate_median": 2.527841404080391,
+      "migration_seconds_per_replicate_min": 2.424239244312048,
+      "migration_seconds_per_replicate_max": 2.558742486871779,
+      "migration_transfer_in_seconds_per_replicate_mean": 0.0,
+      "migration_compute_seconds_per_replicate_mean": 2.520556748062372,
+      "migration_transfer_out_seconds_per_replicate_mean": 0.0,
+      "migration_fraction_of_wall_mean": 0.9790781619440752,
+      "reps": 50,
       "ticks": 100,
       "jobs": 8
     },
     "stencil": {
-      "wall_seconds_per_replicate_mean": 26.238613840875527,
-      "wall_seconds_per_replicate_median": 26.3015678380616,
-      "wall_seconds_per_replicate_min": 25.55254935193807,
-      "wall_seconds_per_replicate_max": 26.807266740128398,
-      "migration_seconds_per_replicate_mean": 26.17149687424923,
-      "migration_seconds_per_replicate_median": 26.23359272023663,
-      "migration_seconds_per_replicate_min": 25.487171137705445,
-      "migration_seconds_per_replicate_max": 26.738281473517418,
-      "migration_fraction_of_wall_mean": 0.9974421125727292,
-      "reps": 30,
+      "wall_seconds_per_replicate_mean": 27.355685227718205,
+      "wall_seconds_per_replicate_median": 27.406893722247332,
+      "wall_seconds_per_replicate_min": 25.749200680293143,
+      "wall_seconds_per_replicate_max": 27.702434610575438,
+      "migration_seconds_per_replicate_mean": 27.29098022658378,
+      "migration_seconds_per_replicate_median": 27.34144944883883,
+      "migration_seconds_per_replicate_min": 25.689743167720735,
+      "migration_seconds_per_replicate_max": 27.637633164413273,
+      "migration_transfer_in_seconds_per_replicate_mean": 0.0,
+      "migration_compute_seconds_per_replicate_mean": 27.29098022658378,
+      "migration_transfer_out_seconds_per_replicate_mean": 0.0,
+      "migration_fraction_of_wall_mean": 0.997634739390781,
+      "reps": 50,
       "ticks": 100,
       "jobs": 8
+    },
+    "gpu_stencil": {
+      "wall_seconds_per_replicate_mean": 5.955528106782586,
+      "wall_seconds_per_replicate_median": 5.963999587111175,
+      "wall_seconds_per_replicate_min": 5.819850134663284,
+      "wall_seconds_per_replicate_max": 6.108325362205505,
+      "migration_seconds_per_replicate_mean": 5.887777566201985,
+      "migration_seconds_per_replicate_median": 5.896167588420212,
+      "migration_seconds_per_replicate_min": 5.757967742159963,
+      "migration_seconds_per_replicate_max": 6.0372755993157625,
+      "migration_transfer_in_seconds_per_replicate_mean": 0.004913851581513882,
+      "migration_compute_seconds_per_replicate_mean": 5.860879731178284,
+      "migration_transfer_out_seconds_per_replicate_mean": 0.02198398344218731,
+      "migration_fraction_of_wall_mean": 0.9886267840420631,
+      "reps": 50,
+      "ticks": 100,
+      "jobs": 1
     }
   },
   "c2st": {
     "methods": [
       "cpu",
-      "stencil"
+      "stencil",
+      "gpu_stencil"
     ],
     "accuracy": [
       [
-        0.4933333333333333,
-        0.6099999999999999
+        0.5640000000000001,
+        0.584,
+        0.532
       ],
       [
-        0.6099999999999999,
-        0.5466666666666666
+        0.584,
+        0.324,
+        0.524
+      ],
+      [
+        0.532,
+        0.524,
+        0.6
       ]
     ],
     "auc": [
       [
-        0.4,
-        0.6422222222222222
+        0.5264,
+        0.6136,
+        0.5748000000000001
       ],
       [
-        0.6422222222222222,
-        0.5466666666666666
+        0.6136,
+        0.30720000000000003,
+        0.49700000000000005
+      ],
+      [
+        0.5748000000000001,
+        0.49700000000000005,
+        0.608
       ]
     ],
     "p": [
       [
-        0.6666666666666666,
-        0.14285714285714285
+        0.23809523809523808,
+        0.047619047619047616,
+        0.38095238095238093
       ],
       [
-        0.14285714285714285,
-        0.23809523809523808
+        0.047619047619047616,
+        1.0,
+        0.3333333333333333
+      ],
+      [
+        0.38095238095238093,
+        0.3333333333333333,
+        0.14285714285714285
       ]
     ]
   },

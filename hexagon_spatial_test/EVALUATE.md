@@ -2746,3 +2746,92 @@ python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py --conf
 - 既有 v3/其他复用 `_hex_geometry` 的 HTML 未自动重渲染；只更新了本任务的
   `compare_stencil_demo_*.html`。若需要旧 HTML 一致，需重跑对应脚本。
 - 未运行产品全量门禁（未触产品代码）；未 commit/push。
+
+## §43 — GPU stencil（PyTorch f32）第三策略交接（主 agent）
+
+### 43.0 范围与风险分类
+
+- 新增 `scripts/direct_stencil_migration_torch.py`，并把 `gpu_stencil` 作为**第三策略**接入
+  `compare_stencil_demo.py`；不替代 NumPy CPU stencil，也不触碰 natal 产品代码。
+- 风险分类：**局部代码修改**（复现脚本；f32 GPU 原型）。产品化仍未开始。
+- 运行环境：GPU 策略与 demo 统一用 `/opt/conda/bin/python`（torch 2.12+cu130）；CPU 策略仍是 NumPy。
+- `compare_strategies_v3.homing_tensor` 改为 lazy import natal；无 natal 时读取
+  `results/homing_tensor_3type_dc0.8.npy` 缓存，使 conda Python 能复用 CPU 生命周期。
+
+### 43.1 改动清单
+
+- 新增 `scripts/direct_stencil_migration_torch.py`：
+  - 两遍 offset-loop、逐边 Philox4x32-10 + Marsaglia–Tsang；
+  - CUDA PyTorch 不支持 uint32 算术，32-bit 字用 int64 编码，乘法高/低 32 位用 16-bit 拆分精确计算；
+  - 多个 offset 拼成 target≈1.5e6 条边的 batch 做 Gamma，降低 kernel launch 开销；
+  - `stencil_migrate_planes_torch` 返回 GPU 输出与诊断。
+- `scripts/compare_stencil_demo.py`：
+  - `STRATEGIES=("cpu","stencil","gpu_stencil")`，三张热图、三条曲线、3×3 C2ST；
+  - small R=50，large R=3；
+  - `gpu_stencil` 顺序执行；每个 tick 计时 H2D / GPU compute / D2H，并计入 migration；
+  - `summary.json` 增加 `migration_transfer_in/compute/transfer_out_seconds_per_replicate_mean`。
+- `scripts/compare_strategies_v3.py`：`import natal` 移入 `homing_tensor()`，缺失时读缓存；其他生命周期不变。
+- 新增缓存 `results/homing_tensor_3type_dc0.8.npy`（3×3×3，dc=0.8）。
+- 更新 `DirectStencilMigrationPlan.md`：状态、Stage 3/4、§12 GPU stencil 分析。
+
+### 43.2 自测命令与结果
+
+```bash
+/opt/conda/bin/python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py \
+    --configs small --reps 50 --jobs 8
+/opt/conda/bin/python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py \
+    --configs large --reps 3 --jobs 3
+.venv/bin/ruff check hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py \
+    hexagon_spatial_test/chasing_model/scripts/direct_stencil_migration_torch.py \
+    hexagon_spatial_test/chasing_model/scripts/compare_strategies_v3.py
+```
+
+一次性语义检查（conda torch）：
+
+- Philox：GPU int64 实现 vs CPU uint32 实现，随机 counter/key 上**逐位相同**。
+- Gamma：GPU f64 vs NumPy f64 最大绝对差 `8.9e-15`；GPU f32 vs NumPy f64 约 `3.7e-6`。
+- 单平面 stencil：GPU f64 vs NumPy exact 最大绝对差 `7.1e-15`；f32 约 `5.7e-6`；
+  同 seed GPU f32 两次运行逐位一致。
+
+全模型（exact，rate=0.5，100 ticks，per replicate mean；为保持同一 HTML 环境一致，CPU 策略也在
+conda Python 下重跑，small 按用户要求提升到 R=50）：
+
+| 配置 | R | CPU CSR wall / migration | NumPy stencil wall / migration | GPU stencil wall / migration | GPU in / compute / out |
+|---|---|---|---|---|---|
+| small 15²/k7 | 50 | 2.574 / 2.521 s | 27.356 / 27.291 s | 5.956 / 5.888 s | 0.005 / 5.861 / 0.022 s |
+| large 31²/k11 | 3 | 20.752 / 20.600 s | 312.094 / 311.924 s | 22.503 / 22.312 s | 0.013 / 22.257 / 0.043 s |
+
+- 最终覆盖一致：small 225/225、large 961/961；总量均值差异约 0.1%–0.2%。
+- GPU small 比 NumPy stencil 快约 4.6×，比 CPU CSR 慢约 2.3×；large 比 NumPy stencil 快约 14×，
+  与 CPU CSR 接近（慢约 8%）。传输占比很小。
+
+small R=50 C2ST（methods=`cpu,stencil,gpu_stencil`）：
+
+- CPU vs NumPy stencil：AUC=0.614，置换 p=0.0476（20 次置换下限）。
+- CPU vs GPU stencil：AUC=0.575，p=0.381；NumPy vs GPU stencil：AUC=0.497，p=0.333。
+- self-split：CPU AUC=0.526、NumPy stencil AUC=0.307、GPU AUC=0.608。
+- 解释：GPU 与两种 CPU 策略在当前 R 下未见显著可分；CPU vs NumPy stencil 的 p 值处于置换下限，
+  只能说明“可检测到差异”，不能据此宣称不等价或等价。large R=3 不做 C2ST。
+
+### 43.3 请 evaluator 核对
+
+1. GPU Philox int64 编码/16-bit 乘法是否与 CPU 32-bit 语义一致；GPU f64 单平面结果是否与 CPU exact 在
+   数值误差内一致。
+2. Gamma 拒绝采样、`shape<1` boost、`O_s<=1` / `S_s<=EPS` / 空行分支在 GPU 上是否正确。
+3. offset batching 的切片、`S[:,src]` / `Y[:,dst]` 累加顺序是否保持固定、无重复索引冲突；
+   batching 是否只是有界临时内存而非完整 CSR。
+4. GPU 计时是否确实包含 H2D/compute/D2H，且 GPU 顺序执行没有被进程池污染。
+5. 三策略 HTML 是否含三张热图、时间滑块、4 deme 曲线和 3×3 C2ST；small R=50、large R=3 是否正确。
+6. `homing_tensor` 的 lazy import / 缓存回退是否不改变 `.venv` 下 natal 路径的行为。
+7. `ruff`/`py_compile` 是否通过；`pyright` 仍只 include `src`，复现脚本不在门禁内。
+
+### 43.4 残余风险 / 未检查
+
+- GPU 仅 f32；与 CPU f64 只比分布，不要求逐位。f32 容差约 `1e-5` 量级（单平面实测约 `5.7e-6`）。
+- offset batching 目标 1.5e6 条边/batch；大 κ 时需调小，尚未做显存阶梯/上限测试。
+- GPU 顺序执行；未做多进程 CUDA 并行。GPU 为共享设备，计时受其他用户影响。
+- CPU golden 仍是 NumPy 镜像，尚未与 natal Rust CPU CSR 交叉核对。
+- large R=3 只作视觉/形态对照；C2ST 不做结论。
+- `results/homing_tensor_3type_dc0.8.npy` 当前是未跟踪缓存；若不在提交中保留，conda demo 在无 natal 时
+  需先用 `.venv` 生成：`cd hexagon_spatial_test/chasing_model/scripts && python -c "import numpy as np, compare_strategies_v3 as v3; np.save(v3.HERE/'results'/'homing_tensor_3type_dc0.8.npy', v3.homing_tensor())"`。
+- 未接入 natal 产品；未做 chasing S1/S2；未 commit/push。

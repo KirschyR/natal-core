@@ -35,8 +35,6 @@ from matplotlib.colors import Normalize, TwoSlopeNorm  # noqa: E402
 from scipy.optimize import minimize
 from scipy.stats import rankdata  # noqa: E402
 
-import natal as nt  # noqa: E402
-
 # Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
 HERE = Path(__file__).resolve().parent.parent
 RESULTS = HERE / "results" / "strategies_v3"
@@ -87,6 +85,16 @@ COLORS = {"cpu": "tab:blue", "m0": "tab:orange", "m1": "tab:green", "m2": "tab:r
 
 def homing_tensor(dc: float = 0.8) -> np.ndarray:
     """Return natal's ``(Z, Z, Z)`` homing offspring tensor for [WT, Drive]."""
+    cache = HERE / "results" / f"homing_tensor_3type_dc{dc:g}.npy"
+    try:
+        import natal as nt
+    except ModuleNotFoundError:
+        if cache.exists():
+            return np.load(cache)
+        raise ModuleNotFoundError(
+            f"natal is unavailable and cached tensor {cache} is missing; "
+            "run with the natal virtualenv to generate it"
+        ) from None
     species = nt.Species.from_dict(
         "ChasingStrategies", {"chr1": {"loc": ["WT", "Drive"]}}
     )

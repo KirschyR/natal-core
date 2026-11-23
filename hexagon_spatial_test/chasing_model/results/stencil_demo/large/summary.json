@@ -55,6 +55,20 @@
         "final_count_mean": 961.0,
         "final_count_std": 0.0
       }
+    },
+    "gpu_stencil": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      }
     }
   },
   "front": {
@@ -67,62 +81,101 @@
       "final_mean": 21.213203435596427,
       "final_std": 0.0,
       "mean_over_time": 11.776929740143926
+    },
+    "gpu_stencil": {
+      "final_mean": 21.213203435596427,
+      "final_std": 0.0,
+      "mean_over_time": 11.767537536959242
     }
   },
   "total": {
     "cpu": {
       "final_mean": 202263.69494501557,
-      "final_std": 103.3487954810446,
+      "final_std": 103.34879548103963,
       "mean_over_time": 202056.12033452783
     },
     "stencil": {
       "final_mean": 201877.40235625472,
-      "final_std": 324.3137036647413,
+      "final_std": 324.3137036647197,
       "mean_over_time": 202070.18446712
+    },
+    "gpu_stencil": {
+      "final_mean": 202153.75634884034,
+      "final_std": 481.9591279722575,
+      "mean_over_time": 202068.50994131304
     }
   },
   "drive_final_selected": {
     "cpu": [
-      0.9999999999697408,
+      0.999999999969741,
       0.9999999996437068,
-      0.9999998011043161,
+      0.9999998011043162,
       0.9999904687678001
     ],
     "stencil": [
       0.9999999981843107,
       0.9999999160669124,
-      0.9999982366082002,
+      0.9999982366082,
       0.9999970779952397
+    ],
+    "gpu_stencil": [
+      0.9999999866838638,
+      0.9999998810711063,
+      0.9999980052307551,
+      0.999998229175355
     ]
   },
   "timing": {
     "cpu": {
-      "wall_seconds_per_replicate_mean": 21.609551473831136,
-      "wall_seconds_per_replicate_median": 21.570144716650248,
-      "wall_seconds_per_replicate_min": 21.503727103583515,
-      "wall_seconds_per_replicate_max": 21.75478260125965,
-      "migration_seconds_per_replicate_mean": 21.435608881215256,
-      "migration_seconds_per_replicate_median": 21.393640149384737,
-      "migration_seconds_per_replicate_min": 21.33105656504631,
-      "migration_seconds_per_replicate_max": 21.582129929214716,
-      "migration_fraction_of_wall_mean": 0.991950359145323,
+      "wall_seconds_per_replicate_mean": 20.752073543146253,
+      "wall_seconds_per_replicate_median": 20.82769284863025,
+      "wall_seconds_per_replicate_min": 20.56878377776593,
+      "wall_seconds_per_replicate_max": 20.85974400304258,
+      "migration_seconds_per_replicate_mean": 20.600343972444534,
+      "migration_seconds_per_replicate_median": 20.676205910742283,
+      "migration_seconds_per_replicate_min": 20.418479996733367,
+      "migration_seconds_per_replicate_max": 20.706346009857953,
+      "migration_transfer_in_seconds_per_replicate_mean": 0.0,
+      "migration_compute_seconds_per_replicate_mean": 20.600343972444534,
+      "migration_transfer_out_seconds_per_replicate_mean": 0.0,
+      "migration_fraction_of_wall_mean": 0.9926885010984202,
       "reps": 3,
       "ticks": 100,
       "jobs": 3
     },
     "stencil": {
-      "wall_seconds_per_replicate_mean": 337.9309636879091,
-      "wall_seconds_per_replicate_median": 339.64693528972566,
-      "wall_seconds_per_replicate_min": 329.85302066616714,
-      "wall_seconds_per_replicate_max": 344.29293510783464,
-      "migration_seconds_per_replicate_mean": 337.7597596930961,
-      "migration_seconds_per_replicate_median": 339.4749151226133,
-      "migration_seconds_per_replicate_min": 329.68264258280396,
-      "migration_seconds_per_replicate_max": 344.12172137387097,
-      "migration_fraction_of_wall_mean": 0.9994932380838626,
+      "wall_seconds_per_replicate_mean": 312.0935785807669,
+      "wall_seconds_per_replicate_median": 312.57544364221394,
+      "wall_seconds_per_replicate_min": 310.59539308585227,
+      "wall_seconds_per_replicate_max": 313.10989901423454,
+      "migration_seconds_per_replicate_mean": 311.92399515770376,
+      "migration_seconds_per_replicate_median": 312.40675868745893,
+      "migration_seconds_per_replicate_min": 310.42581938393414,
+      "migration_seconds_per_replicate_max": 312.9394074017182,
+      "migration_transfer_in_seconds_per_replicate_mean": 0.0,
+      "migration_compute_seconds_per_replicate_mean": 311.92399515770376,
+      "migration_transfer_out_seconds_per_replicate_mean": 0.0,
+      "migration_fraction_of_wall_mean": 0.9994566215420347,
       "reps": 3,
       "ticks": 100,
       "jobs": 3
+    },
+    "gpu_stencil": {
+      "wall_seconds_per_replicate_mean": 22.503169814124703,
+      "wall_seconds_per_replicate_median": 22.52555210608989,
+      "wall_seconds_per_replicate_min": 22.41177378501743,
+      "wall_seconds_per_replicate_max": 22.57218355126679,
+      "migration_seconds_per_replicate_mean": 22.312467437858384,
+      "migration_seconds_per_replicate_median": 22.333891683258116,
+      "migration_seconds_per_replicate_min": 22.224420075304806,
+      "migration_seconds_per_replicate_max": 22.379090555012226,
+      "migration_transfer_in_seconds_per_replicate_mean": 0.012486382387578487,
+      "migration_compute_seconds_per_replicate_mean": 22.2571348582084,
+      "migration_transfer_out_seconds_per_replicate_mean": 0.04284619726240635,
+      "migration_fraction_of_wall_mean": 0.9915257813075445,
+      "reps": 3,
+      "ticks": 100,
+      "jobs": 1
     }
   },
   "c2st": null,

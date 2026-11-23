@@ -28,7 +28,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 
-HERE = Path(__file__).resolve().parent
+# Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
+HERE = Path(__file__).resolve().parent.parent
 RESULTS = HERE / "results"
 
 

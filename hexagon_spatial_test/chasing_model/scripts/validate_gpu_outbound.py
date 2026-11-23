@@ -30,7 +30,8 @@ import numpy as np
 import torch
 from scipy.stats import ks_2samp
 
-HERE = Path(__file__).resolve().parent
+# Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
+HERE = Path(__file__).resolve().parent.parent
 RESULTS = HERE / "results" / "gpu_fft"
 
 

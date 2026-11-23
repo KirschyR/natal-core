@@ -33,7 +33,8 @@ import natal as nt  # noqa: E402
 from natal.frontend.spatial import HexGrid, batch_setting  # noqa: E402
 from natal.frontend.spatial.topology import build_gaussian_kernel  # noqa: E402
 
-HERE = Path(__file__).resolve().parent
+# Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
+HERE = Path(__file__).resolve().parent.parent
 RESULTS = HERE / "results" / "deterministic_compare"
 HTML_DIR = HERE / "results" / "html"
 

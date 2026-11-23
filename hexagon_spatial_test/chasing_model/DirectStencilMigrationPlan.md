@@ -155,7 +155,7 @@ $$
 - 先做**完整 kernel + 边界判断**版本（不做模板优化），实现 Pass 1/Pass 2；逐边 RNG 使用与后续 GPU
   一致的 **Philox4x32-10 key 结构**，Gamma 用 **Marsaglia–Tsang**（与后续 GPU 原型一致）。
 - 场景：`rate=0.5`；15²/k7/avd0.8、31²/k11/avd1.5；单平面；R=100–300。
-- 对照：CPU CSR 随机迁移（`compare_migration_models.py` / v3 的 `cpu_migrate`）。
+- 对照：CPU CSR 随机迁移（`scripts/compare_migration_models.py` / v3 的 `cpu_migrate`）。
 - 指标：per-deme 均值、方差比、lag 平均协方差、总种群 mean/std、负值比例、逐源守恒；
   - 同 seed 两次运行逐位一致；
   - Pass 1/Pass 2 的 `G_{s,d}` 重放一致（可在原型中直接断言）；

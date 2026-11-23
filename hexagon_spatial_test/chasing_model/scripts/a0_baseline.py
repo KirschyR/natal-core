@@ -33,7 +33,8 @@ import time
 from pathlib import Path
 from typing import Any
 
-HERE = Path(__file__).resolve().parent
+# Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
+HERE = Path(__file__).resolve().parent.parent
 RESULTS = HERE / "results" / "gpu_fft"
 SEEDS = (0, 1, 2)
 

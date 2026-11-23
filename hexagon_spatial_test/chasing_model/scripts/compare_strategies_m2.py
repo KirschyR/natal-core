@@ -34,8 +34,9 @@ from matplotlib.colors import Normalize  # noqa: E402
 
 import natal as nt  # noqa: E402
 
-HERE = Path(__file__).resolve().parent
-RESULTS = HERE / "results" / "strategies"
+# Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
+HERE = Path(__file__).resolve().parent.parent
+RESULTS = HERE / "results" / "strategies_v2"
 HTML_DIR = HERE / "results" / "html"
 
 F = 8
@@ -73,8 +74,9 @@ CONFIGS = [
     {"name": "small", "arena": 15, "kernel_size": 7, "avd": 0.8, "ticks": 100, "reps": 20, "scale": 100.0},
     {"name": "large", "arena": 31, "kernel_size": 11, "avd": 1.5, "ticks": 100, "reps": 10, "scale": 100.0},
 ]
-STRATEGIES = ("cpu", "m0", "m1")
-COLORS = {"cpu": "tab:blue", "m0": "tab:orange", "m1": "tab:green"}
+STRATEGIES = ("cpu", "m0", "m1", "m2")
+DISPLAY = ("cpu", "m0", "m2")  # M1 is computed but omitted from the display
+COLORS = {"cpu": "tab:blue", "m0": "tab:orange", "m1": "tab:green", "m2": "tab:red"}
 
 
 # --- genetics / initial state ----------------------------------------------
@@ -401,18 +403,82 @@ def m1_migrate(data: np.ndarray, kernel: np.ndarray, rate: float,
                 data[zz, ss, aa] = value
 
 
+def _blocks(rows: int, cols: int, block: int):
+    for r0 in range(0, rows, block):
+        r1 = min(r0 + block, rows)
+        for c0 in range(0, cols, block):
+            c1 = min(c0 + block, cols)
+            yield r0, r1, c0, c1
+
+
+def _continuous_multinomial_block(rng: np.random.Generator, n: float, probs: np.ndarray) -> np.ndarray:
+    if n <= 1.0 + EPS:
+        return n * probs
+    alpha = probs * (n - 1.0)
+    draws = np.where(alpha > 0.0, rng.gamma(shape=np.maximum(alpha, EPS)), 0.0)
+    total = draws.sum()
+    return n * draws / total if total > EPS else n * probs
+
+
+def m2_migrate(data: np.ndarray, kernel: np.ndarray, rate: float,
+               rng: np.random.Generator) -> None:
+    """FFT mean + local block multinomial (independent block totals, total conserved).
+
+    Each source samples its outbound (Beta); the FFT gives the expected inbound
+    field ``mu`` from those sampled outbounds.  ``mu`` is split into blocks of
+    size ~= the kernel support; each block draws an independent continuous-
+    Poisson total and then a within-block continuous multinomial.  Block totals
+    are scaled to conserve the sampled outbound total.  This keeps the spatial
+    wavefront (mu) and local negative correlations (within-block multinomial).
+    """
+    rows, cols = data.shape[-2:]
+    off, z = _off_z(rows, cols, kernel)
+    block = kernel.shape[0]
+    for zz in range(Z):
+        for ss in range(S):
+            for aa in range(NEW_ADULT_AGE, A):
+                field = data[zz, ss, aa]
+                outbound = _continuous_binomial_vec(rng, field.ravel(), rate).reshape(rows, cols)
+                keep = field - outbound
+                mu = _conv(outbound / z, off)
+                total = float(mu.sum())
+                if total <= EPS:
+                    data[zz, ss, aa] = keep
+                    continue
+                parts = []
+                block_total = 0.0
+                for r0, r1, c0, c1 in _blocks(rows, cols, block):
+                    blk = mu[r0:r1, c0:c1]
+                    mb = float(blk.sum())
+                    if mb <= EPS:
+                        continue
+                    tb = float(rng.gamma(shape=mb))
+                    parts.append((r0, r1, c0, c1, blk, mb, tb))
+                    block_total += tb
+                scale = total / block_total if block_total > EPS else 1.0
+                counts = np.zeros_like(mu)
+                for r0, r1, c0, c1, blk, mb, tb in parts:
+                    probs = (blk / mb).ravel()
+                    cnt = _continuous_multinomial_block(rng, tb * scale, probs)
+                    counts[r0:r1, c0:c1] = cnt.reshape(r1 - r0, c1 - c0)
+                data[zz, ss, aa] = keep + counts
+
+
 # --- metrics / experiment ---------------------------------------------------
 
 
 def select_demes(rows: int, cols: int) -> list[tuple[int, int]]:
+    """Four demes on the centre-to-boundary line (0, 1/3, 2/3, 1)."""
     cr, cc = (rows - 1) // 2, (cols - 1) // 2
-    return [
-        (cr, cc),
-        (min(cr + 2, rows - 1), cc),
-        (min(cr + rows // 4, rows - 1), cc),
-        (0, cc),
-        (min(rows // 3, rows - 1), min(cols // 3, cols - 1)),
-    ]
+    points: list[tuple[int, int]] = []
+    for fraction in (0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0):
+        r = int(round((1.0 - fraction) * cr))
+        points.append((min(max(r, 0), rows - 1), cc))
+    unique: list[tuple[int, int]] = []
+    for point in points:
+        if point not in unique:
+            unique.append(point)
+    return unique
 
 
 def record(data: np.ndarray, selected: list[tuple[int, int]]) -> dict:
@@ -475,8 +541,10 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
             cpu_migrate(data, csr, MIGRATION_RATE, rng_mig)
         elif strategy == "m0":
             m0_migrate(data, kernel, MIGRATION_RATE, rng_mig)
-        else:
+        elif strategy == "m1":
             m1_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+        else:
+            m2_migrate(data, kernel, MIGRATION_RATE, rng_mig)
         migration_seconds += time.perf_counter() - t0
         capture(t)
     return {
@@ -515,8 +583,8 @@ def render_frames(mean_fields: dict[str, np.ndarray], rows: int, cols: int, titl
     xmin, xmax, ymin, ymax = bounds
     frames: list[str] = []
     for t in range(next(iter(mean_fields.values())).shape[0]):
-        fig, axes = plt.subplots(1, 3, figsize=(15, 4.8), dpi=90)
-        for ax, strategy in zip(axes, STRATEGIES):
+        fig, axes = plt.subplots(1, len(DISPLAY), figsize=(5.0 * len(DISPLAY), 4.8), dpi=90)
+        for ax, strategy in zip(axes, DISPLAY):
             coll = PolyCollection(
                 vertices, array=mean_fields[strategy][t].ravel(), cmap="viridis",
                 clim=(0.0, 1.0), rasterized=True,
@@ -542,10 +610,10 @@ def render_frames(mean_fields: dict[str, np.ndarray], rows: int, cols: int, titl
 def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
     timing_rows = "".join(
-        f"<tr><td>{s}</td><td>{t['wall_seconds']:.2f}</td>"
-        f"<td>{t['per_replicate_seconds']:.3f}</td>"
-        f"<td>{t['migration_seconds']:.2f}</td></tr>"
-        for s, t in timing.items()
+        f"<tr><td>{s}</td><td>{timing[s]['wall_seconds']:.2f}</td>"
+        f"<td>{timing[s]['per_replicate_seconds']:.3f}</td>"
+        f"<td>{timing[s]['migration_seconds']:.2f}</td></tr>"
+        for s in DISPLAY if s in timing
     )
     meta = next(iter(timing.values()))
     return f"""<!DOCTYPE html>
@@ -553,7 +621,7 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
-<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks (all strategies are NumPy/CPU; M0/M1 use NumPy FFT)</h4>
+<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks (NumPy/CPU; M0/M2 use NumPy FFT). M1 is computed but omitted from this display.</h4>
 <table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
 <tr><th>strategy</th><th>wall seconds</th><th>seconds / replicate</th><th>migration seconds</th></tr>
 {timing_rows}
@@ -582,10 +650,10 @@ def line_plot(mean: dict, std: dict, ticks: int, selected, out: Path) -> None:
     for d in range(n_deme):
         for c, (key, name) in enumerate(zip(keys, names)):
             ax = axes[d, c]
-            for strategy in STRATEGIES:
+            for strategy in DISPLAY:
                 m = mean[strategy][key][:, d]
                 s = std[strategy][key][:, d]
-                ax.plot(t, m, color=COLORS[strategy], label=strategy, lw=1.6)
+                ax.plot(t, m, color=COLORS[strategy], label=strategy, lw=1.0)
                 ax.fill_between(t, m - s, m + s, color=COLORS[strategy], alpha=0.22)
             ax.grid(alpha=0.3)
             if d == 0:
@@ -641,9 +709,9 @@ def run_config(cfg: dict) -> dict:
 
     mean_fields = {s: per_strategy[s]["fields"].mean(axis=0) for s in STRATEGIES}
     frames = render_frames(mean_fields, rows, cols, cfg["name"])
-    html = HTML_DIR / f"compare_strategies_{cfg['name']}.html"
+    html = HTML_DIR / f"compare_strategies_v2_{cfg['name']}.html"
     HTML_DIR.mkdir(parents=True, exist_ok=True)
-    html.write_text(_html(frames, line_png, f"strategies: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})", timing), encoding="utf-8")
+    html.write_text(_html(frames, line_png, f"strategies v2: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})", timing), encoding="utf-8")
 
     def summarize(arr: np.ndarray) -> dict:
         return {

@@ -770,7 +770,7 @@ $$
 - \(R=100\)；特征见 D.2；逻辑回归 \(\lambda=10^{-2}\)；\(K=5\)，\(C=5\)；\(B=20\)；对角线 self-split。
 - 结果（\(\mathrm{Acc}/\mathrm{AUC}\)）：**M2 vs CPU** small \(0.581/0.618\)、large \(0.591/0.604\)；**M0 vs CPU** small \(0.773/0.848\)、large \(0.920/0.974\)；\(p_{\mathrm{perm}}=0.048\)（置换下限）。
 - 解读：M2 与 CPU 的效应量接近不可分边界；M0 因方差结构偏低而明显可分。是否「生物学可合并」仍取决于下游 chasing 指标的等价检验。
-- 代码：`compare_strategies_v3.py` 的 `_feature_matrix`、`_fit_logreg`、`_cv_scores`、`_c2st_pair`、`_c2st_matrices`、`_plot_c2st`。
+- 代码：`scripts/compare_strategies_v3.py` 的 `_feature_matrix`、`_fit_logreg`、`_cv_scores`、`_c2st_pair`、`_c2st_matrices`、`_plot_c2st`。
 
 ---
 

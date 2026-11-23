@@ -11,7 +11,8 @@ import numpy as np
 
 import compare_strategies_v3 as v3
 
-HERE = Path(__file__).resolve().parent
+# Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
+HERE = Path(__file__).resolve().parent.parent
 HTML = HERE / "results" / "html"
 
 for name in ("small", "large"):

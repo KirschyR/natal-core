@@ -21,6 +21,7 @@ import base64
 import io
 import json
 import time
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
 import matplotlib
@@ -29,13 +30,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 from matplotlib.cm import ScalarMappable  # noqa: E402
-from matplotlib.collections import PolyCollection  # noqa: E402
-from matplotlib.colors import Normalize  # noqa: E402
+from matplotlib.collections import PolyCollection
+from matplotlib.colors import Normalize, TwoSlopeNorm  # noqa: E402
+from scipy.optimize import minimize
+from scipy.stats import rankdata  # noqa: E402
 
 import natal as nt  # noqa: E402
 
-HERE = Path(__file__).resolve().parent
-RESULTS = HERE / "results" / "strategies_v2"
+# Scripts live in chasing_model/scripts/; outputs stay under chasing_model/.
+HERE = Path(__file__).resolve().parent.parent
+RESULTS = HERE / "results" / "strategies_v3"
 HTML_DIR = HERE / "results" / "html"
 
 F = 8
@@ -70,8 +74,8 @@ SURVIVAL = np.array(
 )
 
 CONFIGS = [
-    {"name": "small", "arena": 15, "kernel_size": 7, "avd": 0.8, "ticks": 100, "reps": 20, "scale": 100.0},
-    {"name": "large", "arena": 31, "kernel_size": 11, "avd": 1.5, "ticks": 100, "reps": 10, "scale": 100.0},
+    {"name": "small", "arena": 15, "kernel_size": 7, "avd": 0.8, "ticks": 100, "reps": 100, "scale": 100.0},
+    {"name": "large", "arena": 31, "kernel_size": 11, "avd": 1.5, "ticks": 100, "reps": 100, "scale": 100.0},
 ]
 STRATEGIES = ("cpu", "m0", "m1", "m2")
 DISPLAY = ("cpu", "m0", "m2")  # M1 is computed but omitted from the display
@@ -507,6 +511,7 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
     rng_life = np.random.default_rng(seed)
     rng_mig = np.random.default_rng(seed + 100000)
     scale = float(cfg.get("scale", 1.0))
+    rate = float(cfg.get("migration_rate", MIGRATION_RATE))
     density_ref = DENSITY_REF * scale
     data = initial_state(rows, cols, RELEASE_RADIUS, RELEASE_MULTIPLE, scale)
     ticks = cfg["ticks"]
@@ -537,13 +542,13 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
         event_a(data)
         t0 = time.perf_counter()
         if strategy == "cpu":
-            cpu_migrate(data, csr, MIGRATION_RATE, rng_mig)
+            cpu_migrate(data, csr, rate, rng_mig)
         elif strategy == "m0":
-            m0_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+            m0_migrate(data, kernel, rate, rng_mig)
         elif strategy == "m1":
-            m1_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+            m1_migrate(data, kernel, rate, rng_mig)
         else:
-            m2_migrate(data, kernel, MIGRATION_RATE, rng_mig)
+            m2_migrate(data, kernel, rate, rng_mig)
         migration_seconds += time.perf_counter() - t0
         capture(t)
     return {
@@ -606,12 +611,167 @@ def render_frames(mean_fields: dict[str, np.ndarray], rows: int, cols: int, titl
     return frames
 
 
-def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
+_WORKER: dict = {}
+
+
+def _worker_init(cfg, selected, tensor, csr, kernel):
+    _WORKER.update({"cfg": cfg, "selected": selected, "tensor": tensor, "csr": csr, "kernel": kernel})
+
+
+def _replicate_task(args):
+    strategy, seed = args
+    w = _WORKER
+    return run_replicate(strategy, w["cfg"], seed, w["selected"], w["tensor"], w["csr"], w["kernel"])
+
+
+def _feature_matrix(per_strategy, ticks, n_deme):
+    feats = {}
+    for s in DISPLAY:
+        d = per_strategy[s]
+        drive, cov = d["drive"], d["coverage"]
+        front, total = d["front"], d["total"]
+        cols = []
+        for t in ticks:
+            cols.append(drive[:, t, :])
+            cols.append(cov[:, t, :])
+            cols.append(front[:, t][:, None])
+            cols.append(total[:, t][:, None])
+        cols.append(drive.mean(axis=1))
+        cols.append(drive.std(axis=1, ddof=1))
+        sel = drive.mean(axis=2)
+        t50 = []
+        for r in range(sel.shape[0]):
+            idx = np.where(sel[r] >= 0.5)[0]
+            t50.append(idx[0] if len(idx) else sel.shape[1])
+        cols.append(np.asarray(t50, dtype=float)[:, None])
+        feats[s] = np.concatenate(cols, axis=1)
+    return feats
+
+
+def _fit_logreg(X, y, l2=1e-2):
+    n, d = X.shape
+    Xb = np.column_stack([np.ones(n), X])
+
+    def obj(w):
+        z = np.clip(Xb @ w, -50.0, 50.0)
+        p = 1.0 / (1.0 + np.exp(-z))
+        eps = 1e-12
+        ll = np.sum(y * np.log(p + eps) + (1.0 - y) * np.log(1.0 - p + eps))
+        f = -ll / n + 0.5 * l2 * np.sum(w[1:] ** 2)
+        g = Xb.T @ (p - y) / n
+        g[1:] += l2 * w[1:]
+        return f, g
+
+    return minimize(obj, np.zeros(d + 1), jac=True, method="L-BFGS-B").x
+
+
+def _predict_logreg(w, X):
+    Xb = np.column_stack([np.ones(X.shape[0]), X])
+    z = np.clip(Xb @ w, -50.0, 50.0)
+    return 1.0 / (1.0 + np.exp(-z))
+
+
+def _auc_score(y, p):
+    r = rankdata(p)
+    n1 = float(y.sum())
+    n0 = float(len(y) - n1)
+    if n1 <= 0 or n0 <= 0:
+        return 0.5
+    return float((r[y == 1].sum() - n1 * (n1 + 1) / 2.0) / (n1 * n0))
+
+
+def _cv_scores(X, y, folds=5, repeats=5, seed=0):
+    rng = np.random.default_rng(seed)
+    accs, aucs = [], []
+    for _ in range(repeats):
+        idx0 = np.where(y == 0)[0]
+        idx1 = np.where(y == 1)[0]
+        rng.shuffle(idx0)
+        rng.shuffle(idx1)
+        groups = [[] for _ in range(folds)]
+        for arr in (idx0, idx1):
+            for i, v in enumerate(arr):
+                groups[i % folds].append(int(v))
+        for k in range(folds):
+            va = np.asarray(groups[k], dtype=int)
+            tr = np.setdiff1d(np.arange(len(y)), va)
+            mu = X[tr].mean(axis=0)
+            sd = X[tr].std(axis=0)
+            sd = np.where(sd > 0, sd, 1.0)
+            w = _fit_logreg((X[tr] - mu) / sd, y[tr])
+            p = _predict_logreg(w, (X[va] - mu) / sd)
+            accs.append(float(((p >= 0.5) == y[va]).mean()))
+            aucs.append(_auc_score(y[va], p))
+    return float(np.mean(accs)), float(np.mean(aucs))
+
+
+def _c2st_pair(Xa, Xb, seed=0, perms=20):
+    X = np.vstack([Xa, Xb])
+    y = np.concatenate([np.zeros(len(Xa)), np.ones(len(Xb))])
+    acc, auc = _cv_scores(X, y, folds=5, repeats=5, seed=seed)
+    rng = np.random.default_rng(seed + 1)
+    null = []
+    for _ in range(perms):
+        yp = rng.permutation(y)
+        accp, _ = _cv_scores(X, yp, folds=5, repeats=2, seed=int(rng.integers(1_000_000_000)))
+        null.append(accp)
+    p = (1.0 + float(np.sum(np.asarray(null) >= acc))) / (1.0 + perms)
+    return acc, auc, p
+
+
+def _c2st_matrices(feats, methods, seed=0):
+    n = len(methods)
+    acc = np.full((n, n), np.nan)
+    auc = np.full((n, n), np.nan)
+    pval = np.ones((n, n))
+    for i in range(n):
+        # self-split: split the same method's replicates into two halves; C2ST ~0.5 under the null.
+        Xm = feats[methods[i]]
+        rng = np.random.default_rng(seed + 101 * (i + 1))
+        order = rng.permutation(len(Xm))
+        half = len(Xm) // 2
+        a, b, p = _c2st_pair(Xm[order[:half]], Xm[order[half : 2 * half]], seed=seed + 7 * i + 3)
+        acc[i, i], auc[i, i], pval[i, i] = a, b, p
+        for j in range(i):
+            a, b, p = _c2st_pair(feats[methods[i]], feats[methods[j]], seed=seed + 17 * (i + 1) + j)
+            acc[i, j] = acc[j, i] = a
+            auc[i, j] = auc[j, i] = b
+            pval[i, j] = pval[j, i] = p
+    return acc, auc, pval
+
+
+def _plot_c2st(acc, auc, methods, out):
+    n = len(methods)
+    mask = np.triu(np.ones((n, n)), k=1).astype(bool)
+    data = np.ma.masked_where(mask, acc)
+    norm = TwoSlopeNorm(vmin=0.4, vcenter=0.5, vmax=1.0)
+    fig, ax = plt.subplots(figsize=(4.8, 4.2))
+    im = ax.imshow(data, cmap="RdBu_r", norm=norm)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels(methods)
+    ax.set_yticks(range(n))
+    ax.set_yticklabels(methods)
+    for i in range(n):
+        for j in range(i + 1):
+            rgba = im.cmap(norm(acc[i, j]))
+            lum = 0.299 * rgba[0] + 0.587 * rgba[1] + 0.114 * rgba[2]
+            ax.text(j, i, f"{acc[i, j]:.2f}\n({auc[i, j]:.2f})", ha="center", va="center",
+                    fontsize=8.5, color=("white" if lum < 0.5 else "black"))
+    fig.colorbar(im, ax=ax, label="accuracy (0.5 = indistinguishable); cell = acc (AUC)")
+    ax.set_title("C2ST: accuracy (AUC), lower triangle")
+    fig.tight_layout()
+    fig.savefig(out, dpi=150)
+    plt.close(fig)
+
+
+def _html(frames: list[str], line_png: Path, title: str, timing: dict,
+          c2st_png: Path) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
+    c2st_uri = base64.b64encode(c2st_png.read_bytes()).decode("ascii")
     timing_rows = "".join(
-        f"<tr><td>{s}</td><td>{timing[s]['wall_seconds']:.2f}</td>"
-        f"<td>{timing[s]['per_replicate_seconds']:.3f}</td>"
-        f"<td>{timing[s]['migration_seconds']:.2f}</td></tr>"
+        f"<tr><td>{s}</td>"
+        f"<td>{timing[s]['wall_seconds'] / max(timing[s].get('reps', 1), 1):.3f}</td>"
+        f"<td>{timing[s]['migration_seconds'] / (max(timing[s].get('reps', 1), 1) * max(timing[s].get('jobs', 1), 1)):.3f}</td></tr>"
         for s in DISPLAY if s in timing
     )
     meta = next(iter(timing.values()))
@@ -620,9 +780,9 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
-<h4>Timing: {meta['reps']} replicates x {meta['ticks']} ticks (NumPy/CPU; M0/M2 use NumPy FFT). M1 is computed but omitted from this display.</h4>
+<h4>Timing per replicate (actual, with {meta.get('jobs', 1)} workers; NumPy/CPU): wall = parallel wall / R; migration = migration CPU sum / (R x workers). Sums and the sequential probe are in summary.json. M1 is computed but omitted from this display.</h4>
 <table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
-<tr><th>strategy</th><th>wall seconds</th><th>seconds / replicate</th><th>migration seconds</th></tr>
+<tr><th>strategy</th><th>wall s / replicate (actual)</th><th>migration s / replicate (actual)</th></tr>
 {timing_rows}
 </table>
 <img id="frame" src="data:image/png;base64,{frames[0]}">
@@ -631,6 +791,9 @@ def _html(frames: list[str], line_png: Path, title: str, timing: dict) -> str:
 <span id="lbl">tick 0</span></div>
 <h3>Selected demes: drive fraction / non-egg population / juvenile fraction (mean +/- 1 SD)</h3>
 <img src="data:image/png;base64,{line_uri}">
+<h3>C2ST: are the two methods' replicate distributions separable? (lower triangle; 0.5 = indistinguishable)</h3>
+<p>Each cell = accuracy (AUC); color = accuracy; diagonal = self-split. Permutation p is in <code>c2st.json</code>/<code>summary.json</code>.</p>
+<img src="data:image/png;base64,{c2st_uri}">
 <script>
 const frames=[{','.join(f'"{f}"' for f in frames)}];let i=0,timer=null;
 const img=document.getElementById('frame'),sl=document.getElementById('slider'),lbl=document.getElementById('lbl');
@@ -668,7 +831,7 @@ def line_plot(mean: dict, std: dict, ticks: int, selected, out: Path) -> None:
     plt.close(fig)
 
 
-def run_config(cfg: dict) -> dict:
+def run_config(cfg: dict, jobs: int = 1) -> dict:
     rows = cols = cfg["arena"]
     kernel = hex_gaussian(cfg["kernel_size"], cfg["avd"])
     csr = build_csr(rows, cols, kernel)
@@ -678,8 +841,16 @@ def run_config(cfg: dict) -> dict:
     timing = {}
     for strategy in STRATEGIES:
         t0 = time.perf_counter()
-        reps = [run_replicate(strategy, cfg, seed, selected, tensor, csr, kernel)
-                for seed in range(cfg["reps"])]
+        if jobs > 1:
+            with ProcessPoolExecutor(
+                max_workers=jobs,
+                initializer=_worker_init,
+                initargs=(cfg, selected, tensor, csr, kernel),
+            ) as pool:
+                reps = list(pool.map(_replicate_task, [(strategy, seed) for seed in range(cfg["reps"])]))
+        else:
+            reps = [run_replicate(strategy, cfg, seed, selected, tensor, csr, kernel)
+                    for seed in range(cfg["reps"])]
         wall = time.perf_counter() - t0
         migration = sum(r["migration_seconds"] for r in reps)
         timing[strategy] = {
@@ -688,6 +859,18 @@ def run_config(cfg: dict) -> dict:
             "migration_seconds": migration,
             "reps": cfg["reps"],
             "ticks": cfg["ticks"],
+            "jobs": jobs,
+        }
+        probe_wall, probe_mig = [], []
+        for seed in (0, 1, 2):
+            t0 = time.perf_counter()
+            r = run_replicate(strategy, cfg, seed, selected, tensor, csr, kernel)
+            probe_wall.append(time.perf_counter() - t0)
+            probe_mig.append(r["migration_seconds"])
+        timing[strategy]["sequential"] = {
+            "wall_seconds": float(np.mean(probe_wall)),
+            "migration_seconds": float(np.mean(probe_mig)),
+            "seeds": [0, 1, 2],
         }
         per_strategy[strategy] = {
             "drive": np.stack([r["drive"] for r in reps]),
@@ -706,11 +889,26 @@ def run_config(cfg: dict) -> dict:
     line_png = out_dir / "selected_demes.png"
     line_plot(mean, std, cfg["ticks"], selected, line_png)
 
-    mean_fields = {s: per_strategy[s]["fields"].mean(axis=0) for s in STRATEGIES}
+    mean_fields = {
+        s: per_strategy[s]["fields"][:5].mean(axis=0) for s in STRATEGIES
+    }
     frames = render_frames(mean_fields, rows, cols, cfg["name"])
-    html = HTML_DIR / f"compare_strategies_v2_{cfg['name']}.html"
+
+    ticks = [max(1, cfg["ticks"] // 4), cfg["ticks"] // 2, 3 * cfg["ticks"] // 4, cfg["ticks"]]
+    feats = _feature_matrix(per_strategy, ticks, len(selected))
+    methods = list(DISPLAY)
+    c2st_acc, c2st_auc, c2st_p = _c2st_matrices(feats, methods)
+    c2st_png = out_dir / "c2st.png"
+    _plot_c2st(c2st_acc, c2st_auc, methods, c2st_png)
+    (out_dir / "c2st.json").write_text(
+        json.dumps({"methods": methods, "accuracy": c2st_acc.tolist(),
+                    "auc": c2st_auc.tolist(), "p": c2st_p.tolist()}, indent=2),
+        encoding="utf-8",
+    )
+
+    html = HTML_DIR / f"compare_strategies_v3_{cfg['name']}.html"
     HTML_DIR.mkdir(parents=True, exist_ok=True)
-    html.write_text(_html(frames, line_png, f"strategies v2: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})", timing), encoding="utf-8")
+    html.write_text(_html(frames, line_png, f"strategies v3: {cfg['name']} ({rows}x{cols}, k{cfg['kernel_size']}, avd={cfg['avd']:g})", timing, c2st_png), encoding="utf-8")
 
     def summarize(arr: np.ndarray) -> dict:
         return {
@@ -738,6 +936,8 @@ def run_config(cfg: dict) -> dict:
             s: [float(mean[s]["drive"][-1, d]) for d in range(len(selected))] for s in STRATEGIES
         },
         "timing": timing,
+        "c2st": {"methods": methods, "accuracy": c2st_acc.tolist(),
+                 "auc": c2st_auc.tolist(), "p": c2st_p.tolist()},
         "html": html.name,
         "line_plot": line_png.name,
     }
@@ -754,6 +954,7 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--configs", default="small,large")
     ap.add_argument("--reps", type=int, default=0, help="override replicate count")
+    ap.add_argument("--jobs", type=int, default=8, help="parallel replicate workers")
     args = ap.parse_args()
     wanted = set(args.configs.split(","))
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -765,7 +966,7 @@ def main() -> int:
         if args.reps > 0:
             cfg = {**cfg, "reps": args.reps}
         print(f"[run] {cfg['name']} ...")
-        summaries.append(run_config(cfg))
+        summaries.append(run_config(cfg, args.jobs))
     print(json.dumps(summaries, indent=2))
     return 0
 

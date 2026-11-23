@@ -4,7 +4,7 @@ Runs the same three-type RSA hex population as ``compare_strategies_v3.py``
 and swaps only the migration backend:
 
 * ``cpu``     -- NumPy mirror of natal's continuous CSR;
-* ``stencil`` -- the two-pass direct stencil (fast serial replay path).
+* ``stencil`` -- the two-pass direct stencil (counter-based Philox + Marsaglia-Tsang).
 
 The demo writes a self-contained HTML with synchronized hex heatmaps, a time
 slider, selected-deme curves, and an optional C2ST panel.  No Rust or GPU path
@@ -41,6 +41,7 @@ HTML_DIR = HERE / "results" / "html"
 STRATEGIES = ("cpu", "stencil")
 DISPLAY = ("cpu", "stencil")
 COLORS = {"cpu": "tab:blue", "stencil": "tab:orange"}
+MIN_C2ST_REPS = 30
 
 CONFIGS = [
     {
@@ -72,7 +73,7 @@ def stencil_migrate_data(
     """Migrate the adult planes of one full-model state with the stencil."""
     rows, cols = data.shape[-2:]
     planes = data[:, :, v3.NEW_ADULT_AGE :].reshape(-1, rows * cols)
-    migrated, _ = stencil.stencil_migrate_planes_fast(
+    migrated, _ = stencil.stencil_migrate_planes(
         planes, rows, cols, kernel, rate, seed, tick
     )
     data[:, :, v3.NEW_ADULT_AGE :] = migrated.reshape(
@@ -171,6 +172,7 @@ def _html(
     title: str,
     timing: dict,
     c2st_png: Path | None,
+    c2st_note: str | None,
 ) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
     timing_rows = "".join(
@@ -187,6 +189,8 @@ def _html(
             "<h3>C2ST: CPU vs stencil (lower triangle; 0.5 = indistinguishable)</h3>"
             f'<img src="data:image/png;base64,{c2st_uri}">'
         )
+    elif c2st_note:
+        c2st_section = f"<p><b>C2ST skipped:</b> {c2st_note}</p>"
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><title>{title}</title>
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
@@ -222,7 +226,7 @@ def _c2st(
 ) -> tuple[dict | None, Path | None]:
     reps = per_strategy["cpu"]["drive"].shape[0]
     ticks = [max(1, cfg["ticks"] // 4), cfg["ticks"] // 2, 3 * cfg["ticks"] // 4, cfg["ticks"]]
-    if reps < 10:
+    if reps < MIN_C2ST_REPS:
         return None, None
     feats = v3._feature_matrix(per_strategy, ticks, len(selected))
     accuracy, auc, pvalue = v3._c2st_matrices(feats, list(DISPLAY))
@@ -303,6 +307,12 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
     }
     frames = v3.render_frames(mean_fields, rows, cols, cfg["name"])
     c2st, c2st_png = _c2st(per_strategy, cfg, selected, out_dir)
+    c2st_note = None
+    if c2st is None:
+        c2st_note = (
+            f"R={cfg['reps']} is below the {MIN_C2ST_REPS}-replicate threshold; "
+            "self-split C2ST at small R is dominated by sampling noise."
+        )
 
     html = HTML_DIR / f"compare_stencil_demo_{cfg['name']}.html"
     HTML_DIR.mkdir(parents=True, exist_ok=True)
@@ -315,6 +325,7 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
             f"rate={cfg['migration_rate']:g}, R={cfg['reps']})",
             timing,
             c2st_png,
+            c2st_note,
         ),
         encoding="utf-8",
     )
@@ -351,6 +362,7 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
         },
         "timing": timing,
         "c2st": c2st,
+        "c2st_note": c2st_note,
         "html": html.name,
         "line_plot": line_png.name,
     }

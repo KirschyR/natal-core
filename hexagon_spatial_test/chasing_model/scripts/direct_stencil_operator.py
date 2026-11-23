@@ -121,7 +121,6 @@ def _run_config(
     seed: int,
     low: int,
     high: int,
-    mode: str,
 ) -> dict[str, object]:
     rows = cols = int(cfg["arena"])
     kernel_size = int(cfg["kernel_size"])
@@ -138,7 +137,6 @@ def _run_config(
     total_error = np.empty(reps, dtype=np.float64)
     stencil_seconds = 0.0
     cpu_seconds = 0.0
-    gamma_replay_error = 0.0
 
     for rep in range(reps):
         rep_seed = seed + 1 + rep
@@ -147,12 +145,7 @@ def _run_config(
         cpu_out = reference.cpu_stochastic(field.ravel(), csr, float(cfg.get("rate", 0.5)), cpu_rng)
         cpu_seconds += time.perf_counter() - t0
         t0 = time.perf_counter()
-        migrate = (
-            stencil.stencil_migrate_field
-            if mode == "exact"
-            else stencil.stencil_migrate_field_fast
-        )
-        stencil_out, diagnostics = migrate(
+        stencil_out, diagnostics = stencil.stencil_migrate_field(
             field.ravel(), rows, cols, kernel, float(cfg.get("rate", 0.5)), rep_seed
         )
         stencil_seconds += time.perf_counter() - t0
@@ -162,24 +155,12 @@ def _run_config(
         outbound = diagnostics["outbound"]
         conservation[rep] = float(np.max(np.abs(assigned - outbound)))
         total_error[rep] = float(abs(stencil_out.sum() - field.sum()))
-        if "replayed_gamma_sum" in diagnostics:
-            gamma_replay_error = max(
-                gamma_replay_error,
-                float(
-                    np.max(
-                        np.abs(
-                            diagnostics["source_gamma_sum"]
-                            - diagnostics["replayed_gamma_sum"]
-                        )
-                    )
-                ),
-            )
 
     repeat_seed = seed + 12345
-    repeat_a, _ = migrate(
+    repeat_a, _ = stencil.stencil_migrate_field(
         field.ravel(), rows, cols, kernel, float(cfg.get("rate", 0.5)), repeat_seed
     )
-    repeat_b, _ = migrate(
+    repeat_b, _ = stencil.stencil_migrate_field(
         field.ravel(), rows, cols, kernel, float(cfg.get("rate", 0.5)), repeat_seed
     )
     repeat_identical = bool(np.array_equal(repeat_a, repeat_b))
@@ -200,10 +181,8 @@ def _run_config(
             "median": float(np.median(conservation)),
         },
         "total_error_max": float(total_error.max()),
-        "gamma_replay_error_max": gamma_replay_error,
         "repeat_identical": repeat_identical,
         "gamma_replay_identical": gamma_replay_identical,
-        "mode": mode,
         "distribution": _summary(cpu_samples, stencil_samples, rows, cols, seed),
         "timing_seconds": {
             "cpu_total": cpu_seconds,
@@ -221,7 +200,6 @@ def main() -> int:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--low", type=int, default=5)
     parser.add_argument("--high", type=int, default=26)
-    parser.add_argument("--mode", choices=("exact", "fast"), default="exact")
     parser.add_argument("--out", type=Path, default=RESULTS / "direct_stencil_operator.json")
     args = parser.parse_args()
 
@@ -231,7 +209,6 @@ def main() -> int:
         "seed": args.seed,
         "low": args.low,
         "high": args.high,
-        "mode": args.mode,
         "configs": {},
     }
     for cfg in CONFIGS:
@@ -240,7 +217,7 @@ def main() -> int:
         reps = args.reps if args.reps > 0 else int(cfg["reps"])
         print(f"[run] {cfg['name']} reps={reps} ...", flush=True)
         payload["configs"][cfg["name"]] = _run_config(
-            cfg, reps, args.seed, args.low, args.high, args.mode
+            cfg, reps, args.seed, args.low, args.high
         )
 
     args.out.parent.mkdir(parents=True, exist_ok=True)

@@ -3,7 +3,6 @@
   "seed": 0,
   "low": 5,
   "high": 26,
-  "mode": "exact",
   "configs": {
     "small": {
       "config": {
@@ -21,10 +20,8 @@
         "median": 5.329070518200751e-15
       },
       "total_error_max": 4.547473508864641e-13,
-      "gamma_replay_error_max": 0.0,
       "repeat_identical": true,
       "gamma_replay_identical": true,
-      "mode": "exact",
       "distribution": {
         "reps": 100,
         "mean_abs_rel_median": 0.02173121965278763,
@@ -91,10 +88,10 @@
         "stencil_negative_fraction": 0.0
       },
       "timing_seconds": {
-        "cpu_total": 0.2475116178393364,
-        "stencil_total": 4.127593679353595,
-        "cpu_per_rep": 0.0024751161783933637,
-        "stencil_per_rep": 0.041275936793535944
+        "cpu_total": 0.24726399034261703,
+        "stencil_total": 4.138793868012726,
+        "cpu_per_rep": 0.0024726399034261702,
+        "stencil_per_rep": 0.041387938680127266
       }
     },
     "large": {
@@ -113,10 +110,8 @@
         "median": 1.0658141036401503e-14
       },
       "total_error_max": 1.8189894035458565e-12,
-      "gamma_replay_error_max": 0.0,
       "repeat_identical": true,
       "gamma_replay_identical": true,
-      "mode": "exact",
       "distribution": {
         "reps": 50,
         "mean_abs_rel_median": 0.029282936114205196,
@@ -183,10 +178,10 @@
         "stencil_negative_fraction": 0.0
       },
       "timing_seconds": {
-        "cpu_total": 0.6141334809362888,
-        "stencil_total": 8.97898512147367,
-        "cpu_per_rep": 0.012282669618725777,
-        "stencil_per_rep": 0.1795797024294734
+        "cpu_total": 0.606630802154541,
+        "stencil_total": 8.929654437117279,
+        "cpu_per_rep": 0.01213261604309082,
+        "stencil_per_rep": 0.17859308874234558
       }
     }
   }

@@ -230,9 +230,9 @@ def gamma_draw(shape: np.ndarray, edge_ids: np.ndarray, seed: int, role: int) ->
                 u = stream.next_uniform(good)
                 v3 = v * v * v
                 with np.errstate(divide="ignore", invalid="ignore"):
-                    fast = u < 1.0 - 0.0331 * x * x * x * x
-                    slow = np.log(u) < 0.5 * x * x + d * (1.0 - v3 + np.log(v3))
-                accept = good & (fast | slow)
+                    quick_accept = u < 1.0 - 0.0331 * x * x * x * x
+                    log_accept = np.log(u) < 0.5 * x * x + d * (1.0 - v3 + np.log(v3))
+                accept = good & (quick_accept | log_accept)
                 out[accept] = d[accept] * v3[accept] * boost[accept]
             pending = pending & ~accept
         else:  # pragma: no cover - astronomically unlikely for valid shapes
@@ -428,146 +428,6 @@ def stencil_migrate_planes(
         "assigned": assigned,
     }
     return migrated, diagnostics
-
-
-def stencil_migrate_planes_fast(
-    fields: np.ndarray,
-    rows: int,
-    cols: int,
-    kernel: np.ndarray,
-    rate: float,
-    seed: int,
-    tick: int = 0,
-) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Migrate planes with a fast serial replay of the two passes.
-
-    This path keeps the same two-pass structure and fixed offset order as
-    :func:`stencil_migrate_planes`, but replays Gamma draws with two NumPy
-    generators seeded identically instead of per-edge Philox streams.  It is a
-    speed path for the NumPy CPU demo; use :func:`stencil_migrate_planes` for
-    the exact counter-based operator check.  The two Gamma generators see the
-    same sequence of shape arrays, so the pass-2 draws reproduce the pass-1
-    draws exactly.
-
-    Args:
-        fields: Array of shape ``(n_planes, rows * cols)``.
-        rows: Number of grid rows.
-        cols: Number of grid columns.
-        kernel: Square migration kernel including the centre.
-        rate: Migration rate.
-        seed: Base seed shared by the run.
-        tick: Tick index used to separate RNG streams across ticks.
-
-    Returns:
-        A tuple ``(migrated, diagnostics)`` with the same layout as
-        :func:`stencil_migrate_planes`.
-    """
-    fields = np.asarray(fields, dtype=np.float64)
-    if fields.ndim == 1:
-        fields = fields[None, :]
-    planes, n = fields.shape
-    if n != rows * cols:
-        raise ValueError("field width must equal rows * cols")
-
-    stream_seed = int(_splitmix64((seed & _MASK64) ^ ((tick + 1) * 0x9E3779B97F4A7C15)))
-    outbound_rng = np.random.default_rng(stream_seed ^ 0xA5A5A5A5)
-    gamma_rng_pass1 = np.random.default_rng(stream_seed ^ 0x5A5A5A5A)
-    gamma_rng_pass2 = np.random.default_rng(stream_seed ^ 0x5A5A5A5A)
-
-    outbound = np.zeros_like(fields)
-    if rate > EPS:
-        if rate >= 1.0 - EPS:
-            outbound[:] = fields
-        else:
-            outbound[:] = fields * rate
-            big = fields > 1.0 + EPS
-            if np.any(big):
-                concentration = fields[big] - 1.0
-                alpha = np.maximum(rate * concentration, EPS)
-                beta = np.maximum((1.0 - rate) * concentration, EPS)
-                outbound[big] = fields[big] * outbound_rng.beta(alpha, beta)
-
-    normalizer = source_normalizers(rows, cols, kernel)
-    safe_normalizer = np.where(normalizer > 0.0, normalizer, 1.0)
-    offsets = kernel_offsets(kernel)
-
-    source_gamma_sum = np.zeros_like(fields)
-    for dr, dc, weight in offsets:
-        source, destination = _valid_sources(rows, cols, dr, dc)
-        if source.size == 0:
-            continue
-        normalized = weight / safe_normalizer[source]
-        alpha = normalized[None, :] * (outbound[:, source] - 1.0)
-        alpha = np.where(outbound[:, source] <= 1.0 + EPS, 0.0, alpha)
-        draws = np.zeros_like(alpha)
-        positive = alpha > EPS
-        if np.any(positive):
-            draws[positive] = gamma_rng_pass1.gamma(alpha[positive])
-        source_gamma_sum[:, source] += draws
-
-    migrated = fields - outbound
-    assigned = np.zeros_like(fields)
-    replayed_sum = np.zeros_like(fields)
-    for dr, dc, weight in offsets:
-        source, destination = _valid_sources(rows, cols, dr, dc)
-        if source.size == 0:
-            continue
-        normalized = weight / safe_normalizer[source]
-        alpha = normalized[None, :] * (outbound[:, source] - 1.0)
-        alpha = np.where(outbound[:, source] <= 1.0 + EPS, 0.0, alpha)
-        draws = np.zeros_like(alpha)
-        positive = alpha > EPS
-        if np.any(positive):
-            draws[positive] = gamma_rng_pass2.gamma(alpha[positive])
-        replayed_sum[:, source] += draws
-        gamma_sum = source_gamma_sum[:, source]
-        stochastic = (outbound[:, source] > 1.0 + EPS) & (gamma_sum > EPS)
-        safe_sum = np.where(stochastic, gamma_sum, 1.0)
-        contribution = np.where(
-            stochastic,
-            outbound[:, source] * draws / safe_sum,
-            outbound[:, source] * normalized[None, :],
-        )
-        migrated[:, destination] += contribution
-        assigned[:, source] += contribution
-
-    diagnostics = {
-        "outbound": outbound,
-        "source_gamma_sum": source_gamma_sum,
-        "replayed_gamma_sum": replayed_sum,
-        "normalizer": normalizer,
-        "assigned": assigned,
-    }
-    return migrated, diagnostics
-
-
-def stencil_migrate_field_fast(
-    field: np.ndarray,
-    rows: int,
-    cols: int,
-    kernel: np.ndarray,
-    rate: float,
-    seed: int,
-    tick: int = 0,
-) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-    """Migrate one flat field with the fast serial replay path.
-
-    Args:
-        field: Flat source counts of length ``rows * cols``.
-        rows: Number of grid rows.
-        cols: Number of grid columns.
-        kernel: Square migration kernel including the centre.
-        rate: Migration rate.
-        seed: Base seed shared by the run.
-        tick: Tick index used to separate RNG streams across ticks.
-
-    Returns:
-        A tuple ``(migrated, diagnostics)`` for one plane.
-    """
-    migrated, diagnostics = stencil_migrate_planes_fast(
-        np.asarray(field, dtype=np.float64)[None, :], rows, cols, kernel, rate, seed, tick
-    )
-    return migrated[0], {key: value[0] for key, value in diagnostics.items()}
 
 
 def stencil_migrate_field(

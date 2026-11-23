@@ -1,6 +1,7 @@
 # 直接 stencil 随机迁移（方案 A）执行计划
 
-> 状态：**方案 A 已选定**（用户决策）；**尚未实现/产品化**。
+> 状态：**方案 A 已选定**（用户决策）；**Stage 1 算子级 NumPy 原型已完成**（exact counter RNG + fast serial replay）；
+> **NumPy CPU 全模型 demo 已产出**（small/large，HTML）；Rust/GPU/产品化未做。
 > 本轮冻结：迁移率 `rate=0.5`；对照目标是 **CPU CSR**；GPU FFT 近似线（M0/M1/M2）暂停。
 > 原型顺序：**NumPy 语义原型 → 独立 GPU 原型（3A，不接产品）→ 全模型小规模 → 最后接入 natal 产品**。
 > 关联：`RandomnessRealization.md` 附录 E（问题分析与 A/B 对比）、`PLAN.md`（chasing 总体计划）、M4 模板压缩设计。
@@ -239,11 +240,27 @@ $$
 ## 9. 里程碑
 
 - [x] 方案 A 选定（放弃 B）。
-- [ ] Stage 1：NumPy 语义原型（Philox + Gamma，完整 kernel 版本）。
-- [ ] Stage 2：模板/边界验证 + 内存/时间阶梯。
+- [x] Stage 1：NumPy 语义原型（Philox + Gamma，完整 kernel 版本）。
+- [~] Stage 2：模板/边界验证 + 内存/时间阶梯（NumPy 算子级已测；全阶梯/Rust 公平计时待补）。
 - [ ] Stage 3：独立 GPU 原型（3A，不接产品）。
-- [ ] Stage 4：全模型小规模差异评估。
+- [~] Stage 4：全模型小规模差异评估（NumPy CPU demo 已产出 small/large；R 暂为 small=10、large=3）。
 - [ ] Stage 5（可选，最后）：接入 natal 产品（高风险）。
+
+### 9.1 本轮产物（2026-11，NumPy CPU）
+
+- `scripts/direct_stencil_migration.py`：Philox4x32-10 + Marsaglia–Tsang、两遍 offset-loop；
+  `stencil_migrate_planes` 为逐边 counter RNG 的 exact 路径，`stencil_migrate_planes_fast`
+  为 NumPy 双 Generator 串行重放的 fast 路径。
+- `scripts/direct_stencil_operator.py`：NumPy CPU CSR vs stencil 算子级对拍（分布指标、逐源守恒、
+  同 seed 逐位、Gamma 重放）；`results/direct_stencil_operator_exact.json`、
+  `results/direct_stencil_operator_fast.json`。
+- `scripts/compare_stencil_demo.py`：复用 v3 生命周期与三型最小模型，仅替换 migration backend；
+  `results/stencil_demo/{small,large}/` 与 `results/html/compare_stencil_demo_*.html`。
+- 当前结论（自测，待独立复核）：算子级 small/large 的均值、方差比、lag 协方差在 MC 误差内；
+  同实现同 seed 逐位一致；fast 与 exact 分布指标接近。全模型 small/large 在 100 tick 均固定，
+  CPU 与 stencil 的覆盖/前沿/总量差异很小；C2ST（small R=10）未见可分。
+- 残余：CPU golden 目前是 NumPy 镜像，尚未与 natal Rust CPU CSR 做一次分布交叉核对；Rust/GPU
+  公平计时、模板压缩全阶梯、内存账本、chasing S1/S2 未做。
 
 ## 10. 已确认与待确认
 

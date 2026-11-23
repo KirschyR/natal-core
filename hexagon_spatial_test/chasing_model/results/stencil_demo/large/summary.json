@@ -1,0 +1,119 @@
+{
+  "config": {
+    "name": "large",
+    "arena": 31,
+    "kernel_size": 11,
+    "avd": 1.5,
+    "ticks": 100,
+    "reps": 3,
+    "scale": 100.0,
+    "migration_rate": 0.5
+  },
+  "selected_demes": [
+    [
+      15,
+      15
+    ],
+    [
+      10,
+      15
+    ],
+    [
+      5,
+      15
+    ],
+    [
+      0,
+      15
+    ]
+  ],
+  "coverage": {
+    "cpu": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      }
+    },
+    "stencil": {
+      "thr_0.1": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 961.0,
+        "final_count_std": 0.0
+      }
+    }
+  },
+  "front": {
+    "cpu": {
+      "final_mean": 21.213203435596427,
+      "final_std": 0.0,
+      "mean_over_time": 11.802816289146309
+    },
+    "stencil": {
+      "final_mean": 21.213203435596427,
+      "final_std": 0.0,
+      "mean_over_time": 11.761275167251867
+    }
+  },
+  "total": {
+    "cpu": {
+      "final_mean": 202263.69494501557,
+      "final_std": 103.3487954810446,
+      "mean_over_time": 202056.12033452783
+    },
+    "stencil": {
+      "final_mean": 202050.13925763895,
+      "final_std": 392.97385117760405,
+      "mean_over_time": 202078.75439570268
+    }
+  },
+  "drive_final_selected": {
+    "cpu": [
+      0.9999999999697408,
+      0.9999999996437068,
+      0.9999998011043161,
+      0.9999904687678001
+    ],
+    "stencil": [
+      0.9999999950756413,
+      0.9999996862011059,
+      0.9999971961310181,
+      0.9999955370163552
+    ]
+  },
+  "timing": {
+    "cpu": {
+      "wall_seconds": 59.243708156980574,
+      "per_replicate_seconds": 19.747902718993526,
+      "migration_seconds": 58.75254216790199,
+      "reps": 3,
+      "ticks": 100,
+      "jobs": 1
+    },
+    "stencil": {
+      "wall_seconds": 44.692953465506434,
+      "per_replicate_seconds": 14.89765115516881,
+      "migration_seconds": 44.196920938789845,
+      "reps": 3,
+      "ticks": 100,
+      "jobs": 1
+    }
+  },
+  "c2st": null,
+  "html": "compare_stencil_demo_large.html",
+  "line_plot": "selected_demes.png"
+}

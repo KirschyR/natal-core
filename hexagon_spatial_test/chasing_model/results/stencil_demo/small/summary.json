@@ -1,0 +1,154 @@
+{
+  "config": {
+    "name": "small",
+    "arena": 15,
+    "kernel_size": 7,
+    "avd": 0.8,
+    "ticks": 100,
+    "reps": 10,
+    "scale": 100.0,
+    "migration_rate": 0.5
+  },
+  "selected_demes": [
+    [
+      7,
+      7
+    ],
+    [
+      5,
+      7
+    ],
+    [
+      2,
+      7
+    ],
+    [
+      0,
+      7
+    ]
+  ],
+  "coverage": {
+    "cpu": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      }
+    },
+    "stencil": {
+      "thr_0.1": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.5": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      },
+      "thr_0.9": {
+        "final_count_mean": 225.0,
+        "final_count_std": 0.0
+      }
+    }
+  },
+  "front": {
+    "cpu": {
+      "final_mean": 9.899494936611664,
+      "final_std": 1.8724445165742407e-15,
+      "mean_over_time": 6.43051470269839
+    },
+    "stencil": {
+      "final_mean": 9.899494936611664,
+      "final_std": 1.8724445165742407e-15,
+      "mean_over_time": 6.426587482361789
+    }
+  },
+  "total": {
+    "cpu": {
+      "final_mean": 47196.770969869234,
+      "final_std": 173.64821165455086,
+      "mean_over_time": 47250.09090395759
+    },
+    "stencil": {
+      "final_mean": 47238.483180760006,
+      "final_std": 124.55148759936404,
+      "mean_over_time": 47257.49512639925
+    }
+  },
+  "drive_final_selected": {
+    "cpu": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ],
+    "stencil": [
+      1.0,
+      1.0,
+      1.0,
+      1.0
+    ]
+  },
+  "timing": {
+    "cpu": {
+      "wall_seconds": 23.0539008397609,
+      "per_replicate_seconds": 2.30539008397609,
+      "migration_seconds": 22.56222401559353,
+      "reps": 10,
+      "ticks": 100,
+      "jobs": 1
+    },
+    "stencil": {
+      "wall_seconds": 15.2759950151667,
+      "per_replicate_seconds": 1.52759950151667,
+      "migration_seconds": 14.779531477950513,
+      "reps": 10,
+      "ticks": 100,
+      "jobs": 1
+    }
+  },
+  "c2st": {
+    "methods": [
+      "cpu",
+      "stencil"
+    ],
+    "accuracy": [
+      [
+        0.56,
+        0.51
+      ],
+      [
+        0.51,
+        0.38
+      ]
+    ],
+    "auc": [
+      [
+        0.72,
+        0.44
+      ],
+      [
+        0.44,
+        0.28
+      ]
+    ],
+    "p": [
+      [
+        0.42857142857142855,
+        0.47619047619047616
+      ],
+      [
+        0.47619047619047616,
+        0.7142857142857143
+      ]
+    ]
+  },
+  "html": "compare_stencil_demo_small.html",
+  "line_plot": "selected_demes.png"
+}

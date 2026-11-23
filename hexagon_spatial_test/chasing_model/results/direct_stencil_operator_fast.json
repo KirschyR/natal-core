@@ -1,0 +1,193 @@
+{
+  "reference": "NumPy mirror of natal continuous CSR",
+  "seed": 0,
+  "low": 5,
+  "high": 26,
+  "mode": "fast",
+  "configs": {
+    "small": {
+      "config": {
+        "name": "small",
+        "arena": 15,
+        "kernel_size": 7,
+        "avd": 0.8,
+        "reps": 100
+      },
+      "reps": 100,
+      "rate": 0.5,
+      "initial_total": 3521.0,
+      "conservation_max_abs_per_rep": {
+        "max": 1.4210854715202004e-14,
+        "median": 5.329070518200751e-15
+      },
+      "total_error_max": 4.547473508864641e-13,
+      "gamma_replay_error_max": 0.0,
+      "repeat_identical": true,
+      "gamma_replay_identical": true,
+      "mode": "fast",
+      "distribution": {
+        "reps": 100,
+        "mean_abs_rel_median": 0.02214304167029922,
+        "mean_abs_rel_max": 0.09313315120144204,
+        "mean_diff_outside_3se_fraction": 0.0,
+        "variance_ratio_median": 1.0011654438732784,
+        "variance_ratio_p05": 0.6917293625135915,
+        "variance_ratio_p95": 1.334118887703277,
+        "lag_covariance": {
+          "0,0": {
+            "cpu": 11.081989804527382,
+            "cpu_se": 0.09592376278446244,
+            "stencil": 10.916996620619491,
+            "stencil_se": 0.10200334569445313,
+            "diff": -0.16499318390789064,
+            "diff_se": 0.1400216083309713
+          },
+          "0,1": {
+            "cpu": -1.5563202378264682,
+            "cpu_se": 0.08138626122555258,
+            "stencil": -1.4361983031932544,
+            "stencil_se": 0.07679101791924475,
+            "diff": 0.12012193463321386,
+            "diff_se": 0.11189541522934553
+          },
+          "1,0": {
+            "cpu": -1.5964446896727473,
+            "cpu_se": 0.08425099809079217,
+            "stencil": -1.5492708348347353,
+            "stencil_se": 0.08037120115599951,
+            "diff": 0.047173854838012064,
+            "diff_se": 0.11643779736216588
+          },
+          "1,1": {
+            "cpu": -0.2363107175121733,
+            "cpu_se": 0.09768987049514904,
+            "stencil": -0.45622546918609586,
+            "stencil_se": 0.08042100471276596,
+            "diff": -0.21991475167392255,
+            "diff_se": 0.1265339827728888
+          },
+          "0,2": {
+            "cpu": -0.07216830676137964,
+            "cpu_se": 0.0725955955920459,
+            "stencil": -0.17036903379625512,
+            "stencil_se": 0.08200304176260644,
+            "diff": -0.09820072703487548,
+            "diff_se": 0.10951994958766027
+          },
+          "2,0": {
+            "cpu": -0.16807634714081307,
+            "cpu_se": 0.09288472553418112,
+            "stencil": 0.025694405667782715,
+            "stencil_se": 0.07996063522506276,
+            "diff": 0.1937707528085958,
+            "diff_se": 0.12256131291380533
+          }
+        },
+        "cpu_total_mean": 3521.0,
+        "cpu_total_std": 1.2926994795974706e-13,
+        "stencil_total_mean": 3521.0,
+        "stencil_total_std": 1.0219686714105926e-13,
+        "cpu_negative_fraction": 0.0,
+        "stencil_negative_fraction": 0.0
+      },
+      "timing_seconds": {
+        "cpu_total": 0.24605966918170452,
+        "stencil_total": 0.32938066497445107,
+        "cpu_per_rep": 0.0024605966918170453,
+        "stencil_per_rep": 0.0032938066497445106
+      }
+    },
+    "large": {
+      "config": {
+        "name": "large",
+        "arena": 31,
+        "kernel_size": 11,
+        "avd": 1.5,
+        "reps": 50
+      },
+      "reps": 50,
+      "rate": 0.5,
+      "initial_total": 14717.0,
+      "conservation_max_abs_per_rep": {
+        "max": 1.4210854715202004e-14,
+        "median": 1.0658141036401503e-14
+      },
+      "total_error_max": 1.8189894035458565e-12,
+      "gamma_replay_error_max": 0.0,
+      "repeat_identical": true,
+      "gamma_replay_identical": true,
+      "mode": "fast",
+      "distribution": {
+        "reps": 50,
+        "mean_abs_rel_median": 0.02892543196819498,
+        "mean_abs_rel_max": 0.16113525997205042,
+        "mean_diff_outside_3se_fraction": 0.003121748178980229,
+        "variance_ratio_median": 1.0197396494288424,
+        "variance_ratio_p05": 0.6342132590841294,
+        "variance_ratio_p95": 1.6626748531924362,
+        "lag_covariance": {
+          "0,0": {
+            "cpu": 10.90290494934701,
+            "cpu_se": 0.08896671088712615,
+            "stencil": 11.078189993473101,
+            "stencil_se": 0.08196573045027253,
+            "diff": 0.1752850441260918,
+            "diff_se": 0.12096882496875062
+          },
+          "0,1": {
+            "cpu": -0.6441066617893292,
+            "cpu_se": 0.05660291869455923,
+            "stencil": -0.7890715393881728,
+            "stencil_se": 0.04997990367187154,
+            "diff": -0.14496487759884358,
+            "diff_se": 0.07551080171599585
+          },
+          "1,0": {
+            "cpu": -0.7148383759900931,
+            "cpu_se": 0.04912877897017791,
+            "stencil": -0.8249550222981443,
+            "stencil_se": 0.05601879641001669,
+            "diff": -0.11011664630805118,
+            "diff_se": 0.0745100159329435
+          },
+          "1,1": {
+            "cpu": -0.5335985628668201,
+            "cpu_se": 0.05628942636247424,
+            "stencil": -0.36326239843391767,
+            "stencil_se": 0.05270030388765859,
+            "diff": 0.1703361644329024,
+            "diff_se": 0.07710915347783279
+          },
+          "0,2": {
+            "cpu": -0.3111295644180256,
+            "cpu_se": 0.03920745746170015,
+            "stencil": -0.360790007705255,
+            "stencil_se": 0.05880336016820227,
+            "diff": -0.049660443287229405,
+            "diff_se": 0.07067573761682537
+          },
+          "2,0": {
+            "cpu": -0.1469161027322692,
+            "cpu_se": 0.05113292061846085,
+            "stencil": -0.23563404659418122,
+            "stencil_se": 0.047772804848615555,
+            "diff": -0.08871794386191201,
+            "diff_se": 0.0699772566915689
+          }
+        },
+        "cpu_total_mean": 14717.0,
+        "cpu_total_std": 2.598556290779795e-13,
+        "stencil_total_mean": 14717.0,
+        "stencil_total_std": 2.598556290779795e-13,
+        "cpu_negative_fraction": 0.0,
+        "stencil_negative_fraction": 0.0
+      },
+      "timing_seconds": {
+        "cpu_total": 0.6086397599428892,
+        "stencil_total": 0.681672602891922,
+        "cpu_per_rep": 0.012172795198857785,
+        "stencil_per_rep": 0.01363345205783844
+      }
+    }
+  }
+}

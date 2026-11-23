@@ -2635,3 +2635,104 @@ reproduction→survival→aging（`rust/src/kernels/age_structured.rs:1087-1088`
   R=100–300；A3：块大小/边界敏感性。随机 GPU FFT 的 natal 产品化仍须单独设计、用户批准、根
   `EVALUATE.md` 与全量门禁。
 - 本轮未运行产品全量门禁（未触产品代码）；未 commit/push；审查基于未提交工作树。
+
+## §42 — 直接 stencil（方案 A）算子级 + NumPy CPU demo 交接（主 agent）
+
+> 编号说明：本文件当前最新为 §41；本条按“接续当前最新”使用 §42。此前状态表预留的 §42（A1b）尚未写入本文件；
+> 若需保留该编号，请将本条视为直接 stencil 子任务的 §42，并把后续 A1b 改为 §43+。
+
+### 42.0 范围与风险分类
+
+- 仅新增 `hexagon_spatial_test/chasing_model/scripts/` 下的复现脚本与 `results/` 产物；**未触碰 natal 产品代码**，
+  未新增依赖，未改 `.gitignore`，未 commit/push。
+- 风险分类：**局部代码修改**（复现脚本；不改 CPU 数值语义）。产品化仍未开始，后续接入 natal 属高风险。
+- CPU 参考：目前是 `compare_migration_models.py` 的 **NumPy 镜像**（natal 连续 CSR 的算法重实现），尚未在本轮与
+  natal Rust CPU CSR 做分布交叉核对。
+
+### 42.1 改动清单
+
+- 新增 `scripts/direct_stencil_migration.py`：
+  - `Philox4x32-10`（与 `rust/src/gpu/kernels.rs` 常数/轮数一致）、`Marsaglia–Tsang` Gamma；
+  - 逐边 64-bit edge id + 64-bit draw counter；`outbound` 与 `gamma` 用不同 role key；
+  - `stencil_migrate_planes`：exact 路径，Pass1 求 `S_s`、Pass2 按固定 offset 顺序重放并 gather；
+  - `stencil_migrate_planes_fast`：NumPy 双 Generator 串行重放，用于 NumPy CPU demo 提速；
+    Pass1/Pass2 的 Gamma 形状序列相同，`replayed_gamma_sum` 与 `source_gamma_sum` 逐位一致。
+- 新增 `scripts/direct_stencil_operator.py`：NumPy CSR vs stencil 算子级对拍，支持 `--mode exact|fast`。
+- 新增 `scripts/compare_stencil_demo.py`：复用 `compare_strategies_v3.py` 的 R-S-A 生命周期、3 型最小模型、
+  初始/释放/记录；只把 migration backend 换成 `cpu` / `stencil`，输出 HTML 时间滑块热图。
+- 新增结果：
+  - `results/direct_stencil_operator_exact.json`
+  - `results/direct_stencil_operator_fast.json`
+  - `results/stencil_demo/{small,large}/`（`summary.json`、`series.npz`、`selected_demes.png`、可选 `c2st.png`）
+  - `results/html/compare_stencil_demo_{small,large}.html`
+- 更新 `DirectStencilMigrationPlan.md` 的状态与 §9 里程碑/产物。
+
+### 42.2 行为与原因
+
+- exact 路径验证方案 A 的两遍语义：不保存逐边 `G`，Pass2 用同一 `(seed, role, edge)` 重放；固定 offset 顺序、
+  无原子加。用于回答“语义是否成立”。
+- fast 路径只用于 NumPy CPU demo：逐边 counter RNG 对 48 个平面、100 tick 的纯 Python/NumPy 运行偏慢；
+  NumPy 双 Generator 保证 Pass1/Pass2 同序重放，且 `replayed_gamma_sum` 与 `source_gamma_sum` 的实测最大误差为 0。
+  它不是未来 GPU 的逐边 counter 实现，报告中已明确标注。
+- demo 不改生命周期、初始态、释放、记录与 3 型模型，只替换 migration，保持与既有 v3 demo 可比。
+
+### 42.3 自测命令与结果（主 agent）
+
+命令（仓库根目录）：
+
+```bash
+source .venv/bin/activate
+unset PYTHONHOME PYO3_PYTHON PYTHONPATH
+python hexagon_spatial_test/chasing_model/scripts/direct_stencil_operator.py --mode exact
+python hexagon_spatial_test/chasing_model/scripts/direct_stencil_operator.py --mode fast
+python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py --configs small --reps 10
+python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py --configs large --reps 3
+.venv/bin/ruff check hexagon_spatial_test/chasing_model/scripts/direct_stencil_migration.py \
+  hexagon_spatial_test/chasing_model/scripts/direct_stencil_operator.py \
+  hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py
+```
+
+算子级（exact / fast）：
+
+| 配置 | R | 均值相对差中位/最大 | 方差比中位 (p05–p95) | 总量 std | 负值比例 | 守恒误差 max | 同 seed 逐位 |
+|---|---|---|---|---|---|---|---|
+| small 15²/k7/avd0.8 | 100 | 2.17% / 10.47% (exact) | 0.971 (0.725–1.341) | ~1.0e-13 | 0 | ~1.1e-14 | true |
+| small | 100 | 2.21% / 9.31% (fast) | 1.001 (0.692–1.334) | ~1.0e-13 | 0 | ~1.4e-14 | true |
+| large 31²/k11/avd1.5 | 50 | 2.93% / 15.57% (exact) | 1.020 (0.607–1.661) | ~2.6e-13 | 0 | ~2.1e-14 | true |
+| large | 50 | 2.89% / 16.11% (fast) | 1.020 (0.634–1.663) | ~2.6e-13 | 0 | ~1.4e-14 | true |
+
+- Gamma 重放：exact 的 `gamma_draw` 同 key 两次逐位一致；fast 的 `replayed_gamma_sum` 误差 0（small/large 均 0）。
+- lag 平均协方差（exact）：small 的差异约在 1–2 个 bootstrap SE 内；large 的 `(0,1)` 为 −0.147 ± 0.076（约 1.9σ），
+  其余在 ~1–2σ 内，未发现系统性符号/量级错误；R 增大后应复核。
+
+全模型 demo（NumPy CPU，rate=0.5，100 ticks）：
+
+| 配置 | R | 最终覆盖 (0.5) | 最终总量 mean | 总量平均相对差中位 | drive 平均绝对差最大 | migration s/rep (cpu / stencil) |
+|---|---|---|---|---|---|---|
+| small 15²/k7/avd0.8 | 10 | 225 / 225 | 47196.8 / 47238.5 | 0.08% | 0.063 | 2.31 / 1.53 |
+| large 31²/k11/avd1.5 | 3 | 961 / 961 | 202263.7 / 202050.1 | 0.07% | 0.108 | 19.75 / 14.90 |
+
+- 两配置在 100 tick 均已固定；覆盖/前沿曲线在早期有可见时序差异（front 最大平均差 small 0.47、large 1.18），
+  但最终覆盖一致。small 的 C2ST（R=10）下三角 accuracy≈0.51、AUC≈0.44、置换 p≈0.476，未见可分；
+  large R=3 不足以做 C2ST，已跳过。
+- 计时仅 NumPy-vs-NumPy，且 fast stencil 使用 NumPy Generator；**不构成 natal Rust CSR 的公平计时结论**。
+
+### 42.4 请 evaluator 核对
+
+1. `direct_stencil_migration.py` 的两遍语义：Pass1 `S_s`、Pass2 `X=O·G/S` 与 CPU CSR 的 Beta+Dirichlet 是否一致；
+   边界（角/边/内部）、`O_s<=1`、`S_s<=EPS`、空行分支是否正确。
+2. exact 路径的 Philox 常数/轮数、role 分离、64-bit edge/counter 是否与计划一致；同 key 重放是否逐位。
+3. fast 路径是否被清楚标注为“NumPy demo 提速、非逐边 counter RNG”，且没有用它冒充 exact/GPU 结果。
+4. 算子级分布指标与 MC 误差是否支持“分布一致”的结论；lag 协方差的 1–2σ 差异是否可接受。
+5. demo 是否确实只替换 migration，生命周期/初始/释放/记录与 v3 一致；HTML 是否含两策略热图、时间滑块、
+   4 deme 曲线与（small）C2ST。
+6. `ruff`/`py_compile` 是否通过；`pyright` 不在仓库 include（仅 `src`），本轮未将复现脚本纳入 pyright 门禁。
+
+### 42.5 残余风险 / 未检查
+
+- **CPU golden 尚未与 natal Rust CPU CSR 交叉核对**：当前 golden 是 NumPy 镜像；下一轮应在小网格上做一次
+  natal Rust vs NumPy mirror 的分布对照，再宣称 CPU 参考可信。
+- large 的 R=3 仅用于视觉 demo，不能用于分布结论；small R=10 的 C2ST 也只作观察。
+- fast 路径不是逐边 counter RNG；若用户要求 demo 也用 exact，可重跑（预计 small ~10×、large ~10× 迁移时间）。
+- 模板压缩全阶梯、内存账本、Rust 公平计时、GPU 原型、chasing S1/S2、产品化均未做。
+- 未运行产品全量门禁（未触产品代码）；未 commit/push。

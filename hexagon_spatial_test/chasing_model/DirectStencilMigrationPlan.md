@@ -291,3 +291,47 @@ $$
    性能；若过慢，只用于语义/小网格，性能另行优化。
 2. demo 的 R：计划 small R=100、large R=50；若 stencil 原型耗时过高，可先降低并记录。
 3. f64 GPU 原型是否必须（用于语义检查）；若只做 f32，需在报告中声明。
+
+## 11. CSR vs stencil 时间差异分析（NumPy CPU 原型）
+
+### 11.1 计时口径
+
+- **每个 replicate 单独计时**：`wall` 从该 replicate 的初始态开始，到最后一个 tick 记录结束；
+  `migration` 是该 replicate 内所有 migration 调用之和。报告 mean 与 min–max，不再把多个 jobs 的
+  时间相加，也不除以 jobs。
+- `migration` 是 `wall` 的子集；当前 small/large 的 migration 占 wall 约 98%–99.9%，
+  因为生命周期与记录开销相对迁移很小。
+
+### 11.2 实测（exact stencil，rate=0.5，100 ticks）
+
+| 配置 | R | CPU wall / migration（s/rep） | stencil wall / migration（s/rep） | migration 倍数 |
+|---|---|---|---|---|
+| small 15²/k7/avd0.8 | 30 | 2.474 / 2.421 | 26.239 / 26.171 | ~10.8× |
+| large 31²/k11/avd1.5 | 3 | 21.610 / 21.436 | 337.931 / 337.760 | ~15.8× |
+
+### 11.3 复杂度
+
+- 两者每 tick 都是 **O(n·κ²)**：CSR 逐边处理 `nnz ≈ n·κ²` 条边；stencil 每个源遍历 `κ²−1` 个 offset，
+  总边数相同。
+- 内存：CSR 为 `O(n·κ²)`；stencil 为 `O(n+κ²)`。
+- 因此时间差异来自**常数因子**，不是渐近复杂度更高。
+
+### 11.4 常数来源
+
+1. **两遍 vs 一遍**：stencil Pass1 抽 Gamma 求 `S_s`，Pass2 再抽一遍 Gamma 做 gather，约 2× Gamma；
+   CSR 只抽一遍。
+2. **逐边 counter RNG 更贵**：stencil 每条边用 Philox4x32-10（10 轮哈希）+ Marsaglia–Tsang
+   （含拒绝采样）；CSR 使用 NumPy 批量 C-level Gamma。
+3. **无预计算**：stencil 每 tick 重新判断边界、计算 `Z_s`、edge id 和归一化权重；CSR 在构建期一次性
+   存好邻居与权重。
+4. **gather vs scatter**：stencil 按 offset gather，访存不连续；CSR 按行连续 scatter，缓存更友好。
+5. **NumPy/Python 常数**：exact stencil 的向量化 Philox/MT 仍有较多数组操作和临时分配；CSR 的主要
+   计算落在 NumPy 的 C Gamma 上。small 的 `n·κ²` 较小，这些固定开销占比更高；large 的 κ 更大，
+   2× Gamma 与 gather 常数更明显，所以倍数从 ~11× 增到 ~16×。
+
+### 11.5 结论与边界
+
+- 当前差距**不代表 Rust/GPU 的相对性能**。编译实现会降低 RNG 与循环常数，GPU 还能并行化；但
+  stencil 的 2× Gamma、边界/权重重算与 gather 仍然存在——它换的是内存，不是时间。
+- 公平的编译版比较应使用**同语言**的 CSR 与 stencil（Rust vs Rust，或 CUDA vs CUDA），并分别报告
+  per-replicate wall/migration、warmup 和 median/min/max。

@@ -8,8 +8,9 @@ and swaps only the migration backend:
 
 The demo writes a self-contained HTML with synchronized hex heatmaps, a time
 slider, selected-deme curves, and an optional C2ST panel.  No Rust or GPU path
-is used here; timing is NumPy-vs-NumPy and is a prototype comparison, not a
-claim about natal's compiled CSR speed.
+is used here; timing is measured per replicate (wall and migration) for each
+strategy, so it is NumPy-vs-NumPy prototype timing, not a claim about natal's
+compiled CSR speed.
 
 Run from the repository root:
 
@@ -91,6 +92,7 @@ def run_replicate(
     kernel: np.ndarray,
 ) -> dict:
     """Run one replicate for one migration strategy."""
+    replicate_start = time.perf_counter()
     rows = cols = cfg["arena"]
     rng_life = np.random.default_rng(seed)
     rng_mig = np.random.default_rng(seed + 100000)
@@ -140,6 +142,7 @@ def run_replicate(
         "total": total,
         "fields": fields,
         "migration_seconds": migration_seconds,
+        "wall_seconds": time.perf_counter() - replicate_start,
     }
 
 
@@ -175,10 +178,17 @@ def _html(
     c2st_note: str | None,
 ) -> str:
     line_uri = base64.b64encode(line_png.read_bytes()).decode("ascii")
+    def _timing_cell(strategy: str, prefix: str) -> str:
+        entry = timing[strategy]
+        return (
+            f"{entry[f'{prefix}_mean']:.3f} "
+            f"({entry[f'{prefix}_min']:.3f}-{entry[f'{prefix}_max']:.3f})"
+        )
+
     timing_rows = "".join(
         f"<tr><td>{s}</td>"
-        f"<td>{timing[s]['wall_seconds'] / max(timing[s].get('reps', 1), 1):.3f}</td>"
-        f"<td>{timing[s]['migration_seconds'] / max(timing[s].get('reps', 1), 1):.3f}</td></tr>"
+        f"<td>{_timing_cell(s, 'wall_seconds_per_replicate')}</td>"
+        f"<td>{_timing_cell(s, 'migration_seconds_per_replicate')}</td></tr>"
         for s in DISPLAY
         if s in timing
     )
@@ -196,8 +206,9 @@ def _html(
 <style>body{{font-family:sans-serif;text-align:center;margin:8px}}img{{max-width:96vw}}#bar{{margin:6px}}input[type=range]{{width:60%}}</style>
 </head><body>
 <h3>{title}</h3>
-<h4>Timing per replicate (NumPy/CPU, migration only). This is a prototype
-comparison, not natal's compiled CSR speed.</h4>
+<h4>Timing per replicate (NumPy/CPU; mean with min-max over independent
+replicates). Migration is a subset of wall. This is a prototype comparison,
+not natal's compiled CSR speed.</h4>
 <table border="1" cellpadding="4" style="margin:auto;border-collapse:collapse">
 <tr><th>strategy</th><th>wall s / replicate</th><th>migration s / replicate</th></tr>
 {timing_rows}
@@ -250,7 +261,6 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
     per_strategy: dict[str, dict[str, np.ndarray]] = {}
     timing: dict[str, dict] = {}
     for strategy in STRATEGIES:
-        t0 = time.perf_counter()
         if jobs > 1:
             with ProcessPoolExecutor(
                 max_workers=jobs,
@@ -268,11 +278,18 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
                 run_replicate(strategy, cfg, seed, selected, tensor, csr, kernel)
                 for seed in range(cfg["reps"])
             ]
-        wall = time.perf_counter() - t0
+        walls = np.asarray([r["wall_seconds"] for r in reps], dtype=np.float64)
+        migrations = np.asarray([r["migration_seconds"] for r in reps], dtype=np.float64)
         timing[strategy] = {
-            "wall_seconds": wall,
-            "per_replicate_seconds": wall / cfg["reps"],
-            "migration_seconds": sum(r["migration_seconds"] for r in reps),
+            "wall_seconds_per_replicate_mean": float(walls.mean()),
+            "wall_seconds_per_replicate_median": float(np.median(walls)),
+            "wall_seconds_per_replicate_min": float(walls.min()),
+            "wall_seconds_per_replicate_max": float(walls.max()),
+            "migration_seconds_per_replicate_mean": float(migrations.mean()),
+            "migration_seconds_per_replicate_median": float(np.median(migrations)),
+            "migration_seconds_per_replicate_min": float(migrations.min()),
+            "migration_seconds_per_replicate_max": float(migrations.max()),
+            "migration_fraction_of_wall_mean": float((migrations / walls).mean()),
             "reps": cfg["reps"],
             "ticks": cfg["ticks"],
             "jobs": jobs,

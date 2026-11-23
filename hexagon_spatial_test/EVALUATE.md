@@ -2664,7 +2664,8 @@ reproduction→survival→aging（`rust/src/kernels/age_structured.rs:1087-1088`
   - `results/direct_stencil_operator.json`
   - `results/stencil_demo/{small,large}/`（`summary.json`、`series.npz`、`selected_demes.png`、可选 `c2st.png`）
   - `results/html/compare_stencil_demo_{small,large}.html`
-- 更新 `DirectStencilMigrationPlan.md` 的状态与 §9 里程碑/产物。
+- 更新 `DirectStencilMigrationPlan.md` 的状态与 §9 里程碑/产物，并新增 §11「CSR vs stencil 时间差异分析」。
+- demo 的 timing 字段改为每个 replicate 的实际 wall/migration（mean + min–max），不再汇总多个 jobs 的时间。
 - 修复 `compare_strategies_v3.py` 的 `_hex_geometry`：轴向坐标中心改为
   `(sqrt(3)*size*(i + j/2), 1.5*size*j)`，相邻六边形现在边相接而不是重叠；
   `series.npz` 额外保存 `*_field_mean5`，便于以后只重渲染、不重跑模拟。
@@ -2704,10 +2705,15 @@ python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py --conf
 
 全模型 demo（NumPy CPU，exact stencil，rate=0.5，100 ticks）：
 
-| 配置 | R | 最终覆盖 (0.5) | 最终总量 mean | 总量平均相对差中位 | drive 平均绝对差最大 | wall s/rep (cpu / stencil, jobs) |
-|---|---|---|---|---|---|---|
-| small 15²/k7/avd0.8 | 30 | 225 / 225 | 47227.1 / 47254.0 | 0.044% | 0.022 | 0.332 / 3.524 (8) |
-| large 31²/k11/avd1.5 | 3 | 961 / 961 | 202263.7 / 201877.4 | 0.050% | 0.092 | 7.275 / 114.764 (3) |
+| 配置 | R | 最终覆盖 (0.5) | 最终总量 mean | 总量平均相对差中位 | drive 平均绝对差最大 | CPU wall / migration (s/rep) | stencil wall / migration (s/rep) |
+|---|---|---|---|---|---|---|---|
+| small 15²/k7/avd0.8 | 30 | 225 / 225 | 47227.1 / 47254.0 | 0.044% | 0.022 | 2.474 / 2.421 | 26.239 / 26.171 |
+| large 31²/k11/avd1.5 | 3 | 961 / 961 | 202263.7 / 201877.4 | 0.050% | 0.092 | 21.610 / 21.436 | 337.931 / 337.760 |
+
+- 计时已改为**每个 replicate 的实际时间**（wall = 该 replicate 全生命周期；migration = 其中 migration 调用之和），
+  报告 mean 与 min–max；不再把多个 jobs 的时间相加或除以 jobs。migration 是 wall 的子集。
+- 当前 stencil migration 约为 CSR 的 **10.8×（small）/ 15.8×（large）**；详细复杂度/常数分析见
+  `DirectStencilMigrationPlan.md` §11。
 
 - 两配置在 100 tick 均已固定；早期 front/coverage 曲线有时序差异（front 最大平均差 small 0.32、large 1.99），
   但最终覆盖一致。
@@ -2715,7 +2721,8 @@ python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py --conf
   accuracy=0.610、AUC=0.642、置换 p=0.143，未见显著可分。large R=3 跳过 C2ST。
 - C2ST 噪声说明：此前 R=10（5 vs 5 self-split）出现过 stencil AUC=0.28；在同样 5 vs 5、5 折×5 次的
   纯噪声 Monte Carlo 中，AUC 零分布 SD≈0.26，P(AUC≤0.28)≈22%，因此该值没有统计意义。
-- 计时仅 NumPy-vs-NumPy；exact stencil 明显慢于 NumPy CSR，**不构成 natal Rust CSR 的公平计时结论**。
+- 计时仅 NumPy-vs-NumPy；exact stencil 明显慢于 NumPy CSR（small ~10.8×、large ~15.8× migration），
+  **不构成 natal Rust CSR 的公平计时结论**。
 - 渲染修复后已用完全相同配置重跑 exact demo；`summary.json`/C2ST 数值不变，仅 HTML 热图几何改变。
 
 ### 42.4 请 evaluator 核对

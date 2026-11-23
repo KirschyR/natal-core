@@ -2665,6 +2665,9 @@ reproduction→survival→aging（`rust/src/kernels/age_structured.rs:1087-1088`
   - `results/stencil_demo/{small,large}/`（`summary.json`、`series.npz`、`selected_demes.png`、可选 `c2st.png`）
   - `results/html/compare_stencil_demo_{small,large}.html`
 - 更新 `DirectStencilMigrationPlan.md` 的状态与 §9 里程碑/产物。
+- 修复 `compare_strategies_v3.py` 的 `_hex_geometry`：轴向坐标中心改为
+  `(sqrt(3)*size*(i + j/2), 1.5*size*j)`，相邻六边形现在边相接而不是重叠；
+  `series.npz` 额外保存 `*_field_mean5`，便于以后只重渲染、不重跑模拟。
 
 ### 42.2 行为与原因
 
@@ -2713,6 +2716,7 @@ python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py --conf
 - C2ST 噪声说明：此前 R=10（5 vs 5 self-split）出现过 stencil AUC=0.28；在同样 5 vs 5、5 折×5 次的
   纯噪声 Monte Carlo 中，AUC 零分布 SD≈0.26，P(AUC≤0.28)≈22%，因此该值没有统计意义。
 - 计时仅 NumPy-vs-NumPy；exact stencil 明显慢于 NumPy CSR，**不构成 natal Rust CSR 的公平计时结论**。
+- 渲染修复后已用完全相同配置重跑 exact demo；`summary.json`/C2ST 数值不变，仅 HTML 热图几何改变。
 
 ### 42.4 请 evaluator 核对
 
@@ -2732,4 +2736,6 @@ python hexagon_spatial_test/chasing_model/scripts/compare_stencil_demo.py --conf
 - exact stencil 在 NumPy 下明显慢于 CSR（small ~10×、large ~15× 迁移时间）；这是纯 Python/NumPy 实现的常数，
   不代表未来 Rust/GPU 的相对性能。
 - 模板压缩全阶梯、内存账本、Rust 公平计时、GPU 原型、chasing S1/S2、产品化均未做。
+- 既有 v3/其他复用 `_hex_geometry` 的 HTML 未自动重渲染；只更新了本任务的
+  `compare_stencil_demo_*.html`。若需要旧 HTML 一致，需重跑对应脚本。
 - 未运行产品全量门禁（未触产品代码）；未 commit/push。

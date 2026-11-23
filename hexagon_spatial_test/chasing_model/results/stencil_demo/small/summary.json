@@ -97,17 +97,17 @@
   },
   "timing": {
     "cpu": {
-      "wall_seconds": 9.949192331172526,
-      "per_replicate_seconds": 0.33163974437241756,
-      "migration_seconds": 72.99954782426357,
+      "wall_seconds": 9.871442899107933,
+      "per_replicate_seconds": 0.3290480966369311,
+      "migration_seconds": 72.79795579891652,
       "reps": 30,
       "ticks": 100,
       "jobs": 8
     },
     "stencil": {
-      "wall_seconds": 105.71778514795005,
-      "per_replicate_seconds": 3.523926171598335,
-      "migration_seconds": 788.260035853833,
+      "wall_seconds": 105.96924402192235,
+      "per_replicate_seconds": 3.5323081340640785,
+      "migration_seconds": 790.4279743982479,
       "reps": 30,
       "ticks": 100,
       "jobs": 8

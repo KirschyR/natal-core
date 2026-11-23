@@ -374,6 +374,12 @@ def run_config(cfg: dict, jobs: int = 1) -> dict:
             for strategy in STRATEGIES
             for key in ("drive", "non_egg", "juvenile", "coverage", "front", "total")
         },
+        **{
+            f"{strategy}_field_mean5": per_strategy[strategy]["fields"][
+                : min(5, cfg["reps"])
+            ].mean(axis=0)
+            for strategy in STRATEGIES
+        },
     )
     return summary
 

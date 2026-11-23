@@ -564,6 +564,13 @@ def run_replicate(strategy: str, cfg: dict, seed: int, selected, tensor, csr, ke
 
 
 def _hex_geometry(rows: int, cols: int, size: float = 1.0):
+    """Return pointy-top hex vertices and bounds with edge-sharing centers.
+
+    Axial coordinates ``(i, j)`` map to centers
+    ``(sqrt(3) * size * (i + j / 2), 1.5 * size * j)``.  The previous spacing
+    left centers too close by a factor ``sqrt(3)``, so the rendered hexagons
+    overlapped instead of meeting along their edges.
+    """
     sqrt3 = np.sqrt(3.0)
     vertices = np.empty((rows * cols, 6, 2))
     angles = np.deg2rad(np.arange(6) * 60.0 + 30.0)
@@ -572,12 +579,14 @@ def _hex_geometry(rows: int, cols: int, size: float = 1.0):
     k = 0
     for i in range(rows):
         for j in range(cols):
-            cx = size * (i + 0.5 * j)
-            cy = size * (sqrt3 / 2.0) * j
+            cx = size * sqrt3 * (i + 0.5 * j)
+            cy = size * 1.5 * j
             vertices[k, :, 0] = cx + size * np.cos(angles)
             vertices[k, :, 1] = cy + size * np.sin(angles)
-            xmin, xmax = min(xmin, cx - size), max(xmax, cx + size)
-            ymin, ymax = min(ymin, cy - size), max(ymax, cy + size)
+            xmin = min(xmin, cx - 0.5 * sqrt3 * size)
+            xmax = max(xmax, cx + 0.5 * sqrt3 * size)
+            ymin = min(ymin, cy - size)
+            ymax = max(ymax, cy + size)
             k += 1
     return vertices, np.array([xmin, xmax, ymin, ymax])
 
